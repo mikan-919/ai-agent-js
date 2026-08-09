@@ -132,6 +132,71 @@ CLIの位置付け（`har status`等）は要検討（下記「開いている�
 4. **実装の入り口はどこか。** 当初は「`har status`をCLIとして実装可能な仕様まで落とす」が次の一手だったが、`har serve`が中心的インターフェースになったことで、先に着手すべきはWorkContext resolver + `har serve`の閲覧・Agentセッション機能であり、CLIはその薄いラッパーとして後回しにすべきか——この問いは投げたが、まだ回答を得ていない。
 5. **Gate 1のLinear側権限モデルの検証。** Linearが「特定の状態遷移だけを人間限定にする」権限粒度を提供しているかは未調査（現状は「Agentに credential を渡さない」ことで代替的に解決しているため、必須ではないが、確認できればより強い保証になる）。
 
-## 次にやること
+## 次にやること（このセクションは以下の継続セッションで更新された）
 
 次のセッションは、上記の開いている論点のどれかを詰めるところから再開する。特に**論点4（実装の入り口）**は、他の論点より先に決めるべき——ここが決まらないと、次に書くべきコードが定まらない。
+
+---
+
+## 継続セッション（2026-08-09）: grillで確定した内容
+
+前回のハンドオフの「まだ開いている論点」5点を、ユーザーへのインタビュー形式（grill）で一つずつ潰した。結果は以下。上のセクションは前回時点の記録として残し、ここに更新分を追記する。
+
+### 実装スタック（新規確定・前回未記載）
+
+- 言語/ランタイム: **TypeScript + Bun + Hono**
+- 認証情報: resolverはGitHub token / Linear API keyを**環境変数（`.env`）**から読む（v1はこれで十分。複数リポジトリ横断や`har serve`常駐化が必要になったら`~/.har/config`等へ移行）。
+
+### 論点4（実装の入り口）→ 確定
+
+- **WorkContext resolver + `har serve`を先に作る。CLIは後回し**という方針で確定。
+- resolverは**4ソース（Git / GitHub / Linear / workspace docs）を最初から統合**する（1〜2ソースずつ段階的に、ではなく最初からフル）。
+- resolverは sandbox（下記）の概念に依存しない。**作業ディレクトリのpathを引数として受け取るだけ**の関数として実装し、疎結合を保つ。
+- Claude Agent SDKの組み込みは**後回し**。最初のマイルストーンはSDK無しで「WorkContextが正しく組み立てられるか」を検証すること。
+- `har serve`（Honoサーバ）の最初の可観測な挙動は、**WorkContext JSONを返すAPIエンドポイントのみ**（UIは無し）。エンドポイントは**起動時cwdの現在branch固定**（v1ではrepo/branchをリクエストごとに切り替える機能は無し）。
+
+### 新規スコープ: サンドボックス（前回HANDOFF未記載だった要素）
+
+`har`はAgentの実行環境として**サンドボックス**（git worktree または Docker、セッション単位で選択可能）を備える設計であることが今回判明した。
+
+- 粒度: **1 branch(=1作業) = 1サンドボックス**。`resume`時も同じサンドボックスを再利用する（`start → resume → finish`を通じて同一の実行環境が保たれる）。
+- worktree/dockerの選択は**セッション（work item）単位**で設定できる。
+- **ロックマネージャ（`refs/harness-locks/<branch>`）とサンドボックス作成は一体化**する: サンドボックス作成時にロックを取得する。「作業占有権」と「実行環境」が同じ実体になる。
+- このサンドボックス機構自体は**v1のresolver実装のスコープ外**（resolverはpathを受け取るだけなので、sandboxがworktreeを掘ろうがdockerを立てようが関知しない）。具体的な作成・切り替えI/Fは次回以降に持ち越し。
+
+### 論点1（ROADMAP.md drift検出）→ v1スコープ確定
+
+v1では**branch HEADとmain HEADの単純diffのみ**を実装する。merge-base基準での3点区別（前回ハンドオフの本来の方針）は後回し。
+
+### 論点2（diffを生で渡すか要約するか）→ v1の範囲だけ確定
+
+v1のWorkContextでは、diffは**ファイル一覧+統計（+N/-M）のみ**を含み、**本文（生diffテキスト）は含めない**。意味的要約（LLM呼び出しを伴う）はAgent SDK統合後にあらためて検討する。論点自体は完全解決ではなく、v1スコープを切っただけ。
+
+### 論点3（WorkContextの最終形）→ v1のトップレベル構造を確定
+
+**ソースごとに構造化されたJSON**（`git` / `github` / `linear` / `docs` などのキーを持つオブジェクト）とする。単一markdown文字列への統合は不採用。フィールドレベルの詳細スキーマ（各キーの中身）は未確定——実装しながら詰める（プロトタイピング）。
+
+### 論点5（Linear側のGate1権限モデル）→ 調査完了
+
+Linear API/権限モデルを調査した結果:
+
+- Linearには特定のワークフロー状態遷移（例: Triage→Todo）だけを人間限定にする権限粒度は**存在しない**。ロール（Workspace Owner / Admin / Team Owner / Member / Guest）はワークスペース/チーム単位の粗い粒度で、チームレベルでは「誰がworkflow statusesを管理できるか」等のカテゴリ単位の制御はあるが、個別の状態遷移を制限する機能はない。
+- OAuth scopeも`read`/`write`/`admin`に加え`issues:create`のようなリソース単位の粒度はあるが、「stateフィールドの変更だけを禁止する」ようなフィールド単位のscopeは存在しない。
+- **結論:** 「Agentに credential を一切渡さない」という既存方針が、Gate 1を技術的に担保する**唯一の**手段であることが確定した（Linear側に代替の技術的防御手段は無い）。
+
+参考: [Members and roles – Linear Docs](https://linear.app/docs/members-roles), [OAuth 2.0 authentication – Linear Developers](https://linear.app/developers/oauth-2-0-authentication)
+
+## 次のセッションへの申し送り（更新版）
+
+実装の入り口が確定したので、次のセッションは**コードを書き始めてよい**。最初のPRの具体的スコープ:
+
+1. TypeScript + Bunプロジェクトの初期化（Hono導入）
+2. WorkContext resolver: `resolveWorkContext(repoPath: string): Promise<WorkContext>` のような、pathのみを引数に取る関数。Git（現在branch、branch HEAD vs main HEADの単純diff統計）・GitHub（Issue/PR、`.env`のtoken）・Linear（issue、`.env`のkey）・workspace docs（CONCEPT.md/ROADMAP.mdの内容）の4ソースを読み、ソース別キーを持つJSONを組み立てる。
+3. `har serve`: Honoサーバに、起動時cwdの現在branchに対する`resolveWorkContext`の結果をJSONで返す単一エンドポイントを実装する。
+
+まだ決まっていない/次回以降に持ち越す論点:
+
+- WorkContextの各ソースキーの詳細フィールドスキーマ（実装しながら決める）
+- サンドボックス（worktree/docker）の具体的な作成・切り替えI/F、およびそれとlock managerの一体化実装
+- diffの意味的要約ロジック（Agent SDK統合後）
+- Claude Agent SDKの組み込み方法そのもの
