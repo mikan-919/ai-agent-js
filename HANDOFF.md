@@ -229,3 +229,24 @@ Linear API/権限モデルを調査した結果:
 - 上記の「まだ決まっていない/次回以降に持ち越す論点」は未着手のまま。
 - 今回のPRはWorkContext resolverと`har serve`の最小実装であり、CLI（`har status`等）・サンドボックス（worktree/docker）・lock manager・Claude Agent SDK統合はまだ何も実装していない。次はこのうちどれから着手するかを決めるところから再開する。
 - `resolveGithubContext` / `resolveLinearContext` は実リポジトリ（Issue/PRやLinear issueが実在するもの）でまだ検証できていない。次回、実際にLinear issue識別子を含むbranch名やGitHub PRが存在する環境で一度実地確認するとよい。
+
+---
+
+## 継続セッション（2026-08-09 その2）: PRの作成主体をGitHub Appにする方針決定
+
+前セッションでPR #3を作成した際、PRの作者（GitHub上の`user`）が人間（`mikan-919`）自身になっていることが判明した。今のAgent実行環境（Claude Codeのセッション）は、人間個人アカウントに紐づいたGitHub連携をそのまま使ってPRを作っているため。これは2ゲートモデルが意図する「Agentが提案し、人間が承認する」という区別を、GitHubの操作履歴上は可視化できていない、という状態を意味する。
+
+### 決定事項
+
+- `har`がGitHub上でPR作成・push・コメントを行う際の名義は、**専用のGitHub App**にする。人間個人アカウントの流用や、素のPAT（personal access token）によるmachine userは採用しない。
+- これは既存方針（「Agent実行環境にはcredentialを一切渡さない。外部サービスへの唯一の経路はhar」）の具体化: `har`が保持するGitHub credentialの実体を、個人PATではなくGitHub App（installation access token）にする、という決定。
+- 狙い:
+  - PR/commit/コメントの作成者が`<AppName>[bot]`として表示され、人間の操作と明確に区別できる。2ゲートモデルの「Agent提案 / 人間承認」がGitHub上の履歴としても可視化される。
+  - 権限を pull request 作成・contents write 程度に最小化できる（個人アカウントの全権限を使い回さずに済む）。
+  - 将来複数リポジトリに展開する際も、App installを増やすだけで対応できる。
+
+### 未着手（次回以降に持ち越し）
+
+- GitHub App自体の登録（App作成・permission設定・private key発行・対象repoへのinstall）は人間側の手動操作が必要で、今回は未実施。
+- App登録後、`har`側に JWT署名 → installation access token取得 のフローを組み込む必要がある。現状の`resolveGithubContext`（`src/context/github.ts`）はread-onlyで`GITHUB_TOKEN`を読むだけの実装であり、write/PR作成の経路自体がまだ存在しない。
+- Appのprivate key・App IDなどのcredentialをどこに保存するか（`.env`のままか、専用の設定ファイルか）は未確定。
