@@ -229,3 +229,34 @@ Linear API/権限モデルを調査した結果:
 - 上記の「まだ決まっていない/次回以降に持ち越す論点」は未着手のまま。
 - 今回のPRはWorkContext resolverと`har serve`の最小実装であり、CLI（`har status`等）・サンドボックス（worktree/docker）・lock manager・Claude Agent SDK統合はまだ何も実装していない。次はこのうちどれから着手するかを決めるところから再開する。
 - `resolveGithubContext` / `resolveLinearContext` は実リポジトリ（Issue/PRやLinear issueが実在するもの）でまだ検証できていない。次回、実際にLinear issue識別子を含むbranch名やGitHub PRが存在する環境で一度実地確認するとよい。
+
+---
+
+## 実装セッション（2026-08-09 続き）: ロックマネージャ
+
+「まだ決まっていない論点」（CLI / サンドボックス / ロックマネージャ / Claude Agent SDK統合のどこから着手するか）をユーザーに確認し、**ロックマネージャ**から着手する方針で確定した。理由: 他の要素への依存が最も少なく単体でテスト可能、かつ次に着手するサンドボックス機構が依存する土台になるため。
+
+### 実装内容
+
+- **`src/lock/`**: `refs/harness-locks/<branch>` を排他ロックの実体として使う実装。
+  - `manager.ts`: `acquireLock` / `releaseLock` / `getLockStatus` の3関数。
+    - ロック実体は「マーカーcommit」を指すref。マーカーcommitは既存のbranch HEADのtreeを流用し、parentsは空（branch履歴には参加しない、ロック用途だけの孤立commit）。commitのcommitter dateを**取得時刻の正とする**（メッセージ内のJSONではなく、GitHubから読み戻した値を信頼する）。メッセージにはholder/noteをJSONで埋め込む。
+    - `acquireLock`: まずref作成を試みる（atomicなcreate、既に存在すれば422で失敗）。失敗したら既存ロックを読み、TTL（デフォルト1時間、`DEFAULT_TTL_MS`）以内なら`ok: false`＋`heldBy`を返す。TTL超過なら既存refを削除して再度create-refを試みる（＝steal）。この再create自体もatomicなので、複数エージェントが同時にstealを試みても勝者は1人に定まる（HANDOFFの既定方針通り）。
+    - `releaseLock`: refをDELETEするだけ。ロックが無ければ`ok: false`。
+    - `getLockStatus`: 読み取り専用、TTL超過しているかどうかの`expired`フラグ付きで返す。
+  - `src/context/github.ts`の`getOwnerRepo`/`OwnerRepo`をexportし、lock managerからも再利用できるようにした（owner/repo解決ロジックを複製しない）。
+  - ロックキーは方針通りbranch名（`refs/harness-locks/<branch>`）。PR番号は使っていない。
+  - holder識別子・note文字列の構築方法（誰が呼ぶか、何を書き込むか）はこのモジュールの関知するところではなく、呼び出し側（将来のCLIやサンドボックス機構）に委ねる設計にした。
+
+### 検証
+
+- **実リポジトリでのライブ検証は不可能だった**: このサンドボックス環境の`GITHUB_TOKEN`は`api.github.com`への直接REST呼び出しに対して`403 GitHub access is not enabled for this session`を返す（Claude Code側のゲーティングであり、GitHub側やコードの問題ではない）。実際のデプロイ先（ユーザー自身のマシンで`.env`に本物のPATを設定した状態）では発生しない制約だが、このセッションでは確認できなかった。
+- 代わりに、`fetch`をモックしたユニットテスト（`src/lock/manager.test.ts`、`bun:test`）でGitHubのref/commit APIの挙動（ref作成のcreate-if-not-exists、404、422等）を模したフェイクサーバーを実装し、以下を検証した: 空lockの取得、取得中のstatus確認、TTL内での競合拒否、release後の再取得、release対象なしでのrelease失敗、TTL超過時のsteal成功、**複数エージェントによる同時steal競争が厳密に1勝者へ収束すること**（`Promise.all`で2つの`acquireLock`を同時発火し検証）。全8ケースがpass。
+- `bunx tsc --noEmit`も通ることを確認。`package.json`に`test`スクリプト（`bun test`）を追加した。
+- `resolveGithubContext` / `resolveLinearContext`と同様、実GitHub API相手の実地検証は次回以降の持ち越し。ユーザー自身の環境（本物のPATが使える場所）で一度確認してもらうのが妥当。
+
+### 次のセッションへの申し送り
+
+- 未着手: CLI（`har status`等）、サンドボックス（worktree/docker、ロックマネージャとの一体化——サンドボックス作成時にロックを取得する設計）、Claude Agent SDK統合。
+- サンドボックスに着手する場合、「サンドボックス作成 = ロック取得」という一体化をどう実装するか（`acquireLock`をサンドボックス作成関数の中で呼ぶだけで足りるはずだが、holder識別子をどう決めるか——ホスト名+PID、UUID、人間が指定する名前、等——は未決定）が最初の論点になる。
+- ロック機構自体を実GitHub APIで検証する機会があれば、`acquireLock`/`releaseLock`/`getLockStatus`を一通り試すとよい（マーカーcommitがGitHub UI上でどう見えるか、孤立commitがリポジトリサイズにどう影響するか、なども確認できるとなお良い）。
