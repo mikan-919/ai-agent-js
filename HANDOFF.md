@@ -200,3 +200,32 @@ Linear API/権限モデルを調査した結果:
 - サンドボックス（worktree/docker）の具体的な作成・切り替えI/F、およびそれとlock managerの一体化実装
 - diffの意味的要約ロジック（Agent SDK統合後）
 - Claude Agent SDKの組み込み方法そのもの
+
+---
+
+## 実装セッション（2026-08-09）: 最初のPRとしてコード化
+
+前回ハンドオフの「次のセッションへの申し送り」に従い、スコープ1〜3を実装した。
+
+### 実装内容
+
+- **プロジェクト初期化**: TypeScript + Bun + Hono。`package.json` / `tsconfig.json` / `.gitignore` は `bun init` の出力内容を踏襲しつつ手動作成した（このサンドボックス環境では `bun init` が意図せず `init/` という名前のサブディレクトリを作ってしまう既知の問題を踏んだため、回避した）。
+- **`src/context/types.ts`**: `WorkContext` のトップレベル型。`git` は常に解決される必須ソース、`github` / `linear` は `SourceResult<T> = { ok: true; data: T } | { ok: false; reason: string }` で表現し、credential未設定や該当データなしを例外ではなく値として返す。
+- **`src/context/git.ts`**: 現在branch、main/masterの自動検出（ローカル→origin remote-trackingの順にfallback）、`git diff --numstat <mainBranch> HEAD`（merge-base不使用、方針通りの単純diff）をパースしてファイル一覧+統計を返す。
+- **`src/context/github.ts`**: `git remote get-url origin` からowner/repoを推定。REST `GET /repos/{owner}/{repo}/pulls?head=...` で現在branchのPRを検索し、見つかればGraphQLの `closingIssuesReferences` でリンクされたIssueを取得。トークン未設定・API失敗はすべて `{ ok: false, reason }` に落とす。
+- **`src/context/linear.ts`**: Linear GraphQLの `issueVcsBranchSearch(branchName)` を利用（branch名からissueを引く、Linear自身が用意している専用クエリ）。これによりHarness独自のbranch⇄issue対応規約を発明せずに済んでいる。
+- **`src/context/docs.ts`**: 作業ツリーの `CONCEPT.md` / `ROADMAP.md` を存在すれば読む（無ければ `null`）。
+- **`src/context/index.ts`**: `resolveWorkContext(repoPath: string): Promise<WorkContext>` が4ソースを束ねる。sandbox概念に依存せず、pathのみを受け取る設計を維持。
+- **`src/serve.ts` / `src/index.ts`**: `har serve` コマンド。起動時cwdをrepoPathとして固定し、`GET /work-context` エンドポイントがリクエストの度に `resolveWorkContext` を再実行してJSONを返す（UIなし、repo/branch切り替えなし、の方針通り）。
+- **`.env.example`**: `GITHUB_TOKEN` / `LINEAR_API_KEY` を追記。
+
+### 動作確認
+
+- `bunx tsc --noEmit` が通ることを確認。
+- ローカルで `bun run src/index.ts serve` を起動し、`curl localhost:4319/work-context` で疎通確認。このリポジトリ自体にはGitHub Issue/Linear issueが紐付いていないため、`github` / `linear` は `{ ok: false, reason: ... }` に落ちることを確認済み（credential未設定時の分岐、およびAPI呼び出し失敗時の分岐の両方を確認した）。`git` / `docs` は期待通りの値を返した。
+
+### 次のセッションへの申し送り
+
+- 上記の「まだ決まっていない/次回以降に持ち越す論点」は未着手のまま。
+- 今回のPRはWorkContext resolverと`har serve`の最小実装であり、CLI（`har status`等）・サンドボックス（worktree/docker）・lock manager・Claude Agent SDK統合はまだ何も実装していない。次はこのうちどれから着手するかを決めるところから再開する。
+- `resolveGithubContext` / `resolveLinearContext` は実リポジトリ（Issue/PRやLinear issueが実在するもの）でまだ検証できていない。次回、実際にLinear issue識別子を含むbranch名やGitHub PRが存在する環境で一度実地確認するとよい。

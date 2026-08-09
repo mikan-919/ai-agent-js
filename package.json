@@ -1,0 +1,21 @@
+{
+  "name": "har",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "har": "src/index.ts"
+  },
+  "scripts": {
+    "serve": "bun run src/index.ts serve"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
