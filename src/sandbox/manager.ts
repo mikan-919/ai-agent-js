@@ -1,5 +1,6 @@
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { defaultTranscriptsBaseDir, deleteTranscript, transcriptPath } from "../agent/transcript";
 import { getOwnerRepo } from "../context/github";
 import { containerName, DEFAULT_DOCKER_IMAGE, destroyDockerSandbox, ensureDockerSandbox } from "./docker";
 import { acquireLock, getLockStatus, releaseLock } from "../lock";
@@ -134,6 +135,10 @@ export async function destroySandbox(opts: DestroySandboxOptions): Promise<Destr
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+
+  // Best-effort: the transcript is disposable cached state, not something
+  // worth failing an otherwise-successful destroy over.
+  await deleteTranscript(transcriptPath(defaultTranscriptsBaseDir(), owner, repo, opts.branch)).catch(() => {});
 
   return await releaseLock({ owner, repo, branch: opts.branch, token: opts.token });
 }

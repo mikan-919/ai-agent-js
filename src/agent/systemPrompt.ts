@@ -66,6 +66,10 @@ function renderDoc(name: string, content: string | null): string {
   return content ? `### ${name}\n\n${content}` : `### ${name}\n\n(not found)`;
 }
 
+function renderPreviousSession(summary: string): string {
+  return ["## Previous session in this sandbox", summary].join("\n\n");
+}
+
 function renderDocs(docs: WorkContext["docs"]): string {
   const lines = ["## Workspace docs"];
   if (docs.driftedAgainstMain.length > 0) {
@@ -84,8 +88,21 @@ function renderDocs(docs: WorkContext["docs"]): string {
   return lines.join("\n\n");
 }
 
-export function buildSystemPrompt(ctx: WorkContext): string {
-  return [HARNESS_PREAMBLE, renderGit(ctx.git), renderGithub(ctx.github), renderLinear(ctx.linear), renderDocs(ctx.docs)].join(
-    "\n\n",
-  );
+export interface BuildSystemPromptOptions {
+  /**
+   * Compressed checkpoint from this sandbox's previous agent run, when
+   * resuming one that has it. Not part of WorkContext: unlike git/github/
+   * linear/docs, it isn't reconstructed from an external source of truth —
+   * it's a summary nook itself generated of the agent's own prior transcript.
+   */
+  previousSessionSummary?: string | null;
+}
+
+export function buildSystemPrompt(ctx: WorkContext, options: BuildSystemPromptOptions = {}): string {
+  const sections = [HARNESS_PREAMBLE];
+  if (options.previousSessionSummary) {
+    sections.push(renderPreviousSession(options.previousSessionSummary));
+  }
+  sections.push(renderGit(ctx.git), renderGithub(ctx.github), renderLinear(ctx.linear), renderDocs(ctx.docs));
+  return sections.join("\n\n");
 }

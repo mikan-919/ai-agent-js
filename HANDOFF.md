@@ -4,6 +4,5 @@
 
 ## 次のセッションへの申し送り
 
-- 今回のセッション環境でも実地検証系タスクは前進不可だった: `ANTHROPIC_API_KEY`未設定、`GITHUB_TOKEN`は直叩きに403、Dockerデーモン未起動。この制約はセッション環境依存で消えないので、次回も同じ状況なら実地検証はスキップし、ユーザー自身の環境で検証してもらう前提で別のコード設計タスクを拾うこと。
-- `POST /agent/run`のタイムアウト/エラーハンドリング（ROADMAP旧・未解決の論点5）をユーザーとgrillingの上で設計・実装した。方式はアイドルタイムアウト（agentイベントが一定時間出ない＝ハング判定）＋branch lockのハートビート更新（agentイベントをトリガに、TTLの1/4間隔でスロットルしつつlockのacquiredAtを更新）。詳細はROADMAP.md「全体アーキテクチャの方向性」を参照。lock managerに`renewLock`を追加、`src/agent/run.ts`にタイマー/ハートビートを実装済み（テストは`src/lock/manager.test.ts`に追加、`runAgent`自体のe2eテストは既存方針どおり未整備）。
-- sandbox resume時のagent会話transcript引き継ぎ（ROADMAP「次の優先順位」2番目）は、grillingの結果「優先順位1番目（Agent SDK統合の実地検証）が終わってから決める」ことでユーザーと合意し、意図的に保留中。実地検証ができる環境に移ったら、まずそちらを先に片付けてから着手すること。
+- 今回のセッション環境でも実地検証系タスクは前進不可だった: `ANTHROPIC_API_KEY`未設定、`GITHUB_TOKEN`は直叩きに403、Dockerデーモン未起動（`docker`コマンド自体はあるがデーモン未接続）。この制約はセッション環境依存で消えないので、次回も同じ状況なら実地検証はスキップし、ユーザー自身の環境で検証してもらう前提で別のコード設計タスクを拾うこと。
+- sandbox resume時のagent会話transcript引き継ぎ（ROADMAP旧・次の優先順位2番目）をgrillingの上で設計・実装し、ROADMAP.md「全体アーキテクチャの方向性」に反映済み。実装は`src/agent/transcript.ts`（保存/読込/削除、pi-agent-coreの`generateSummary`を使った要約）＋`src/agent/run.ts`（resume時の要約注入、実行後の保存）＋`src/sandbox/manager.ts`（destroy時の削除）。**未検証**: `ANTHROPIC_API_KEY`が無いため、実際の要約LLM呼び出し（`summarizePreviousSession`）自体は動かしていない。単体テストは`compressForSummary`（機械的圧縮部分）と保存/読込/削除のround-tripのみ（`src/agent/transcript.test.ts`）。実地検証ができる環境に移ったら、優先順位1番目（Agent SDK統合そのものの実地検証）と合わせてここも確認すること。

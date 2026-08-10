@@ -7,6 +7,7 @@ import { resolveModel } from "./model";
 import { createPullRequestTool } from "./pullRequest";
 import { createSandboxTools } from "./sandboxTools";
 import { buildSystemPrompt } from "./systemPrompt";
+import { defaultTranscriptsBaseDir, loadTranscript, saveTranscript, summarizePreviousSession, transcriptPath } from "./transcript";
 import type { PullRequestOutcome, RunAgentOptions, RunAgentResult } from "./types";
 
 /**
@@ -59,7 +60,6 @@ export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult
   }
 
   const workContext = await resolveWorkContext(sandbox.path);
-  const systemPrompt = buildSystemPrompt(workContext);
 
   let model: ReturnType<typeof resolveModel>["model"];
   let models: ReturnType<typeof resolveModel>["models"];
@@ -68,6 +68,19 @@ export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+
+  const transcriptFile = transcriptPath(defaultTranscriptsBaseDir(), ownerRepo.owner, ownerRepo.repo, options.branch);
+  let previousSessionSummary: string | null = null;
+  if (sandbox.resumed) {
+    const previousMessages = await loadTranscript(transcriptFile);
+    if (previousMessages) {
+      // Best-effort: a summarization failure just means this resume proceeds
+      // without prior-session context rather than failing the whole run.
+      previousSessionSummary = await summarizePreviousSession(models, model, previousMessages).catch(() => null);
+    }
+  }
+
+  const systemPrompt = buildSystemPrompt(workContext, { previousSessionSummary });
 
   let pullRequest: PullRequestOutcome | null = null;
 
@@ -133,16 +146,23 @@ export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult
     timedOut: true,
   });
 
+  // Whatever the agent produced (even a partial, timed-out, or failed run) is
+  // worth keeping for the next resume of this sandbox — best-effort so a
+  // storage failure here doesn't turn a real result into an error.
+  const persistTranscript = () => saveTranscript(transcriptFile, agent.state.messages).catch(() => {});
+
   try {
     await agent.prompt(options.prompt);
   } catch (error) {
     clearTimeout(idleTimer);
     unsubscribe();
+    await persistTranscript();
     if (timedOut) return timeoutResult();
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   clearTimeout(idleTimer);
   unsubscribe();
+  await persistTranscript();
 
   if (timedOut) return timeoutResult();
 
