@@ -2,18 +2,18 @@
 
 このドキュメントは直近セッションの「次への申し送り」だけを持つ。確定した思想・原則はCONCEPT.md、方向性・優先順位・未解決論点はROADMAP.md、実装済み/未実装/やらないことのスコープはFEATURE.mdを参照。過去の実装ログの詳細はgit commit履歴を参照（原則1: 状態は外部に置く）。
 
-## 直近セッション（2026-08-10）: サンドボックス（git worktreeバックエンド）実装
+## 直近セッション（2026-08-10）: サンドボックス（Dockerバックエンド）実装
 
-ROADMAP.mdの優先順位1番目、サンドボックスに着手した。`src/sandbox/`を新設し、`createSandbox` / `destroySandbox`を実装した。
+サンドボックスにDockerバックエンドを追加した。`createSandbox` / `destroySandbox`は`backend: "worktree" | "docker"`で選択可能（デフォルトは`worktree`）。lock取得/解放のロジックはbackendに依らず共通化し、`src/sandbox/worktree.ts`（既存ロジックを分離）と`src/sandbox/docker.ts`（新規）にbackend別の実体を持たせた。
 
-- `createSandbox`は、branch用のgit worktree作成とlock managerの`acquireLock`を一体の操作として扱う。ロック無しのサンドボックスは安全でないため。
-- 「サンドボックス作成 = ロック取得」の未解決だった実装I/F（旧ROADMAP未解決論点5）を決めた: holder識別子はデフォルト`hostname:pid`（呼び出し側で上書き可）。`acquireLock`自体には「同じholderによる再取得」という概念が無いため、resume判定（同じholderが有効なlockを既に持っているか）は`createSandbox`側の責務にした。resumeの場合は既存worktreeをそのまま再利用する。
-- worktreeの配置先は`~/.nook/sandboxes/<owner>-<repo>/<branch>`（デフォルト、`baseDir`で上書き可）。
-- `nook serve`に`POST /sandbox` / `DELETE /sandbox/:branch`を追加し、HTTP経由で呼べるようにした。
+- Dockerバックエンドは、ホストのrepoPathをコンテナ内の同一絶対パスへbind mountし、`docker exec`経由で`git worktree add`をコンテナ内で実行する方式。worktreeのメタデータ（`.git/worktrees/<name>`）はホスト側repoに書き込まれるが、実際の作業ファイルはコンテナのdisk layerにしか存在しない。
+- 「resumed」判定はworktreeバックエンドと違い、コンテナの存在有無（running/stopped/absent）で行う。stoppedなら`docker start`で再利用、absentなら新規作成+`worktree add`。
+- destroy時は`docker rm -f`の後に`git worktree prune`でホスト側のメタデータを掃除する（`worktree remove`はコンテナ削除後にパスをstatできず使えないため）。
+- destroyは`force`無しだとコンテナ内`git status --porcelain`で未コミット変更を検知し拒否する（worktreeバックエンドの安全性と揃えた）。
+- コンテナ起動時に`--entrypoint tail`で上書きしている。あらゆるimageを「execで触るだけの受け皿」として使うための決定で、image本来のentrypointに依存しない。
 
-Dockerバックエンドは未着手。ROADMAP.mdの「次の優先順位」1番目を「サンドボックス: Dockerバックエンド」に更新した。
+## 次のセッションへの申し送り
 
-### 次のセッションへの申し送り
-
-- Dockerバックエンドの実装に進むか、優先順位を入れ替えてCLIへ進むか、セッション開始時に判断する。
-- ROADMAP.mdの未解決論点5（実GitHub API相手の実地検証）はまだ未検証のまま。
+- ROADMAP.mdの優先順位を更新済み（次は「CLI」→「Agent SDK統合」）。
+- ROADMAP.md未解決論点5（`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証）は依然未検証。
+- Dockerバックエンドのデフォルトimageは`oven/bun:1`（未検証 — テストではgit入り軽量imageの`alpine/git`を使って動作確認したのみ）。実運用でこのimageがエージェント実行に足りるかは要確認。

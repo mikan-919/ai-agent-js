@@ -18,9 +18,8 @@
 
 ## 次の優先順位
 
-1. **サンドボックス: Dockerバックエンド**（git worktreeバックエンドの次段。1 branch = 1 sandboxをDocker上でも選択できるようにする）
-2. CLI（`nook status`等）
-3. Agent SDK統合
+1. CLI（`nook status`等）
+2. Agent SDK統合
 
 ## 未解決の論点
 
