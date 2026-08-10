@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WorkContext } from "../context";
-import { formatWorkContext } from "./format";
+import { formatCreateSandboxResult, formatDestroySandboxResult, formatWorkContext } from "./format";
 
 function baseContext(overrides: Partial<WorkContext> = {}): WorkContext {
   return {
@@ -101,5 +101,56 @@ describe("formatWorkContext", () => {
     const output = formatWorkContext(baseContext({ docs: { concept: `# T\n\n${longLine}`, roadmap: null } }));
     expect(output).toContain(`${"x".repeat(160)}…`);
     expect(output).not.toContain(longLine);
+  });
+});
+
+describe("formatCreateSandboxResult", () => {
+  test("formats a newly created sandbox", () => {
+    const output = formatCreateSandboxResult({
+      ok: true,
+      sandbox: {
+        branch: "feature/x",
+        backend: "worktree",
+        path: "/home/user/.nook/sandboxes/acme-demo/feature-x",
+        holder: "host:123",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        resumed: false,
+      },
+    });
+    expect(output).toBe(
+      "sandbox created: feature/x [worktree] -> /home/user/.nook/sandboxes/acme-demo/feature-x (holder: host:123)",
+    );
+  });
+
+  test("distinguishes a resumed sandbox", () => {
+    const output = formatCreateSandboxResult({
+      ok: true,
+      sandbox: {
+        branch: "feature/x",
+        backend: "docker",
+        path: "/workspace",
+        holder: "host:123",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        resumed: true,
+      },
+    });
+    expect(output).toContain("sandbox resumed: feature/x [docker]");
+  });
+
+  test("formats an error", () => {
+    const output = formatCreateSandboxResult({ ok: false, error: "branch 'feature/x' is locked by 'other'" });
+    expect(output).toBe("error: branch 'feature/x' is locked by 'other'");
+  });
+});
+
+describe("formatDestroySandboxResult", () => {
+  test("formats success", () => {
+    expect(formatDestroySandboxResult("feature/x", { ok: true })).toBe("sandbox destroyed: feature/x");
+  });
+
+  test("formats an error", () => {
+    expect(formatDestroySandboxResult("feature/x", { ok: false, error: "uncommitted changes" })).toBe(
+      "error: uncommitted changes",
+    );
   });
 });

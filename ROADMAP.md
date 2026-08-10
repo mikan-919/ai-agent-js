@@ -18,8 +18,7 @@
 
 ## 次の優先順位
 
-1. CLI: sandboxライフサイクル（create/destroy）コマンドの追加
-2. Agent SDK統合
+1. Agent SDK統合
 
 ## 未解決の論点
 
