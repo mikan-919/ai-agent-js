@@ -12,6 +12,7 @@
 - **サンドボックス**: 1 branch(=1作業) = 1サンドボックス（git worktree / Docker、セッション単位で選択可）。`resume`時も同じサンドボックスを再利用する。ロックマネージャ（`refs/harness-locks/<branch>`）とサンドボックス作成は一体化し、サンドボックス作成時にロックを取得する。
 - **`POST /agent/run`のタイムアウトはアイドルタイムアウト方式**: 固定の壁時計タイムアウトではなく、「agentが一定時間（デフォルト10分、`NOOK_AGENT_IDLE_TIMEOUT_MS`で上書き可）何のイベントも出さない」ことをハング判定に使う。エージェントが進捗を出し続けている限り実行時間は制限しない。ハング検知時は`Agent.abort()`で中断してエラーを返すのみで、sandbox/lockはそのまま残す（クリーンアップは既存方針どおり別ステップ）。agentのイベント発火は、branch lockのTTL（`refs/harness-locks/<branch>`）を一定間隔（`DEFAULT_TTL_MS`の1/4＝15分ごとにスロットル）で更新するハートビートも兼ねる。これにより、長時間だが生きているrunがTTL切れで他プロセスに横取りされることを防ぐ。
 - **sandbox resume時、直前のagent会話transcriptを圧縮して引き継ぐ**: `runAgent`は実行終了時（成功・失敗・タイムアウトいずれでも）に`agent.state.messages`をホスト側`~/.nook/transcripts/<owner>-<repo>/<branch>.json`へ上書き保存する（sandbox内には置かない — worktree/dockerのバックエンド差、および`destroySandbox`の未コミット変更チェックの誤検知を避けるため。蓄積はせず直近1回分のみ保持）。resume時（`sandbox.resumed`かつ保存済みtranscriptがある場合のみ）、pi-agent-coreの`generateSummary`（要約プロンプト・LLM呼び出しは再利用）に渡す前に、thinking blockの除去とtool呼び出し引数の切り詰めを行う機械的圧縮を一段挟んでから要約し、結果を`buildSystemPrompt`の新セクション（`## Previous session in this sandbox`）としてのみ注入する——`WorkContext`型自体には含めない（Git/GitHub/Linear/docsという「外部一次情報の再構成」という意味と、nook自身が生成する要約は別物であるため）。`destroySandbox`はtranscriptファイルもあわせて削除し、sandboxのライフサイクルと一致させる。CONCEPT.mdの「肥大化したconversation historyには依存しない」という文言は変更していない：この判断ロジック（何を根拠にするか）は常にGit/GitHub/Linear/docsの外部一次情報から再構成し、transcriptは代替にしない。会話transcript自体はそれら4ソースのどこにも存在しない一次情報であり、原則3（情報源の複製禁止）には抵触しないという整理。
+- **web UIが人間向けの主要インターフェース。** 別プロセス/別ポートは持たず、既存の`nook serve`（Hono app）に統合する——閲覧用の静的フロントエンドとAPIを同じプロセス・同じポートで提供し、「`nook serve`が中心的インターフェース」という方針をCLIだけでなくブラウザにも適用したもの。役割は2つ: (1) branch単位のwork context閲覧（`GET /work-context/:branch` — 既存`createSandbox`でそのbranchのsandboxをcreate/resumeしてから中で`resolveWorkContext`を呼ぶ。閲覧開始とchat開始が同じsandbox/lockライフサイクルを通る）、(2) agentとのchat（`POST /agent/run/stream` — 既存`POST /agent/run`と同じ`runAgent`呼び出しを、SSEで包んで進捗をそのまま転送するだけの薄いラッパー。`runAgent`は`onEvent`コールバックを受け取れるようになり、pi-agent-coreの`AgentEvent`をそのまま外へ流す)。chatの複数ターンは「1メッセージ送信 = 1 `resolveWorkContext` + sandbox resume + transcript要約サイクル」を毎回踏襲し、サーバ側で会話単位に`Agent`インスタンスをメモリ保持する新方式は導入しない（状態は外部に置く、原則1。既存のtranscript保存/要約の仕組みがそのままturn間の引き継ぎを担う）。承認ゲート（PR merge、Linear Triage→Todo）はstate表示とGitHub/Linearへの外部リンクのみで、UIから直接操作する手段は持たない（原則2をUI層でも維持）。認証は既存方針どおりlocalhost bind前提でなし。フロントエンドはReact + Tailwind CSS v4 + shadcn/ui（`components.json`でCLI管理）、Bunネイティブの`Bun.build` + `bun-plugin-tailwind`でビルドし（Vite等の別ビルドツールは導入しない）、成果物`dist/web`を`nook serve`が`hono/bun`の`serveStatic`で配信する。
 
 ## 技術スタック
 
@@ -21,7 +22,8 @@
 
 ## 次の優先順位
 
-1. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証（sandbox resume時のtranscript要約呼び出しも同様に未検証）。
+1. web UI（`nook serve`統合のchat + work context閲覧）。設計判断は確定し実装済み。ただしこのセッション環境では`GITHUB_TOKEN`がGitHub API直叩きに403を返す制約があり（未解決の論点3、以前から既知）、`createSandbox`が絡む経路（`GET /work-context/:branch`・chat開始）の実地検証はモックでのUI確認止まり。ユーザー自身の環境で一度通しで確認するとよい。
+2. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証（sandbox resume時のtranscript要約呼び出しも同様に未検証）。web UIのchatも同じ`runAgent`を使うため、この検証が済めばchatも通しで動くはずという位置づけ。
 
 ## 未解決の論点
 
@@ -29,3 +31,4 @@
 2. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
 3. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
 4. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。このセッション環境ではDockerデーモン自体が起動しておらず検証不可だった。
+5. **`createSandbox`が`CreateSandboxResult`（`{ok:false,error}`）ではなく例外を投げることがある**: `getLockStatus`（`getLockRefSha`等、lock/manager.tsの大半の内部関数）はGitHub APIが404/成功以外を返すとErrorをthrowするが、`createSandbox`のtry/catchはbackend別処理（worktree/docker）のみを覆っており、その手前の`getLockStatus`呼び出しはtry/catch外にある。web UIの`GET /work-context/:branch`実装時に、このセッション環境の`GITHUB_TOKEN` 403（論点3）で実際にサーバプロセスごと落ちる形で発覚し、そのルートだけ個別にtry/catchで塞いだ（`src/serve.ts`）。`POST /sandbox`・`POST /agent/run`・`DELETE /sandbox/:branch`など他の呼び出し元は同じ穴が残ったまま——`createSandbox`/`destroySandbox`自体の契約（「投げずに`{ok:false}`を返す」）をlock/manager.ts側まで一貫させるか、全呼び出し元で個別に囲うかは未決定。次にこの領域を触るときに直す。
