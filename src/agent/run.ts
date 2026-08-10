@@ -121,7 +121,8 @@ export async function runAgent(options: RunAgentOptions): Promise<RunAgentResult
   // counts as proof of life: it pushes back the idle-abort deadline and, at
   // most once per LOCK_RENEW_INTERVAL_MS, refreshes the branch lock so it
   // doesn't age out from under a run that's still making progress.
-  const unsubscribe = agent.subscribe(() => {
+  const unsubscribe = agent.subscribe((event) => {
+    options.onEvent?.(event);
     armIdleTimer();
     const now = Date.now();
     if (now - lastRenewAt >= LOCK_RENEW_INTERVAL_MS) {
