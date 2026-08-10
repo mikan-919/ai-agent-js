@@ -7,7 +7,8 @@
     "har": "src/index.ts"
   },
   "scripts": {
-    "serve": "bun run src/index.ts serve"
+    "serve": "bun run src/index.ts serve",
+    "test": "bun test"
   },
   "dependencies": {
     "hono": "^4.6.14"

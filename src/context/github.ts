@@ -3,12 +3,12 @@ import type { GithubContext, GithubIssueRef, SourceResult } from "./types";
 
 const GITHUB_API = "https://api.github.com";
 
-interface OwnerRepo {
+export interface OwnerRepo {
   owner: string;
   repo: string;
 }
 
-async function getOwnerRepo(repoPath: string): Promise<OwnerRepo | null> {
+export async function getOwnerRepo(repoPath: string): Promise<OwnerRepo | null> {
   let remoteUrl: string;
   try {
     remoteUrl = (await $`git -C ${repoPath} remote get-url origin`.text()).trim();
