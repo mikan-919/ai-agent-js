@@ -18,7 +18,7 @@
 
 ## 次の優先順位
 
-1. **サンドボックス**（worktree/docker、lock managerとの一体化）— 他要素の土台になるため次に着手する。
+1. **サンドボックス: Dockerバックエンド**（git worktreeバックエンドの次段。1 branch = 1 sandboxをDocker上でも選択できるようにする）
 2. CLI（`nook status`等）
 3. Agent SDK統合
 
@@ -28,5 +28,4 @@
 2. **ROADMAP.md/CONCEPT.mdのdrift検出アルゴリズム**: merge-base時点・main HEAD・branch HEADの3点を区別する方針は変わらないが、具体アルゴリズムは未設計（v1はFEATURE.md記載の通り単純diffのみ）。
 3. **Agentへdiffを生で渡すか、Harnessが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定したが、論点自体はAgent SDK統合後に改めて検討する。
 4. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
-5. **サンドボックスの具体的な作成・切り替えI/F**: 「サンドボックス作成 = ロック取得」をどう実装するか（`acquireLock`をサンドボックス作成関数の中で呼ぶだけで足りるはずだが、holder識別子の決め方——ホスト名+PID、UUID、人間指定名等——は未決定）。
-6. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
+5. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
