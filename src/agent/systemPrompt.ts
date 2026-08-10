@@ -67,13 +67,21 @@ function renderDoc(name: string, content: string | null): string {
 }
 
 function renderDocs(docs: WorkContext["docs"]): string {
-  return [
-    "## Workspace docs",
+  const lines = ["## Workspace docs"];
+  if (docs.driftedAgainstMain.length > 0) {
+    lines.push(
+      `⚠️ Drift: ${docs.driftedAgainstMain.join(", ")} differ between this branch and main. ` +
+        "The versions embedded below are this branch's, which may be stale relative to main — " +
+        "check main's copy before treating them as current project policy.",
+    );
+  }
+  lines.push(
     renderDoc("CONCEPT.md", docs.concept),
     renderDoc("ROADMAP.md", docs.roadmap),
     renderDoc("FEATURE.md", docs.feature),
     renderDoc("HANDOFF.md", docs.handoff),
-  ].join("\n\n");
+  );
+  return lines.join("\n\n");
 }
 
 export function buildSystemPrompt(ctx: WorkContext): string {

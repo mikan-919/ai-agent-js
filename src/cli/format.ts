@@ -68,6 +68,9 @@ export function formatWorkContext(ctx: WorkContext): string {
   }
 
   lines.push("", "Docs:");
+  if (ctx.docs.driftedAgainstMain.length > 0) {
+    lines.push(`  drift vs ${ctx.git.mainBranch}: ${ctx.docs.driftedAgainstMain.join(", ")}`);
+  }
   lines.push(`  CONCEPT.md: ${formatDocExcerpt(ctx.docs.concept)}`);
   lines.push(`  ROADMAP.md: ${formatDocExcerpt(ctx.docs.roadmap)}`);
   lines.push(`  FEATURE.md: ${formatDocExcerpt(ctx.docs.feature)}`);

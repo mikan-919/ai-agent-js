@@ -17,7 +17,7 @@ export async function resolveWorkContext(repoPath: string): Promise<WorkContext>
   const [github, linear, docs] = await Promise.all([
     resolveGithubContext(repoPath, git.branch),
     resolveLinearContext(git.branch),
-    resolveDocsContext(repoPath),
+    resolveDocsContext(repoPath, git.diff.files),
   ]);
 
   return { git, github, linear, docs };
