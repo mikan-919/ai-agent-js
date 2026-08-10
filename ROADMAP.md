@@ -11,6 +11,7 @@
 - **GitHub Actionsはagent起動アクターではない。** Agentが`nook serve`内でホストされる以上、GitHub Actions runner上でagentを動かす経路は不要。GitHub Actionsは、リポジトリ自体のtest/build pipeline（`nook status`が結果を読むだけの対象）としての役割のみ。「CI」という語をこの2つの意味で混同しないこと。
 - **サンドボックス**: 1 branch(=1作業) = 1サンドボックス（git worktree / Docker、セッション単位で選択可）。`resume`時も同じサンドボックスを再利用する。ロックマネージャ（`refs/harness-locks/<branch>`）とサンドボックス作成は一体化し、サンドボックス作成時にロックを取得する。
 - **`POST /agent/run`のタイムアウトはアイドルタイムアウト方式**: 固定の壁時計タイムアウトではなく、「agentが一定時間（デフォルト10分、`NOOK_AGENT_IDLE_TIMEOUT_MS`で上書き可）何のイベントも出さない」ことをハング判定に使う。エージェントが進捗を出し続けている限り実行時間は制限しない。ハング検知時は`Agent.abort()`で中断してエラーを返すのみで、sandbox/lockはそのまま残す（クリーンアップは既存方針どおり別ステップ）。agentのイベント発火は、branch lockのTTL（`refs/harness-locks/<branch>`）を一定間隔（`DEFAULT_TTL_MS`の1/4＝15分ごとにスロットル）で更新するハートビートも兼ねる。これにより、長時間だが生きているrunがTTL切れで他プロセスに横取りされることを防ぐ。
+- **sandbox resume時、直前のagent会話transcriptを圧縮して引き継ぐ**: `runAgent`は実行終了時（成功・失敗・タイムアウトいずれでも）に`agent.state.messages`をホスト側`~/.nook/transcripts/<owner>-<repo>/<branch>.json`へ上書き保存する（sandbox内には置かない — worktree/dockerのバックエンド差、および`destroySandbox`の未コミット変更チェックの誤検知を避けるため。蓄積はせず直近1回分のみ保持）。resume時（`sandbox.resumed`かつ保存済みtranscriptがある場合のみ）、pi-agent-coreの`generateSummary`（要約プロンプト・LLM呼び出しは再利用）に渡す前に、thinking blockの除去とtool呼び出し引数の切り詰めを行う機械的圧縮を一段挟んでから要約し、結果を`buildSystemPrompt`の新セクション（`## Previous session in this sandbox`）としてのみ注入する——`WorkContext`型自体には含めない（Git/GitHub/Linear/docsという「外部一次情報の再構成」という意味と、nook自身が生成する要約は別物であるため）。`destroySandbox`はtranscriptファイルもあわせて削除し、sandboxのライフサイクルと一致させる。CONCEPT.mdの「肥大化したconversation historyには依存しない」という文言は変更していない：この判断ロジック（何を根拠にするか）は常にGit/GitHub/Linear/docsの外部一次情報から再構成し、transcriptは代替にしない。会話transcript自体はそれら4ソースのどこにも存在しない一次情報であり、原則3（情報源の複製禁止）には抵触しないという整理。
 
 ## 技術スタック
 
@@ -20,8 +21,7 @@
 
 ## 次の優先順位
 
-1. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証。
-2. sandbox resume時に前回のagent会話transcriptを引き継ぐか、毎回使い捨てのAgentインスタンスにするか（今は後者）。
+1. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証（sandbox resume時のtranscript要約呼び出しも同様に未検証）。
 
 ## 未解決の論点
 
