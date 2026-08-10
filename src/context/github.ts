@@ -44,7 +44,7 @@ async function findPullRequestForBranch(
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "har",
+      "User-Agent": "nook",
     },
   });
   if (!response.ok) {
@@ -89,7 +89,7 @@ async function findLinkedIssues(
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-      "User-Agent": "har",
+      "User-Agent": "nook",
     },
     body: JSON.stringify({ query, variables: { owner, repo, number: pullNumber } }),
   });
