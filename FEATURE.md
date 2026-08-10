@@ -9,7 +9,7 @@ nookが「何を対象にして・何を対象にしないか」というスコ�
 - **lock manager**: `refs/harness-locks/<branch>`によるbranch単位の排他制御。
 - **sandbox**: git worktree / Dockerによる、1 branch = 1 sandboxの実行環境。lock managerと一体化する。
 - **CLI**: `nook serve`の薄いラッパー。
-- **Agent SDK統合**: Claude Agent SDK / Codex SDKいずれかを`nook serve`内にホストする（選定はROADMAP.mdの未解決論点）。
+- **Agent SDK統合**: piの`Agent`（`pi-agent-core`）を`nook serve`内にホストする。`POST /agent/run`が起点——branchのsandboxをcreate/resumeし、そのsandbox内で`resolveWorkContext`を呼んでsystem promptを組み立て（CONCEPT/ROADMAP/FEATURE/HANDOFFの4文書＋git diff＋GitHub/Linear状態）、agentに1つのpromptを渡して完了まで待つ。agentに渡すtoolはv1では最小集合: `read_file`/`write_file`/`edit_file`/`bash`（すべてsandbox rootにスコープ）と`create_pull_request`（push＋PR作成/更新のみを担い、commitはagent自身がbash経由の`git commit`で行う）。`create_pull_request`はnook側でGITHUB_TOKENを使って実行し、token自体はagentに渡さない（CONCEPT.md原則2）。
 
 各要素の優先順位・着手順はROADMAP.mdを参照。
 

@@ -11,7 +11,7 @@ function baseContext(overrides: Partial<WorkContext> = {}): WorkContext {
     },
     github: { ok: false, reason: "GITHUB_TOKEN not set" },
     linear: { ok: false, reason: "LINEAR_API_KEY not set" },
-    docs: { concept: null, roadmap: null },
+    docs: { concept: null, roadmap: null, feature: null, handoff: null },
     ...overrides,
   };
 }
@@ -89,6 +89,8 @@ describe("formatWorkContext", () => {
         docs: {
           concept: "# CONCEPT\n\n## why\n\nThis is the first paragraph explaining things.",
           roadmap: null,
+          feature: null,
+          handoff: null,
         },
       }),
     );
@@ -98,7 +100,9 @@ describe("formatWorkContext", () => {
 
   test("truncates long excerpts", () => {
     const longLine = "x".repeat(200);
-    const output = formatWorkContext(baseContext({ docs: { concept: `# T\n\n${longLine}`, roadmap: null } }));
+    const output = formatWorkContext(
+      baseContext({ docs: { concept: `# T\n\n${longLine}`, roadmap: null, feature: null, handoff: null } }),
+    );
     expect(output).toContain(`${"x".repeat(160)}…`);
     expect(output).not.toContain(longLine);
   });

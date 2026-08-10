@@ -67,6 +67,8 @@ export interface LinearContext {
 export interface DocsContext {
   concept: string | null;
   roadmap: string | null;
+  feature: string | null;
+  handoff: string | null;
 }
 
 export interface WorkContext {

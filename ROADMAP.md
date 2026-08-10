@@ -15,16 +15,18 @@
 
 - 言語/ランタイム: TypeScript + Bun + Hono
 - 認証情報: resolverはGitHub token / Linear API keyを環境変数（`.env`）から読む（v1はこれで十分。複数リポジトリ横断や`nook serve`常駐化が必要になったら`~/.nook/config`等へ移行）
+- **Agent SDK: pi**（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）。provider非依存のtool-callingレイヤー（`Agent`クラス、`pi-agent-core`）を直接使い、`pi-coding-agent`（セッション永続化・拡張機能・TUIを持つインタラクティブCLI向けの上位パッケージ）は使わない——nook自身がsystem promptとtool registryを毎回組み立てるため、そちらの機構は不要かつ原則1（状態は外部に置く）と重複する。LLM自体のprovider/modelは`NOOK_MODEL_PROVIDER`/`NOOK_MODEL_ID`環境変数で切り替え可能（デフォルト: anthropic / claude-sonnet-5）。プロバイダのAPI key（例: `ANTHROPIC_API_KEY`）はpi-ai自身が標準env varから解決し、nookのコードは直接読まない。
 
 ## 次の優先順位
 
-1. Agent SDK統合
+1. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証。
+2. sandbox resume時に前回のagent会話transcriptを引き継ぐか、毎回使い捨てのAgentインスタンスにするか（今は後者）。
 
 ## 未解決の論点
 
-1. **Agent SDK選定**: Claude Agent SDK か Codex SDK か未定。
-2. **ROADMAP.md/CONCEPT.mdのdrift検出アルゴリズム**: merge-base時点・main HEAD・branch HEADの3点を区別する方針は変わらないが、具体アルゴリズムは未設計（v1はFEATURE.md記載の通り単純diffのみ）。
-3. **Agentへdiffを生で渡すか、Harnessが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定したが、論点自体はAgent SDK統合後に改めて検討する。
-4. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
-5. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
-6. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。
+1. **ROADMAP.md/CONCEPT.mdのdrift検出アルゴリズム**: merge-base時点・main HEAD・branch HEADの3点を区別する方針は変わらないが、具体アルゴリズムは未設計（v1はFEATURE.md記載の通り単純diffのみ）。
+2. **Agentへdiffを生で渡すか、Harnessが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定した。
+3. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
+4. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
+5. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。
+6. **`POST /agent/run`のtimeout/エラーハンドリング**: blockingで完了まで待つ設計だが、Hono/Bun.serve側でHTTPタイムアウトが発生した場合の挙動（agent実行自体は継続するのか、sandbox/lockはどうなるか）は未検証。
