@@ -26,12 +26,16 @@ export function createServer(repoPath: string) {
       return c.json({ ok: false, error: "branch is required" }, 400);
     }
 
+    const backend = body.backend === "docker" ? "docker" : undefined;
+
     const result = await createSandbox({
       repoPath,
       branch,
       token,
       holder: typeof body.holder === "string" ? body.holder : undefined,
       note: typeof body.note === "string" ? body.note : undefined,
+      backend,
+      image: typeof body.image === "string" ? body.image : undefined,
     });
     return c.json(result, result.ok ? 200 : 409);
   });
@@ -42,7 +46,8 @@ export function createServer(repoPath: string) {
 
     const branch = c.req.param("branch");
     const force = c.req.query("force") === "true";
-    const result = await destroySandbox({ repoPath, branch, token, force });
+    const backend = c.req.query("backend") === "docker" ? "docker" : undefined;
+    const result = await destroySandbox({ repoPath, branch, token, force, backend });
     return c.json(result, result.ok ? 200 : 409);
   });
 
