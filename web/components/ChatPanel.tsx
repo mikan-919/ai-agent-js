@@ -1,5 +1,5 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import { AlertCircle, Loader2, Send, Wrench } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, MessageSquare, Send, Wrench } from "lucide-react";
 import { useRef, useState } from "react";
 import { streamAgentRun } from "../lib/api";
 import { cn } from "../lib/utils";
@@ -108,48 +108,53 @@ export function ChatPanel({ branch, onRunEnd }: { branch: string; onRunEnd: () =
 
   return (
     <div className="flex h-full flex-col">
-      <ScrollArea className="flex-1 p-4">
-        <div className="flex flex-col gap-3">
+      <ScrollArea className="flex-1">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 px-6 py-5">
           {blocks.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              「{branch}」のsandboxでagentと対話します。指示を送ってください。
-            </p>
+            <div className="flex flex-col items-center gap-2 py-16 text-center text-muted-foreground">
+              <MessageSquare className="size-7 opacity-40" />
+              <p className="max-w-sm text-sm">
+                「<span className="font-mono">{branch}</span>」のsandboxでagentと対話します。指示を送ってください。
+              </p>
+            </div>
           )}
           {blocks.map((block) => (
             <ChatBlockView key={block.id} block={block} />
           ))}
           {running && (
-            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <div className="flex items-center gap-1.5 pl-1 text-sm text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
               実行中…
             </div>
           )}
         </div>
       </ScrollArea>
-      <form
-        className="flex items-end gap-2 border-t border-border p-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void send();
-        }}
-      >
-        <Textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
+      <div className="border-t border-border bg-card/60 px-6 py-4">
+        <form
+          className="mx-auto flex w-full max-w-3xl items-end gap-2 rounded-xl border border-border bg-card p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send();
           }}
-          placeholder="agentへの指示を入力（Enterで送信、Shift+Enterで改行）"
-          disabled={running}
-          className="min-h-12"
-        />
-        <Button type="submit" size="icon" disabled={running || prompt.trim().length === 0}>
-          <Send className="size-4" />
-        </Button>
-      </form>
+        >
+          <Textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            placeholder="agentへの指示を入力（Enterで送信、Shift+Enterで改行）"
+            disabled={running}
+            className="min-h-12 resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+          />
+          <Button type="submit" size="icon" disabled={running || prompt.trim().length === 0}>
+            <Send className="size-4" />
+          </Button>
+        </form>
+      </div>
     </div>
   );
 }
@@ -157,7 +162,7 @@ export function ChatPanel({ branch, onRunEnd }: { branch: string; onRunEnd: () =
 function ChatBlockView({ block }: { block: ChatBlock }) {
   if (block.kind === "user") {
     return (
-      <div className="ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground whitespace-pre-wrap">
+      <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-primary px-3.5 py-2.5 text-sm whitespace-pre-wrap text-primary-foreground shadow-sm">
         {block.text}
       </div>
     );
@@ -165,7 +170,7 @@ function ChatBlockView({ block }: { block: ChatBlock }) {
 
   if (block.kind === "assistant") {
     return (
-      <div className="max-w-[85%] rounded-lg bg-secondary px-3 py-2 text-sm text-secondary-foreground whitespace-pre-wrap">
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-border bg-card px-3.5 py-2.5 text-sm whitespace-pre-wrap text-card-foreground shadow-sm">
         {block.text || <span className="text-muted-foreground">…</span>}
       </div>
     );
@@ -173,16 +178,20 @@ function ChatBlockView({ block }: { block: ChatBlock }) {
 
   if (block.kind === "tool") {
     return (
-      <div className="flex max-w-[85%] items-center gap-1.5 rounded-md border border-border bg-muted px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
+      <div className="flex max-w-[85%] items-center gap-1.5 rounded-full border border-border bg-muted/70 px-3 py-1.5 font-mono text-xs text-muted-foreground">
         {block.status === "running" ? (
           <Loader2 className="size-3 shrink-0 animate-spin" />
+        ) : block.status === "error" ? (
+          <AlertCircle className="size-3 shrink-0 text-destructive" />
         ) : (
-          <Wrench className="size-3 shrink-0" />
+          <CheckCircle2 className="size-3 shrink-0 text-success" />
         )}
         <span className="truncate">{block.toolName}</span>
-        <Badge variant={block.status === "error" ? "destructive" : "outline"} className="ml-auto">
-          {block.status}
-        </Badge>
+        {block.status !== "running" && (
+          <Badge variant={block.status === "error" ? "destructive" : "outline"} className="ml-auto">
+            {block.status}
+          </Badge>
+        )}
       </div>
     );
   }
@@ -190,11 +199,15 @@ function ChatBlockView({ block }: { block: ChatBlock }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-1.5 rounded-md px-3 py-2 text-sm",
-        block.tone === "error" ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground",
+        "mx-auto flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs",
+        block.tone === "error" ? "bg-destructive/10 text-destructive" : "bg-success/10 text-success",
       )}
     >
-      {block.tone === "error" && <AlertCircle className="size-3.5 shrink-0" />}
+      {block.tone === "error" ? (
+        <AlertCircle className="size-3.5 shrink-0" />
+      ) : (
+        <CheckCircle2 className="size-3.5 shrink-0" />
+      )}
       <span className="whitespace-pre-wrap">{block.text}</span>
     </div>
   );

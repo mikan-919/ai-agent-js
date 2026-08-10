@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, FolderGit2, GitBranch, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
 import { WorkContextPanel } from "./components/WorkContextPanel";
@@ -34,9 +34,14 @@ export function App() {
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-2 border-b border-border px-4 py-3">
-        <span className="text-sm font-semibold">nook</span>
+    <div className="flex h-full flex-col bg-background">
+      <header className="flex items-center gap-4 border-b border-border bg-card px-5 py-3.5 shadow-sm">
+        <div className="flex items-center gap-2">
+          <div className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <FolderGit2 className="size-4" />
+          </div>
+          <span className="text-base font-semibold tracking-tight">nook</span>
+        </div>
         <form
           className="flex flex-1 items-center gap-2"
           onSubmit={(e) => {
@@ -44,13 +49,16 @@ export function App() {
             void openBranch(branchInput.trim());
           }}
         >
-          <Input
-            value={branchInput}
-            onChange={(e) => setBranchInput(e.target.value)}
-            placeholder="branch名（既存または新規）"
-            className="max-w-xs"
-          />
-          <Button type="submit" variant="secondary" size="sm" disabled={loading || branchInput.trim().length === 0}>
+          <div className="relative w-full max-w-sm">
+            <GitBranch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={branchInput}
+              onChange={(e) => setBranchInput(e.target.value)}
+              placeholder="branch名（既存または新規）"
+              className="pl-8"
+            />
+          </div>
+          <Button type="submit" disabled={loading || branchInput.trim().length === 0}>
             {loading && <Loader2 className="size-3.5 animate-spin" />}
             開く
           </Button>
@@ -59,23 +67,32 @@ export function App() {
 
       <main className="flex min-h-0 flex-1">
         {!activeBranch && !loading && (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            branch名を入力してsandboxを開いてください
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+            <FolderGit2 className="size-8 opacity-40" />
+            <p className="text-sm">branch名を入力してsandboxを開いてください</p>
+          </div>
+        )}
+
+        {!activeBranch && loading && (
+          <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            sandboxを準備しています…
           </div>
         )}
 
         {response && !response.ok && (
-          <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-destructive">
-            {response.error}
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+            <AlertTriangle className="size-8 text-destructive opacity-80" />
+            <p className="max-w-md text-sm text-destructive">{response.error}</p>
           </div>
         )}
 
         {activeBranch && response?.ok && (
           <>
-            <aside className="w-96 shrink-0 border-r border-border">
+            <aside className="w-96 shrink-0 overflow-hidden border-r border-border bg-muted/40">
               <WorkContextPanel workContext={response.workContext} />
             </aside>
-            <section className="min-w-0 flex-1">
+            <section className="min-w-0 flex-1 bg-background">
               <ChatPanel key={activeBranch} branch={activeBranch} onRunEnd={refresh} />
             </section>
           </>
