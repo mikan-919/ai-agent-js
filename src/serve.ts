@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { runAgent } from "./agent";
 import { resolveWorkContext } from "./context";
 import { createSandbox, destroySandbox } from "./sandbox";
 
@@ -38,6 +39,24 @@ export function createServer(repoPath: string) {
       image: typeof body.image === "string" ? body.image : undefined,
     });
     return c.json(result, result.ok ? 200 : 409);
+  });
+
+  app.post("/agent/run", async (c) => {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) return c.json({ ok: false, error: "GITHUB_TOKEN not set" }, 503);
+
+    const body = await c.req.json().catch(() => ({}));
+    const branch = body.branch;
+    if (typeof branch !== "string" || branch.length === 0) {
+      return c.json({ ok: false, error: "branch is required" }, 400);
+    }
+    const prompt = body.prompt;
+    if (typeof prompt !== "string" || prompt.length === 0) {
+      return c.json({ ok: false, error: "prompt is required" }, 400);
+    }
+
+    const result = await runAgent({ repoPath, branch, prompt, token });
+    return c.json(result, result.ok ? 200 : 502);
   });
 
   app.delete("/sandbox/:branch", async (c) => {

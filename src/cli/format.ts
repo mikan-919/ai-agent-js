@@ -70,6 +70,8 @@ export function formatWorkContext(ctx: WorkContext): string {
   lines.push("", "Docs:");
   lines.push(`  CONCEPT.md: ${formatDocExcerpt(ctx.docs.concept)}`);
   lines.push(`  ROADMAP.md: ${formatDocExcerpt(ctx.docs.roadmap)}`);
+  lines.push(`  FEATURE.md: ${formatDocExcerpt(ctx.docs.feature)}`);
+  lines.push(`  HANDOFF.md: ${formatDocExcerpt(ctx.docs.handoff)}`);
 
   return lines.join("\n");
 }

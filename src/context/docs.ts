@@ -8,9 +8,11 @@ async function readIfExists(path: string): Promise<string | null> {
 }
 
 export async function resolveDocsContext(repoPath: string): Promise<DocsContext> {
-  const [concept, roadmap] = await Promise.all([
+  const [concept, roadmap, feature, handoff] = await Promise.all([
     readIfExists(join(repoPath, "CONCEPT.md")),
     readIfExists(join(repoPath, "ROADMAP.md")),
+    readIfExists(join(repoPath, "FEATURE.md")),
+    readIfExists(join(repoPath, "HANDOFF.md")),
   ]);
-  return { concept, roadmap };
+  return { concept, roadmap, feature, handoff };
 }
