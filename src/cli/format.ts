@@ -1,4 +1,5 @@
 import type { WorkContext } from "../context";
+import type { CreateSandboxResult, DestroySandboxResult } from "../sandbox";
 
 const EXCERPT_MAX_LEN = 160;
 
@@ -71,4 +72,16 @@ export function formatWorkContext(ctx: WorkContext): string {
   lines.push(`  ROADMAP.md: ${formatDocExcerpt(ctx.docs.roadmap)}`);
 
   return lines.join("\n");
+}
+
+export function formatCreateSandboxResult(result: CreateSandboxResult): string {
+  if (!result.ok) return `error: ${result.error}`;
+  const { sandbox } = result;
+  const status = sandbox.resumed ? "resumed" : "created";
+  return `sandbox ${status}: ${sandbox.branch} [${sandbox.backend}] -> ${sandbox.path} (holder: ${sandbox.holder})`;
+}
+
+export function formatDestroySandboxResult(branch: string, result: DestroySandboxResult): string {
+  if (!result.ok) return `error: ${result.error}`;
+  return `sandbox destroyed: ${branch}`;
 }
