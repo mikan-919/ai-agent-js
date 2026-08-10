@@ -1,12 +1,12 @@
 import { $ } from "bun";
 import type { GitContext, GitDiffFileStat } from "./types";
 
-async function run(repoPath: string, args: string[]): Promise<string> {
+export async function run(repoPath: string, args: string[]): Promise<string> {
   const result = await $`git -C ${repoPath} ${args}`.text();
   return result.trim();
 }
 
-async function refExists(repoPath: string, ref: string): Promise<boolean> {
+export async function refExists(repoPath: string, ref: string): Promise<boolean> {
   const proc = Bun.spawn(["git", "-C", repoPath, "show-ref", "--verify", "--quiet", ref], {
     stdout: "ignore",
     stderr: "ignore",
@@ -15,7 +15,7 @@ async function refExists(repoPath: string, ref: string): Promise<boolean> {
   return exitCode === 0;
 }
 
-async function detectMainBranch(repoPath: string): Promise<string> {
+export async function detectMainBranch(repoPath: string): Promise<string> {
   const candidates = [
     { ref: "refs/heads/main", name: "main" },
     { ref: "refs/heads/master", name: "master" },
