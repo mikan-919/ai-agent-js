@@ -87,6 +87,24 @@ async function createLockRef(
   throw new Error(`could not create lock ref: ${response.status} ${response.statusText}`);
 }
 
+/** Returns true if the ref was updated, false if it no longer exists (stolen). */
+async function updateLockRef(
+  owner: string,
+  repo: string,
+  token: string,
+  branch: string,
+  commitSha: string,
+): Promise<boolean> {
+  const response = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/refs/${refPath(branch)}`, {
+    method: "PATCH",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ sha: commitSha, force: true }),
+  });
+  if (response.status === 200) return true;
+  if (response.status === 404 || response.status === 422) return false;
+  throw new Error(`could not update lock ref: ${response.status} ${response.statusText}`);
+}
+
 async function deleteLockRef(owner: string, repo: string, token: string, branch: string): Promise<void> {
   const response = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/refs/${refPath(branch)}`, {
     method: "DELETE",
@@ -231,6 +249,55 @@ export async function acquireLock(opts: AcquireLockOptions): Promise<AcquireLock
     error: `lock on branch '${branch}' expired but was stolen by another holder first`,
     heldBy: afterSteal ?? undefined,
   };
+}
+
+export interface RenewLockOptions {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  holder: string;
+}
+
+/**
+ * Replaces the marker commit the lock ref points at with a fresh one, so a
+ * still-running holder's lock doesn't age past ttlMs and get read as
+ * abandoned by another process (see acquireLock's steal-on-expiry logic).
+ * Only the current holder may renew — a holder mismatch means the lock was
+ * already stolen out from under the caller, and renewing would misreport
+ * who holds it.
+ */
+export async function renewLock(opts: RenewLockOptions): Promise<AcquireLockResult> {
+  const { owner, repo, branch, token, holder } = opts;
+
+  const existing = await readLock(owner, repo, token, branch);
+  if (!existing) {
+    return { ok: false, error: `no lock held for branch '${branch}'` };
+  }
+  if (existing.holder !== holder) {
+    return {
+      ok: false,
+      error: `branch '${branch}' is locked by '${existing.holder}', not '${holder}'`,
+      heldBy: existing,
+    };
+  }
+
+  const head = await getBranchHead(owner, repo, branch, token);
+  const acquiredAt = new Date();
+  const commitSha = await createLockCommit(
+    owner,
+    repo,
+    token,
+    head.treeSha,
+    JSON.stringify({ holder, note: existing.note }),
+    acquiredAt,
+  );
+  const updated = await updateLockRef(owner, repo, token, branch, commitSha);
+  if (!updated) {
+    return { ok: false, error: `lock on branch '${branch}' was stolen before renewal could complete` };
+  }
+
+  return { ok: true, lock: { branch, holder, acquiredAt: acquiredAt.toISOString(), note: existing.note }, stolen: false };
 }
 
 export interface ReleaseLockOptions {

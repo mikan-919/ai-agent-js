@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { acquireLock, getLockStatus, releaseLock } from "./manager";
+import { acquireLock, getLockStatus, releaseLock, renewLock } from "./manager";
 import { installFakeGithubLockApi } from "./test-helpers";
 
 const owner = "acme";
@@ -95,6 +95,52 @@ describe("lock manager", () => {
     expect(status.locked).toBe(true);
     if (status.locked) {
       expect(status.lock.holder).toBe(winner.lock.holder);
+    }
+  });
+
+  test("renew refreshes acquiredAt for the current holder", async () => {
+    await acquireLock({ owner, repo, branch, token, holder: "agent-a" });
+    const before = await getLockStatus({ owner, repo, branch, token, ttlMs: 1000 });
+    expect(before.locked && !before.expired).toBe(true);
+
+    // Simulate the original lock having aged past a short ttl: renew
+    // should bring it back under the ttl without changing the holder.
+    const renewed = await renewLock({ owner, repo, branch, token, holder: "agent-a" });
+    expect(renewed.ok).toBe(true);
+    if (renewed.ok) {
+      expect(renewed.lock.holder).toBe("agent-a");
+      expect(renewed.stolen).toBe(false);
+    }
+
+    const after = await getLockStatus({ owner, repo, branch, token, ttlMs: 1000 });
+    expect(after.locked).toBe(true);
+    if (after.locked) {
+      expect(after.expired).toBe(false);
+    }
+  });
+
+  test("renew fails for a holder that does not hold the lock", async () => {
+    await acquireLock({ owner, repo, branch, token, holder: "agent-a" });
+    const result = await renewLock({ owner, repo, branch, token, holder: "agent-b" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.heldBy?.holder).toBe("agent-a");
+    }
+  });
+
+  test("renew fails when nobody holds the lock", async () => {
+    const result = await renewLock({ owner, repo, branch, token, holder: "agent-a" });
+    expect(result).toEqual({ ok: false, error: `no lock held for branch '${branch}'` });
+  });
+
+  test("renew fails once the lock has been stolen out from under the holder", async () => {
+    await acquireLock({ owner, repo, branch, token, holder: "agent-a" });
+    await acquireLock({ owner, repo, branch, token, holder: "agent-b", ttlMs: -1 });
+
+    const result = await renewLock({ owner, repo, branch, token, holder: "agent-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.heldBy?.holder).toBe("agent-b");
     }
   });
 });

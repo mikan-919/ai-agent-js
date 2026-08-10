@@ -56,7 +56,8 @@ export function createServer(repoPath: string) {
     }
 
     const result = await runAgent({ repoPath, branch, prompt, token });
-    return c.json(result, result.ok ? 200 : 502);
+    if (result.ok) return c.json(result, 200);
+    return c.json(result, result.timedOut ? 504 : 502);
   });
 
   app.delete("/sandbox/:branch", async (c) => {
