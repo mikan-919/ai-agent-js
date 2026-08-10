@@ -3,7 +3,7 @@ import { createServer } from "./serve";
 const DEFAULT_PORT = 4319;
 
 function usage(): never {
-  console.error("usage: har serve");
+  console.error("usage: nook serve");
   process.exit(1);
 }
 
@@ -19,7 +19,7 @@ async function main() {
 
   const app = createServer(repoPath);
 
-  console.log(`har serve: watching ${repoPath} on http://localhost:${port}`);
+  console.log(`nook serve: watching ${repoPath} on http://localhost:${port}`);
   Bun.serve({ fetch: app.fetch, port });
 }
 

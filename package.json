@@ -1,10 +1,10 @@
 {
-  "name": "har",
+  "name": "nook",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "bin": {
-    "har": "src/index.ts"
+    "nook": "src/index.ts"
   },
   "scripts": {
     "serve": "bun run src/index.ts serve",

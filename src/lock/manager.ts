@@ -13,7 +13,7 @@ function authHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
-    "User-Agent": "har",
+    "User-Agent": "nook",
   };
 }
 
@@ -58,8 +58,8 @@ async function createLockCommit(
       message,
       tree: treeSha,
       parents: [],
-      author: { name: "har", email: "har@localhost", date: iso },
-      committer: { name: "har", email: "har@localhost", date: iso },
+      author: { name: "nook", email: "nook@localhost", date: iso },
+      committer: { name: "nook", email: "nook@localhost", date: iso },
     }),
   });
   if (!response.ok) {
