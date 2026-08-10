@@ -53,6 +53,15 @@ export function installFakeGithubLockApi(owner: string, repo: string) {
       return json(204, null);
     }
 
+    const patchRefMatch = path.match(/^\/git\/refs\/(.+)$/);
+    if (method === "PATCH" && patchRefMatch) {
+      const refKey = patchRefMatch[1]!;
+      if (!refs.has(refKey)) return json(404, { message: "Not Found" });
+      const body = JSON.parse(String(init?.body));
+      refs.set(refKey, body.sha);
+      return json(200, { ref: `refs/${refKey}`, object: { sha: body.sha } });
+    }
+
     const getCommitMatch = path.match(/^\/git\/commits\/([^/]+)$/);
     if (method === "GET" && getCommitMatch) {
       const commit = commits.get(getCommitMatch[1]!);

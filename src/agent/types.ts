@@ -20,4 +20,4 @@ export type RunAgentResult =
       sandboxPath: string;
       resumed: boolean;
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; timedOut?: boolean };
