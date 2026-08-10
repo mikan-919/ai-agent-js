@@ -69,6 +69,13 @@ export interface DocsContext {
   roadmap: string | null;
   feature: string | null;
   handoff: string | null;
+  /**
+   * Names of watched docs (currently CONCEPT.md, ROADMAP.md) that differ
+   * between branch HEAD and main HEAD — i.e. the version embedded in this
+   * WorkContext may not match what main currently says. Empty when none
+   * drifted.
+   */
+  driftedAgainstMain: string[];
 }
 
 export interface WorkContext {

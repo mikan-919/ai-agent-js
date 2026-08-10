@@ -11,7 +11,7 @@ function baseContext(overrides: Partial<WorkContext> = {}): WorkContext {
     },
     github: { ok: false, reason: "GITHUB_TOKEN not set" },
     linear: { ok: false, reason: "LINEAR_API_KEY not set" },
-    docs: { concept: null, roadmap: null, feature: null, handoff: null },
+    docs: { concept: null, roadmap: null, feature: null, handoff: null, driftedAgainstMain: [] },
     ...overrides,
   };
 }
@@ -91,6 +91,7 @@ describe("formatWorkContext", () => {
           roadmap: null,
           feature: null,
           handoff: null,
+          driftedAgainstMain: [],
         },
       }),
     );
@@ -101,10 +102,21 @@ describe("formatWorkContext", () => {
   test("truncates long excerpts", () => {
     const longLine = "x".repeat(200);
     const output = formatWorkContext(
-      baseContext({ docs: { concept: `# T\n\n${longLine}`, roadmap: null, feature: null, handoff: null } }),
+      baseContext({
+        docs: { concept: `# T\n\n${longLine}`, roadmap: null, feature: null, handoff: null, driftedAgainstMain: [] },
+      }),
     );
     expect(output).toContain(`${"x".repeat(160)}…`);
     expect(output).not.toContain(longLine);
+  });
+
+  test("reports drift against main when watched docs changed", () => {
+    const output = formatWorkContext(
+      baseContext({
+        docs: { concept: null, roadmap: null, feature: null, handoff: null, driftedAgainstMain: ["CONCEPT.md"] },
+      }),
+    );
+    expect(output).toContain("drift vs main: CONCEPT.md");
   });
 });
 

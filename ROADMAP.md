@@ -24,9 +24,8 @@
 
 ## 未解決の論点
 
-1. **ROADMAP.md/CONCEPT.mdのdrift検出アルゴリズム**: merge-base時点・main HEAD・branch HEADの3点を区別する方針は変わらないが、具体アルゴリズムは未設計（v1はFEATURE.md記載の通り単純diffのみ）。
-2. **Agentへdiffを生で渡すか、Harnessが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定した。
-3. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
-4. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
-5. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。
-6. **`POST /agent/run`のtimeout/エラーハンドリング**: blockingで完了まで待つ設計だが、Hono/Bun.serve側でHTTPタイムアウトが発生した場合の挙動（agent実行自体は継続するのか、sandbox/lockはどうなるか）は未検証。
+1. **Agentへdiffを生で渡すか、Harnessが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定した。
+2. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
+3. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
+4. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。このセッション環境ではDockerデーモン自体が起動しておらず検証不可だった。
+5. **`POST /agent/run`のtimeout/エラーハンドリング**: blockingで完了まで待つ設計だが、Hono/Bun.serve側でHTTPタイムアウトが発生した場合の挙動（agent実行自体は継続するのか、sandbox/lockはどうなるか）は未検証。
