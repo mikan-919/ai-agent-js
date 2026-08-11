@@ -21,11 +21,11 @@
 
 運用で入力する正確な識別子はここに集約する。本文では役割語を使い、コマンドや設定名をそのまま入力する必要がある箇所だけこの一覧へリンクする。
 
-- CLI: `sable`
-- サブコマンド: `sable serve`、`sable docs [branch]`、`sable ticket`、`sable ticket poll`
-- 環境変数: `SABLE_AGENT_IDLE_TIMEOUT_MS`、`SABLE_CHAT_SESSION_IDLE_MS`、`SABLE_GIT_TOKEN`、`SABLE_MODEL_API_KEY`、`SABLE_MODEL_BASE_URL`、`SABLE_MODEL_ID`、`SABLE_MODEL_PROVIDER`、`SABLE_TICKET_MAX_ISSUES`、`SABLE_TICKET_POLL_INTERVAL_MS`
+- CLI: `oriel`
+- サブコマンド: `oriel serve`、`oriel docs [branch]`、`oriel ticket`、`oriel ticket poll`
+- 環境変数: `ORIEL_AGENT_IDLE_TIMEOUT_MS`、`ORIEL_CHAT_SESSION_IDLE_MS`、`ORIEL_GIT_TOKEN`、`ORIEL_MODEL_API_KEY`、`ORIEL_MODEL_BASE_URL`、`ORIEL_MODEL_ID`、`ORIEL_MODEL_PROVIDER`、`ORIEL_TICKET_MAX_ISSUES`、`ORIEL_TICKET_POLL_INTERVAL_MS`
 
-LM Studioを使う場合は、`SABLE_MODEL_PROVIDER=lmstudio`、`SABLE_MODEL_ID`（LM Studioの`/v1/models`で確認したID）、`SABLE_MODEL_BASE_URL`（通常は`http://localhost:1234/v1`）を設定する。ローカルサーバが認証を要求する場合だけ `SABLE_MODEL_API_KEY` を設定し、未設定時は `lm-studio` を送る。
+LM Studioを使う場合は、`ORIEL_MODEL_PROVIDER=lmstudio`、`ORIEL_MODEL_ID`（LM Studioの`/v1/models`で確認したID）、`ORIEL_MODEL_BASE_URL`（通常は`http://localhost:1234/v1`）を設定する。ローカルサーバが認証を要求する場合だけ `ORIEL_MODEL_API_KEY` を設定し、未設定時は `lm-studio` を送る。
 
 `package.json`の`name`/`bin`と`bun.lock`の`name`はパッケージ管理用の宣言・生成物であり、TypeScriptの実行時設定から参照できないため、この正本の例外として扱う。アプリケーションコードで識別子を使う場合は、必ず `src/config.ts` の定数を参照すること。
 

@@ -11,6 +11,10 @@ import {
 } from "./config";
 
 describe("project configuration", () => {
+  test("uses the oriel project codename", () => {
+    expect(PROJECT_CODENAME).toBe("oriel");
+  });
+
   test("derives runtime identifiers from the single codename", () => {
     expect(PROJECT_USER_AGENT).toBe(PROJECT_CODENAME);
     expect(PROJECT_STATE_DIRECTORY).toBe(`.${PROJECT_CODENAME}`);

@@ -1,10 +1,10 @@
 {
-  "name": "sable",
+  "name": "oriel",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "bin": {
-    "sable": "src/index.ts"
+    "oriel": "src/index.ts"
   },
   "scripts": {
     "serve": "bun run src/index.ts serve",
