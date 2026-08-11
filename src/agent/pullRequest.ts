@@ -62,7 +62,7 @@ async function createPullRequest(
  * in the remote URL or a `-c` flag, so the token doesn't show up in `ps`
  * output for the git subprocess.
  */
-async function pushBranch(cwd: string, branch: string, token: string): Promise<void> {
+export async function pushBranch(cwd: string, branch: string, token: string): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "nook-askpass-"));
   const scriptPath = join(dir, "askpass.sh");
   try {

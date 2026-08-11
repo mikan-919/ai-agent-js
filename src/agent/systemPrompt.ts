@@ -25,7 +25,7 @@ The rest of this system prompt is the current work context — git diff state,
 GitHub/Linear state, and this project's own workspace documents — reassembled
 fresh for this run.`;
 
-function renderGit(git: WorkContext["git"]): string {
+export function renderGit(git: WorkContext["git"]): string {
   const { files, filesChanged, insertions, deletions } = git.diff;
   const fileLines = files.map((f) => `  ${f.path}: +${f.insertions} -${f.deletions}${f.binary ? " (binary)" : ""}`);
   return [
@@ -66,11 +66,11 @@ function renderDoc(name: string, content: string | null): string {
   return content ? `### ${name}\n\n${content}` : `### ${name}\n\n(not found)`;
 }
 
-function renderPreviousSession(summary: string): string {
+export function renderPreviousSession(summary: string): string {
   return ["## Previous session in this sandbox", summary].join("\n\n");
 }
 
-function renderDocs(docs: WorkContext["docs"]): string {
+export function renderDocs(docs: WorkContext["docs"]): string {
   const lines = ["## Workspace docs"];
   if (docs.driftedAgainstMain.length > 0) {
     lines.push(
