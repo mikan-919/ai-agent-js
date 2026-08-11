@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
+import { resolveGitContext } from "../context/git";
 import { installFakeGithubLockApi } from "../lock/test-helpers";
 import { createSandbox, destroySandbox } from "./manager";
 
@@ -112,5 +113,25 @@ describe("sandbox manager", () => {
 
     const checkedOutBranch = (await $`git -C ${result.sandbox.path} rev-parse --abbrev-ref HEAD`.text()).trim();
     expect(checkedOutBranch).toBe("feature-y");
+  });
+
+  test("branches a brand-new sandbox off origin/main when the repo has no local main branch", async () => {
+    // Mirrors a shallow/single-branch CI checkout of repoPath itself: main
+    // only exists as a remote-tracking ref.
+    await git(repoPath, ["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+    await git(repoPath, ["checkout", "-q", "-b", "scratch"]);
+    await git(repoPath, ["branch", "-D", "main"]);
+
+    const result = await createSandbox({ repoPath, branch: "feature-z", token, holder: "agent-a", baseDir });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const checkedOutBranch = (await $`git -C ${result.sandbox.path} rev-parse --abbrev-ref HEAD`.text()).trim();
+    expect(checkedOutBranch).toBe("feature-z");
+
+    // The regression this guards against: mainBranch used to come back as
+    // "origin/main" here, which breaks the GitHub PR "base" field.
+    const ctx = await resolveGitContext(result.sandbox.path);
+    expect(ctx.mainBranch).toBe("main");
   });
 });
