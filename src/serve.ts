@@ -7,6 +7,7 @@ import { createSandboxTools } from "./agent/sandboxTools";
 import type { AgentSession } from "./agent/session";
 import { createSession } from "./agent/session";
 import { buildSystemPrompt } from "./agent/systemPrompt";
+import { runTicketExtractionPass, runTicketPollPass } from "./agent/ticketRun";
 import type { PullRequestOutcome, RunAgentResult } from "./agent/types";
 import { resolveWorkContext } from "./context";
 import { createSandbox, destroySandbox } from "./sandbox";
@@ -19,6 +20,23 @@ function resolveChatSessionIdleMs(): number {
   const raw = process.env.NOOK_CHAT_SESSION_IDLE_MS;
   const parsed = raw ? Number(raw) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_SESSION_IDLE_MS;
+}
+
+/**
+ * Opt-in only: unset means nook serve never runs the ticket-extraction
+ * agent on its own, same as before this wiring existed — `nook ticket` /
+ * `nook ticket poll` from a shell or external cron remain the only trigger.
+ * This pass creates GitHub issues and posts comments on its own (no per-run
+ * human approval gate, unlike PR merge/Linear triage — see CONCEPT.md
+ * principle 2, which this pass doesn't touch), and spends LLM calls doing
+ * it, so turning it on automatically is a deliberate choice the operator
+ * makes by setting this env var, not a default.
+ */
+function resolveTicketPollIntervalMs(): number | null {
+  const raw = process.env.NOOK_TICKET_POLL_INTERVAL_MS;
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 /**
@@ -121,6 +139,52 @@ export function createServer(repoPath: string) {
     }
   }, CHAT_SESSION_SWEEP_INTERVAL_MS);
   sweepInterval.unref();
+
+  /**
+   * The ticket-extraction agent's automatic trigger (ROADMAP.md: "起動
+   * トリガーは...pollingによる自動起動はまだ配線していない"). Runs the same two
+   * passes `nook ticket` / `nook ticket poll` run from a shell — an
+   * extraction pass (files nook:proposed issues for known ROADMAP/HANDOFF
+   * gaps) followed by a poll pass (replies on nook:proposed issues awaiting
+   * a human reply) — on a fixed interval instead of requiring a human or
+   * external cron to invoke the CLI. Only enabled when
+   * NOOK_TICKET_POLL_INTERVAL_MS is set (see resolveTicketPollIntervalMs).
+   * `runInProgress` skips a tick rather than overlapping if a previous pass
+   * is still running past the next interval.
+   */
+  const ticketPollIntervalMs = resolveTicketPollIntervalMs();
+  if (ticketPollIntervalMs !== null) {
+    let runInProgress = false;
+    const runTicketPasses = async () => {
+      if (runInProgress) return;
+      const token = process.env.GITHUB_TOKEN;
+      if (!token) return;
+
+      runInProgress = true;
+      try {
+        const extraction = await runTicketExtractionPass(repoPath, token);
+        if (!extraction.ok) {
+          console.error(`nook serve: ticket extraction pass failed: ${extraction.error}`);
+        } else if (extraction.createdCount > 0) {
+          console.log(`nook serve: ticket extraction pass created ${extraction.createdCount} issue(s).`);
+        }
+
+        const poll = await runTicketPollPass(repoPath, token, (message) =>
+          console.log(`nook serve: ticket poll: ${message}`),
+        );
+        for (const error of poll.errors) console.error(`nook serve: ticket poll: ${error}`);
+        if (poll.repliedCount > 0) {
+          console.log(`nook serve: ticket poll replied on ${poll.repliedCount} issue(s).`);
+        }
+      } catch (error) {
+        console.error(`nook serve: ticket pass failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        runInProgress = false;
+      }
+    };
+    const ticketPollInterval = setInterval(() => void runTicketPasses(), ticketPollIntervalMs);
+    ticketPollInterval.unref();
+  }
 
   app.get("/work-context", async (c) => {
     const workContext = await resolveWorkContext(repoPath);

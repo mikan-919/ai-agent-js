@@ -3,22 +3,12 @@ import { join } from "node:path";
 import { buildDocsSystemPrompt } from "./agent/docsSystemPrompt";
 import { createDocsTools } from "./agent/docsTools";
 import { createSession } from "./agent/session";
-import { buildTicketExtractionSystemPrompt, buildTicketReplySystemPrompt } from "./agent/ticketSystemPrompt";
-import {
-  createCreateIssueTool,
-  createReplyToIssueTool,
-  getAuthenticatedLogin,
-  listIssueComments,
-  listOpenIssues,
-  listProposedIssues,
-  resolveMaxIssuesPerRun,
-} from "./agent/ticketTools";
+import { runTicketExtractionPass, runTicketPollPass } from "./agent/ticketRun";
 import { formatCreateSandboxResult, formatDestroySandboxResult, formatWorkContext } from "./cli/format";
 import { parseDocsArgs } from "./cli/docs";
 import { parseSandboxArgs } from "./cli/sandbox";
 import { parseTicketArgs } from "./cli/ticket";
-import { resolveGitContext, detectMainBranch } from "./context/git";
-import { getOwnerRepo } from "./context/github";
+import { resolveGitContext } from "./context/git";
 import { resolveWorkContext } from "./context";
 import { createServer } from "./serve";
 import { createSandbox, destroySandbox } from "./sandbox";
@@ -176,53 +166,16 @@ async function runDocs(args: string[]) {
  * feature branch's possibly-stale docs. The sandbox/lock are torn down again
  * once the run ends: unlike the implementation/docs agents, this one never
  * writes to its worktree, so there's nothing worth keeping it around for.
+ *
+ * Thin CLI wrapper: the pass itself (runTicketExtractionPass) is shared with
+ * nook serve's periodic wiring (serve.ts) so both drive the same logic.
  */
 async function runTicketExtract(json: boolean) {
   const repoPath = process.cwd();
   const token = requireGithubToken();
 
-  const ownerRepo = await getOwnerRepo(repoPath);
-  if (!ownerRepo) {
-    throw new Error(`could not determine owner/repo from git remote 'origin' in ${repoPath}`);
-  }
-
-  const mainBranch = await detectMainBranch(repoPath);
-  const maxIssues = resolveMaxIssuesPerRun();
-  const createdCount = { current: 0 };
-  const openIssues = await listOpenIssues(ownerRepo.owner, ownerRepo.repo, token);
-
-  console.log(`nook ticket: opening sandbox for '${mainBranch}'…`);
-
-  const sessionResult = await createSession({
-    repoPath,
-    branch: mainBranch,
-    token,
-    createTools: (ctx) => [
-      createCreateIssueTool({ owner: ctx.owner, repo: ctx.repo, token: ctx.token, maxIssues, createdCount }),
-    ],
-    buildSystemPrompt: ({ workContext }) =>
-      buildTicketExtractionSystemPrompt({
-        roadmap: workContext.docs.roadmap,
-        handoff: workContext.docs.handoff,
-        openIssues,
-        maxIssues,
-      }),
-  });
-
-  if (!sessionResult.ok) {
-    console.error(sessionResult.error);
-    process.exit(1);
-  }
-  const { session } = sessionResult;
-
-  const result = await session.send(
-    "Review ROADMAP.md's next priorities and open questions, and HANDOFF.md's " +
-      "handoff note, for gaps that don't yet have a matching open issue. File a " +
-      "nook:proposed issue for each genuinely new gap; skip anything the existing " +
-      "open issues already cover. If there's nothing new, create nothing and say so.",
-  );
-  await session.close();
-  await destroySandbox({ repoPath, branch: mainBranch, token });
+  console.log("nook ticket: running extraction pass…");
+  const result = await runTicketExtractionPass(repoPath, token);
 
   if (!result.ok) {
     console.error(result.timedOut ? `idle timeout: ${result.error}` : result.error);
@@ -231,8 +184,8 @@ async function runTicketExtract(json: boolean) {
 
   console.log(
     json
-      ? JSON.stringify({ createdCount: createdCount.current, summary: result.summary }, null, 2)
-      : `created ${createdCount.current} issue(s).\n\n${result.summary}`,
+      ? JSON.stringify({ createdCount: result.createdCount, summary: result.summary }, null, 2)
+      : `created ${result.createdCount} issue(s).\n\n${result.summary}`,
   );
 }
 
@@ -243,61 +196,18 @@ async function runTicketExtract(json: boolean) {
  * cursor is kept between passes (CONCEPT.md principle 1) — "does this need a
  * reply" is re-derived from the thread every time this runs.
  *
- * Each issue gets its own freshly created-then-destroyed sandbox/lock rather
- * than one shared across the whole pass: they all target the same default
- * branch, and reusing one sandbox across issues would make session.ts treat
- * the previous issue's transcript as "the previous session in this sandbox"
- * and feed it in as unrelated context for the next issue's reply.
+ * Thin CLI wrapper: the pass itself (runTicketPollPass) is shared with nook
+ * serve's periodic wiring (serve.ts) so both drive the same logic.
  */
 async function runTicketPoll() {
   const repoPath = process.cwd();
   const token = requireGithubToken();
 
-  const ownerRepo = await getOwnerRepo(repoPath);
-  if (!ownerRepo) {
-    throw new Error(`could not determine owner/repo from git remote 'origin' in ${repoPath}`);
-  }
-
-  const mainBranch = await detectMainBranch(repoPath);
-  const botLogin = await getAuthenticatedLogin(token);
-  const proposedIssues = await listProposedIssues(ownerRepo.owner, ownerRepo.repo, token);
-
-  let replied = 0;
-  for (const issue of proposedIssues) {
-    const comments = await listIssueComments(ownerRepo.owner, ownerRepo.repo, issue.number, token);
-    const lastComment = comments[comments.length - 1];
-    if (!lastComment || lastComment.login === botLogin) continue;
-
-    console.log(`nook ticket poll: replying on issue #${issue.number}…`);
-
-    const sessionResult = await createSession({
-      repoPath,
-      branch: mainBranch,
-      token,
-      createTools: (ctx) => [
-        createReplyToIssueTool({ owner: ctx.owner, repo: ctx.repo, token: ctx.token, issueNumber: issue.number }),
-      ],
-      buildSystemPrompt: () => buildTicketReplySystemPrompt({ issue, comments }),
-    });
-
-    if (!sessionResult.ok) {
-      console.error(`issue #${issue.number}: ${sessionResult.error}`);
-      continue;
-    }
-
-    const result = await sessionResult.session.send("Reply to the human's latest comment in the thread above.");
-    await sessionResult.session.close();
-    await destroySandbox({ repoPath, branch: mainBranch, token });
-
-    if (!result.ok) {
-      console.error(`issue #${issue.number}: ${result.timedOut ? `idle timeout: ${result.error}` : result.error}`);
-      continue;
-    }
-    replied++;
-  }
+  const result = await runTicketPollPass(repoPath, token, (message) => console.log(`nook ticket poll: ${message}`));
+  for (const error of result.errors) console.error(error);
 
   console.log(
-    `nook ticket poll: replied on ${replied} issue(s) (${proposedIssues.length} nook:proposed issue(s) checked).`,
+    `nook ticket poll: replied on ${result.repliedCount} issue(s) (${result.checkedCount} nook:proposed issue(s) checked).`,
   );
 }
 
