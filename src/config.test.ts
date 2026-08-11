@@ -11,7 +11,7 @@ import {
 } from "./config";
 
 describe("project configuration", () => {
-  test("uses the oriel project codename", () => {
+  test("uses the configured project codename", () => {
     expect(PROJECT_CODENAME).toBe("oriel");
   });
 
