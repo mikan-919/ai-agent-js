@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { detectMainBranch, refExists, run as runGit } from "../context/git";
+import { detectMainBranch, refExists, resolveRef, run as runGit } from "../context/git";
 
 export function worktreePath(baseDir: string, owner: string, repo: string, branch: string): string {
   return join(baseDir, `${owner}-${repo}`, branch.replace(/\//g, "-"));
@@ -35,7 +35,8 @@ export async function ensureWorktree(repoPath: string, worktreeDir: string, bran
   }
 
   const mainBranch = await detectMainBranch(repoPath);
-  await runGit(repoPath, ["worktree", "add", "-b", branch, worktreeDir, mainBranch]);
+  const startPoint = await resolveRef(repoPath, mainBranch);
+  await runGit(repoPath, ["worktree", "add", "-b", branch, worktreeDir, startPoint]);
 }
 
 /** Throws on failure (e.g. uncommitted changes without `force`); caller decides how to handle it. */

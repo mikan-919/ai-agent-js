@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { detectMainBranch, refExists, run as runGit } from "../context/git";
+import { detectMainBranch, refExists, resolveRef, run as runGit } from "../context/git";
 
 export const DEFAULT_DOCKER_IMAGE = "oven/bun:1";
 export const CONTAINER_WORKSPACE = "/workspace";
@@ -77,7 +77,8 @@ async function ensureContainerWorktree(repoPath: string, name: string, branch: s
   }
 
   const mainBranch = await detectMainBranch(repoPath);
-  await execGit(name, repoPath, ["worktree", "add", "-b", branch, CONTAINER_WORKSPACE, mainBranch]);
+  const startPoint = await resolveRef(repoPath, mainBranch);
+  await execGit(name, repoPath, ["worktree", "add", "-b", branch, CONTAINER_WORKSPACE, startPoint]);
 }
 
 export interface EnsureDockerSandboxResult {

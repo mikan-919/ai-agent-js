@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
+import { resolveGitContext } from "../context/git";
 import { installFakeGithubLockApi } from "../lock/test-helpers";
 import { createSandbox, destroySandbox } from "./manager";
 
@@ -139,5 +140,32 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
 
     const forced = await destroySandbox({ repoPath, branch: "feature-x", token, backend: "docker", force: true });
     expect(forced.ok).toBe(true);
+  }, 30000);
+
+  test("branches a brand-new sandbox off origin/main when the repo has no local main branch", async () => {
+    await git(repoPath, ["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+    await git(repoPath, ["checkout", "-q", "-b", "scratch"]);
+    await git(repoPath, ["branch", "-D", "main"]);
+
+    trackedName("feature-z");
+    const result = await createSandbox({
+      repoPath,
+      branch: "feature-z",
+      token,
+      holder: "agent-a",
+      backend: "docker",
+      image,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const name = `nook-${owner}-${repo}-feature-z`;
+    const checkedOutBranch = (await $`docker exec ${name} git -C /workspace rev-parse --abbrev-ref HEAD`.text()).trim();
+    expect(checkedOutBranch).toBe("feature-z");
+
+    // The regression this guards against: mainBranch used to come back as
+    // "origin/main" here, which breaks the GitHub PR "base" field.
+    const ctx = await resolveGitContext(repoPath);
+    expect(ctx.mainBranch).toBe("main");
   }, 30000);
 });
