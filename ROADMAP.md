@@ -1,6 +1,6 @@
 # ROADMAP
 
-この文書は、現在の実装を新しい分散実行モデルへ移行する間だけ、移行方向と未解決事項を保持する。共有ROADMAPを恒久的なJob入力にはしない。移行後、作りたいものと優先順位はGitHub IssueとLinearのviewへ移し、この文書は廃止する。
+この文書は、分散実行モデルのアーキテクチャを固めるまで、設計方向と未解決事項を保持する。共有ROADMAPを恒久的なJob入力にはしない。実装を始める前に未解決事項をGitHub Issueへ分解し、以後の優先順位はGitHub IssueとLinearのviewで管理する。
 
 ## 移行するアーキテクチャ
 
@@ -73,14 +73,13 @@ GitHub Pull Request (DO / merge approval)
 - v1ではOS、architecture、利用可能なsandbox方式など自動検査できる項目だけを扱う。
 - 自動検査できない汎用能力指定は、実例が出るまで設計しない。
 
-## 文書構成の移行
+## 文書構成
 
-- FEATURE.mdの「する／しない」はCONCEPT.mdへ統合する。
-- ROADMAP.mdを恒久的な共有計画としては使わず、GitHub IssueとLinearのviewへ移す。
-- HANDOFF.mdは共有計画ではなくcheckpoint再開情報として扱い、PRの最終差分から除く。
-- 現行コードが4文書を固定参照している間はファイルを残し、resolver・docs agent・ticket agentの移行と同時に整理する。
+- 「する／しない」はCONCEPT.mdを正本とし、FEATURE.mdはその配置を示すためだけに残す。
+- ROADMAP.mdは設計中の論点に限って使い、実装タスクはGitHub IssueとLinearへ移す。
+- HANDOFF.mdは現在の設計セッションから再開するための情報だけを持つ。
 
-## 未解決の実装詳細
+## 実装前に決めること
 
 - Job lease refの形式、期限、heartbeat、引き継ぎ手順
 - relayと`serve`間の接続方式と検索要求の認可
@@ -90,15 +89,17 @@ GitHub Pull Request (DO / merge approval)
 - YAML schemaの詳細とruntime validation
 - sandbox backendの検出順序
 - draft PRを作る時点とcheckpoint頻度を調整するAgent prompt
-- 現行のbranch中心resolver・session・ticket agentからJob中心reconcilerへの移行順序
+- Job、worker、serve、relay、lease、lockの責務と状態モデル
+- relay、serve、Agent sandbox間の通信境界とtool API
+- 障害、再接続、二重実行、途中再開を含むreconciliation手順
+- 最小構成で端から端まで成立させる最初のtracer bullet
 
-## 当面の実装順序
+## 設計を固める順序
 
-1. GitHub Issue URLからLinear issueを解決し、Job候補を構成する。
-2. branch lockと分離したIssue単位のJob leaseを導入する。
-3. 外部操作の直前にlease所有を検証する。
-4. `serve`をrepository単位workerとして整理し、状態遷移を実装する。
-5. GitHub App／Linear webhookを受ける公開relayとworker登録を導入する。
-6. credentialをAgent sandboxから完全に分離し、OS credential storeへ移す。
-7. checkpoint HANDOFFとrepository内transcript検索を導入する。
-8. 4文書前提とticket切り出しagentを新しいIssue中心モデルへ移行する。
+1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
+2. Jobの状態遷移、lease、branch lockの不変条件を定義する。
+3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。
+4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。
+5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。
+6. capability schemaと実行環境選択を定義する。
+7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。

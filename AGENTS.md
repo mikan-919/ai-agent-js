@@ -14,19 +14,7 @@
 
 ## 用語と識別情報
 
-文書ではコードネームを繰り返さず、「実行ハーネス」「サーバ」「CLI」「提案ラベル」などの役割語を使う。コードネーム、User-Agent、状態ディレクトリ、環境変数接頭辞、Issueラベル、およびworkspace documentのファイル一覧は `src/config.ts` を正本とする。識別情報を変更するときはこの設定を更新し、文書へ固有名を複製しないこと。
-
-### 実行時識別子
-
-運用で入力する正確な識別子はここに集約する。本文では役割語を使い、コマンドや設定名をそのまま入力する必要がある箇所だけこの一覧へリンクする。
-
-- CLI: `oriel`
-- サブコマンド: `oriel serve`、`oriel docs [branch]`、`oriel ticket`、`oriel ticket poll`
-- 環境変数: `ORIEL_AGENT_IDLE_TIMEOUT_MS`、`ORIEL_CHAT_SESSION_IDLE_MS`、`ORIEL_GIT_TOKEN`、`ORIEL_MODEL_API_KEY`、`ORIEL_MODEL_BASE_URL`、`ORIEL_MODEL_ID`、`ORIEL_MODEL_PROVIDER`、`ORIEL_TICKET_MAX_ISSUES`、`ORIEL_TICKET_POLL_INTERVAL_MS`
-
-LM Studioを使う場合は、`ORIEL_MODEL_PROVIDER=lmstudio`、`ORIEL_MODEL_ID`（LM Studioの`/v1/models`で確認したID）、`ORIEL_MODEL_BASE_URL`（通常は`http://localhost:1234/v1`）を設定する。ローカルサーバが認証を要求する場合だけ `ORIEL_MODEL_API_KEY` を設定し、未設定時は `lm-studio` を送る。
-
-`package.json`の`name`/`bin`と`bun.lock`の`name`はパッケージ管理用の宣言・生成物であり、TypeScriptの実行時設定から参照できないため、この正本の例外として扱う。アプリケーションコードで識別子を使う場合は、必ず `src/config.ts` の定数を参照すること。
+文書ではコードネームを繰り返さず、「実行ハーネス」「サーバ」「CLI」「提案ラベル」などの役割語を使う。実装はリセットされており、実行時識別子はまだ定義しない。実装開始時にコードネーム、User-Agent、状態ディレクトリ、環境変数接頭辞、Issueラベル、およびworkspace documentのファイル一覧について、コードから参照できる単一の正本を設ける。識別情報を文書や複数のmoduleへ複製しないこと。
 
 判定に迷ったら：「なぜ」の話ならCONCEPT、「今どうするか／何をするしないか」の話ならROADMAPかFEATURE、「次のセッションは何から再開するか」の話ならHANDOFF。
 
