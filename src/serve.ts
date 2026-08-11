@@ -2,6 +2,12 @@ import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { streamSSE } from "hono/streaming";
 import { runAgent } from "./agent";
+import { createPullRequestTool } from "./agent/pullRequest";
+import { createSandboxTools } from "./agent/sandboxTools";
+import type { AgentSession } from "./agent/session";
+import { createSession } from "./agent/session";
+import { buildSystemPrompt } from "./agent/systemPrompt";
+import type { PullRequestOutcome, RunAgentResult } from "./agent/types";
 import { resolveWorkContext } from "./context";
 import { createSandbox, destroySandbox } from "./sandbox";
 
@@ -13,6 +19,61 @@ import { createSandbox, destroySandbox } from "./sandbox";
  */
 export function createServer(repoPath: string) {
   const app = new Hono();
+
+  /**
+   * Chat's live sessions, one per branch, kept in server memory for as long
+   * as the process runs. This is deliberately different from POST
+   * /agent/run: that endpoint is one-shot (a trigger firing a single
+   * task, not an ongoing conversation), so it still creates a session, sends
+   * once, and closes it. Chat is a back-and-forth conversation with the same
+   * human, so re-doing a full "resume" (transcript reload + summarization
+   * LLM call) on every single message — which is what calling runAgent
+   * fresh per message used to do — was pure waste. A session's *first* turn
+   * still pays that cost if the sandbox has a leftover transcript from a
+   * previous process (see session.ts); every turn after that, for as long as
+   * this session stays in memory, is a plain agent.prompt() call. The
+   * transcript is still persisted to disk after every send (cheap — no LLM
+   * call involved), so a server crash loses at most the in-flight turn, not
+   * the conversation: CONCEPT.md principle 1 still holds because disk stays
+   * the durable source of truth, this map is just a warm cache while alive.
+   */
+  interface ChatSessionEntry {
+    session: AgentSession;
+    pullRequestRef: { current: PullRequestOutcome | null };
+  }
+  const chatSessions = new Map<string, ChatSessionEntry>();
+
+  async function getOrCreateChatSession(branch: string, token: string) {
+    const existing = chatSessions.get(branch);
+    if (existing) return { ok: true as const, entry: existing };
+
+    const pullRequestRef: { current: PullRequestOutcome | null } = { current: null };
+    const result = await createSession({
+      repoPath,
+      branch,
+      token,
+      createTools: (ctx) => [
+        ...createSandboxTools(ctx.sandboxPath),
+        createPullRequestTool({
+          cwd: ctx.sandboxPath,
+          owner: ctx.owner,
+          repo: ctx.repo,
+          branch: ctx.branch,
+          baseBranch: ctx.baseBranch,
+          token: ctx.token,
+          onResult: (outcome) => {
+            pullRequestRef.current = outcome;
+          },
+        }),
+      ],
+      buildSystemPrompt: ({ workContext, previousSessionSummary }) => buildSystemPrompt(workContext, { previousSessionSummary }),
+    });
+    if (!result.ok) return result;
+
+    const entry = { session: result.session, pullRequestRef };
+    chatSessions.set(branch, entry);
+    return { ok: true as const, entry };
+  }
 
   app.get("/work-context", async (c) => {
     const workContext = await resolveWorkContext(repoPath);
@@ -92,12 +153,14 @@ export function createServer(repoPath: string) {
   });
 
   /**
-   * Streaming twin of POST /agent/run for the web UI's chat: same runAgent
-   * call (same sandbox/resume/transcript-summary behavior), but every
-   * AgentEvent is forwarded to the client as it happens instead of waiting
-   * for the whole run to finish. The run's final RunAgentResult (summary,
-   * pull request, or error) is sent as one last "run_end" SSE event since
-   * agent_end alone doesn't carry those.
+   * The web UI's chat endpoint: unlike POST /agent/run, this reuses one live
+   * session per branch across every message (see chatSessions above) instead
+   * of starting a fresh one per request. Every AgentEvent is forwarded to
+   * the client as it happens; the turn's final result (summary, pull
+   * request, or error) is sent as one last "run_end" SSE event, in the same
+   * RunAgentResult shape POST /agent/run/stream always returned, since
+   * agent_end alone doesn't carry those — the frontend doesn't need to know
+   * this moved to a session underneath.
    */
   app.post("/agent/run/stream", async (c) => {
     const token = process.env.GITHUB_TOKEN;
@@ -114,18 +177,33 @@ export function createServer(repoPath: string) {
     }
 
     return streamSSE(c, async (stream) => {
-      const result = await runAgent({
-        repoPath,
-        branch,
-        prompt,
-        token,
-        onEvent: (event) => {
-          void stream.writeSSE({ event: "agent", data: JSON.stringify(event) });
-        },
-      }).catch((error) => ({
+      const sessionResult = await getOrCreateChatSession(branch, token).catch((error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
       }));
+
+      if (!sessionResult.ok) {
+        const result: RunAgentResult = { ok: false, error: sessionResult.error };
+        await stream.writeSSE({ event: "run_end", data: JSON.stringify(result) });
+        return;
+      }
+
+      const { entry } = sessionResult;
+      entry.pullRequestRef.current = null;
+
+      const sendResult = await entry.session.send(prompt, (event) => {
+        void stream.writeSSE({ event: "agent", data: JSON.stringify(event) });
+      });
+
+      const result: RunAgentResult = sendResult.ok
+        ? {
+            ok: true,
+            summary: sendResult.summary ?? "",
+            pullRequest: entry.pullRequestRef.current,
+            sandboxPath: entry.session.sandboxPath,
+            resumed: entry.session.resumed,
+          }
+        : { ok: false, error: sendResult.error ?? "unknown error", timedOut: sendResult.timedOut };
 
       await stream.writeSSE({ event: "run_end", data: JSON.stringify(result) });
     });

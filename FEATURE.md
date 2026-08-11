@@ -12,6 +12,9 @@ nookが「何を対象にして・何を対象にしないか」というスコ�
 - **Agent SDK統合**: piの`Agent`（`pi-agent-core`）を`nook serve`内にホストする。`POST /agent/run`が起点——branchのsandboxをcreate/resumeし、そのsandbox内で`resolveWorkContext`を呼んでsystem promptを組み立て（CONCEPT/ROADMAP/FEATURE/HANDOFFの4文書＋git diff＋GitHub/Linear状態）、agentに1つのpromptを渡して完了まで待つ。agentに渡すtoolはv1では最小集合: `read_file`/`write_file`/`edit_file`/`bash`（すべてsandbox rootにスコープ）と`create_pull_request`（push＋PR作成/更新のみを担い、commitはagent自身がbash経由の`git commit`で行う）。`create_pull_request`はnook側でGITHUB_TOKENを使って実行し、token自体はagentに渡さない（CONCEPT.md原則2）。agentが無応答になった場合はアイドルタイムアウトで中断し、実行中はagentの進捗をbranch lockのハートビートとしても使う（詳細はROADMAP.md）。sandboxをresumeした場合、直前のagent会話transcript（機械的圧縮＋LLM要約で圧縮したもの）をsystem promptの追加セクションとして注入する（詳細はROADMAP.md）。
 - **web UI**: `nook serve`に統合された、人間向けの主要インターフェース（別プロセス・別ポートは持たない）。branch単位でwork context（git diff／GitHub PR・linked issues／Linear issue／docs drift）を閲覧し（`GET /work-context/:branch`）、agentとchat形式で対話する（`POST /agent/run/stream` — 既存`POST /agent/run`と同じ`runAgent`をSSEで包んだもの。turnごとの進捗をそのまま届ける）。承認ゲート（PR merge、Linear Triage→Todo）はstate表示とGitHub/Linearへの外部リンクのみを提供し、UIから直接操作する手段は持たない。フロントエンドはReact + Tailwind CSS v4 + shadcn/ui、`nook serve`が`dist/web`を静的配信する（詳細はROADMAP.md）。
 
+- **agent session**: 1回のsandbox作成に対して複数ターンの対話を送り続けられる`createSession`/`AgentSession`（`src/agent/session.ts`）。一発実行の`runAgent`（`POST /agent/run`が使う）とweb UIのchat（`POST /agent/run/stream`、branchごとに`nook serve`のメモリ上でsessionを保持）の両方がこの上に乗る共通基盤（詳細はROADMAP.md）。
+- **docsエージェント（`nook docs [branch]`）**: CONCEPT.md/ROADMAP.md/FEATURE.md/HANDOFF.mdの4ファイルに対象を絞った、ローカル対話用のエージェント。実装エージェントと同じsandbox/lockの実行モデルを使うが、branchは新規作成せず呼び出し時点のbranchをそのまま使う。tool registryは4ファイルへのread/write/edit・`git_commit`（staging対象も同じ4ファイルに限定）・`git_push`（main/default branchへの直pushのみ拒否）に絞り、`bash`と`create_pull_request`は持たない（詳細はROADMAP.md）。
+
 各要素の優先順位・着手順はROADMAP.mdを参照。
 
 ## やらないこと（意図的な非スコープ）
