@@ -4,6 +4,8 @@
 
 ## 次のセッションへの申し送り
 
-- agent session primitive（`src/agent/session.ts`）と、それに乗る`nook docs [branch]`（docs専用エージェント）・web UI chatのsession化を実装した。設計判断はgrill-meでユーザーと確定させ、ROADMAP.md「全体アーキテクチャの方向性」とFEATURE.mdのスコープ一覧に反映済み。
-- このセッション環境でもLLM provider API key・実GitHub tokenが揃っておらず（ROADMAP未解決の論点3と同じ制約）、実地検証はユニットテスト（`src/agent/docsTools.test.ts`のallowlist/main-branch push拒否ロジック）と型チェック（`bunx tsc --noEmit`）・既存テストスイート（`bun test`、71件通過）止まり。`nook docs`の対話ループ・`git_commit`/`git_push`の実際の動作・web UI chatのsession再利用は未検証（ROADMAP未解決の論点7）。ユーザー自身の環境で一度通しで確認するとよい。
-- `nook serve`のchat sessionを明示的に破棄する仕組みが無い（ROADMAP未解決の論点6）。長時間稼働させた場合のメモリ挙動も未検証。次にこの領域を触るときの候補: `destroySandbox`と`chatSessions`のエントリ削除を対にする、またはTTLを設ける。
+- 前回HANDOFFに残っていた2つの未解決論点を解消した。
+  1. `createSandbox`（`src/sandbox/manager.ts`）が`getLockStatus`/`acquireLock`のGitHub API呼び出し失敗時に例外を投げていた問題: 呼び出しをtry/catchで包み、常に`CreateSandboxResult`（`{ok:false,error}`）を返すよう修正。これに伴い`src/serve.ts`の`GET /work-context/:branch`にあった個別の防御的try/catchは不要になったため削除した。回帰テストを`src/sandbox/manager.test.ts`に追加済み。
+  2. `nook serve`のchat session（`chatSessions`）が明示的に破棄されない問題: `DELETE /sandbox/:branch`成功時に対応するchat sessionを閉じる（`evictChatSession`）よう対にした。加えて、5分おきのsweepで一定時間（デフォルト30分、`NOOK_CHAT_SESSION_IDLE_MS`で上書き可）操作の無いsessionを自動退避するようにした（`src/serve.ts`）。sandbox/lock自体はこの退避で触らない——次回のchatメッセージがcold start（resume＋要約）を再度払うだけ。
+- このセッション環境にはLLM provider API key・実GitHub tokenが無く（ROADMAP未解決の論点3と同じ制約）、上記2点目のsweep/eviction挙動は型チェック（`bunx tsc --noEmit`）と既存テストスイート（`bun test`、72件通過）の範囲でしか確認できていない。`nook serve`を長時間動かした際の実際のメモリ挙動、複数branchを行き来した場合の挙動はユーザー自身の環境で一度確認するとよい。
+- `nook docs`の対話ループ・`git_commit`/`git_push`の実際の動作・web UI chatのsession再利用も同じ制約で未検証のまま（ROADMAP未解決の論点5）。

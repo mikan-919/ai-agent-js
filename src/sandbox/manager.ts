@@ -49,25 +49,25 @@ export async function createSandbox(opts: CreateSandboxOptions): Promise<CreateS
   }
   const { owner, repo } = ownerRepo;
 
-  const status = await getLockStatus({ owner, repo, branch: opts.branch, token: opts.token, ttlMs: opts.ttlMs });
-  const alreadyHeldByUs = status.locked && !status.expired && status.lock.holder === holder;
-
-  if (!alreadyHeldByUs) {
-    const acquired = await acquireLock({
-      owner,
-      repo,
-      branch: opts.branch,
-      token: opts.token,
-      holder,
-      note: opts.note,
-      ttlMs: opts.ttlMs,
-    });
-    if (!acquired.ok) {
-      return { ok: false, error: acquired.error };
-    }
-  }
-
   try {
+    const status = await getLockStatus({ owner, repo, branch: opts.branch, token: opts.token, ttlMs: opts.ttlMs });
+    const alreadyHeldByUs = status.locked && !status.expired && status.lock.holder === holder;
+
+    if (!alreadyHeldByUs) {
+      const acquired = await acquireLock({
+        owner,
+        repo,
+        branch: opts.branch,
+        token: opts.token,
+        holder,
+        note: opts.note,
+        ttlMs: opts.ttlMs,
+      });
+      if (!acquired.ok) {
+        return { ok: false, error: acquired.error };
+      }
+    }
+
     if (backend === "docker") {
       const name = containerName(owner, repo, opts.branch);
       const { path, resumed } = await ensureDockerSandbox(
