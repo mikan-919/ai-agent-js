@@ -43,6 +43,7 @@ function renderGithub(github: WorkContext["github"]): string {
   const lines = [
     "## GitHub",
     `PR #${pullRequest.number}${pullRequest.isDraft ? " [draft]" : ""} ${pullRequest.title} (${pullRequest.state}) ${pullRequest.url}`,
+    `Review: ${pullRequest.reviewDecision ?? "no review yet"} · Checks: ${pullRequest.checksStatus ?? "no checks"}`,
   ];
   if (pullRequest.body) lines.push(`PR body:\n${pullRequest.body}`);
   if (linkedIssues.length > 0) {

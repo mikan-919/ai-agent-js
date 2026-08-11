@@ -1,8 +1,20 @@
 import { AlertTriangle, ExternalLink, GitBranch, GitPullRequest, Layers } from "lucide-react";
-import type { WorkContext } from "../../src/context/types";
+import type { GithubChecksStatus, GithubReviewDecision, WorkContext } from "../../src/context/types";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { ScrollArea } from "./ui/scroll-area";
+
+function reviewDecisionVariant(decision: GithubReviewDecision): "default" | "destructive" | "outline" {
+  if (decision === "APPROVED") return "default";
+  if (decision === "CHANGES_REQUESTED") return "destructive";
+  return "outline";
+}
+
+function checksStatusVariant(status: GithubChecksStatus): "default" | "destructive" | "outline" {
+  if (status === "SUCCESS") return "default";
+  if (status === "FAILURE" || status === "ERROR") return "destructive";
+  return "outline";
+}
 
 export function WorkContextPanel({ workContext }: { workContext: WorkContext }) {
   const { git, github, linear, docs } = workContext;
@@ -55,18 +67,28 @@ export function WorkContextPanel({ workContext }: { workContext: WorkContext }) 
           {github.ok ? (
             <>
               {github.data.pullRequest ? (
-                <a
-                  href={github.data.pullRequest.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 -mx-1.5 hover:bg-accent"
-                >
-                  <Badge variant={github.data.pullRequest.isDraft ? "secondary" : "default"}>
-                    #{github.data.pullRequest.number} {github.data.pullRequest.state}
-                  </Badge>
-                  <span className="truncate">{github.data.pullRequest.title}</span>
-                  <ExternalLink className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
-                </a>
+                <>
+                  <a
+                    href={github.data.pullRequest.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 -mx-1.5 hover:bg-accent"
+                  >
+                    <Badge variant={github.data.pullRequest.isDraft ? "secondary" : "default"}>
+                      #{github.data.pullRequest.number} {github.data.pullRequest.state}
+                    </Badge>
+                    <span className="truncate">{github.data.pullRequest.title}</span>
+                    <ExternalLink className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
+                  </a>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge variant={reviewDecisionVariant(github.data.pullRequest.reviewDecision)}>
+                      {github.data.pullRequest.reviewDecision ?? "no review yet"}
+                    </Badge>
+                    <Badge variant={checksStatusVariant(github.data.pullRequest.checksStatus)}>
+                      {github.data.pullRequest.checksStatus ?? "no checks"}
+                    </Badge>
+                  </div>
+                </>
               ) : (
                 <span className="text-muted-foreground">まだPRなし</span>
               )}
