@@ -21,9 +21,9 @@
 
 運用で入力する正確な識別子はここに集約する。本文では役割語を使い、コマンドや設定名をそのまま入力する必要がある箇所だけこの一覧へリンクする。
 
-- CLI: `nook`
-- サブコマンド: `nook serve`、`nook docs [branch]`、`nook ticket`、`nook ticket poll`
-- 環境変数: `NOOK_AGENT_IDLE_TIMEOUT_MS`、`NOOK_CHAT_SESSION_IDLE_MS`、`NOOK_GIT_TOKEN`、`NOOK_MODEL_ID`、`NOOK_MODEL_PROVIDER`、`NOOK_TICKET_MAX_ISSUES`、`NOOK_TICKET_POLL_INTERVAL_MS`
+- CLI: `sable`
+- サブコマンド: `sable serve`、`sable docs [branch]`、`sable ticket`、`sable ticket poll`
+- 環境変数: `SABLE_AGENT_IDLE_TIMEOUT_MS`、`SABLE_CHAT_SESSION_IDLE_MS`、`SABLE_GIT_TOKEN`、`SABLE_MODEL_ID`、`SABLE_MODEL_PROVIDER`、`SABLE_TICKET_MAX_ISSUES`、`SABLE_TICKET_POLL_INTERVAL_MS`
 
 `package.json`の`name`/`bin`と`bun.lock`の`name`はパッケージ管理用の宣言・生成物であり、TypeScriptの実行時設定から参照できないため、この正本の例外として扱う。アプリケーションコードで識別子を使う場合は、必ず `src/config.ts` の定数を参照すること。
 

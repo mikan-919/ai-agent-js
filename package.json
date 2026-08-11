@@ -1,10 +1,10 @@
 {
-  "name": "nook",
+  "name": "sable",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "bin": {
-    "nook": "src/index.ts"
+    "sable": "src/index.ts"
   },
   "scripts": {
     "serve": "bun run src/index.ts serve",

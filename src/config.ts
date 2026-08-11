@@ -3,7 +3,7 @@
  * application can use generic terminology without repeating the codename or
  * the document allowlist.
  */
-export const PROJECT_CODENAME = "nook";
+export const PROJECT_CODENAME = "sable";
 export const PROJECT_USER_AGENT = PROJECT_CODENAME;
 export const PROJECT_STATE_DIRECTORY = `.${PROJECT_CODENAME}`;
 export const PROPOSED_ISSUE_LABEL = `${PROJECT_CODENAME}:proposed`;
