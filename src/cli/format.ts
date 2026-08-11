@@ -1,5 +1,6 @@
 import type { WorkContext } from "../context";
 import type { CreateSandboxResult, DestroySandboxResult } from "../sandbox";
+import { WORKSPACE_DOCUMENTS } from "../config";
 
 const EXCERPT_MAX_LEN = 160;
 
@@ -74,10 +75,10 @@ export function formatWorkContext(ctx: WorkContext): string {
   if (ctx.docs.driftedAgainstMain.length > 0) {
     lines.push(`  drift vs ${ctx.git.mainBranch}: ${ctx.docs.driftedAgainstMain.join(", ")}`);
   }
-  lines.push(`  CONCEPT.md: ${formatDocExcerpt(ctx.docs.concept)}`);
-  lines.push(`  ROADMAP.md: ${formatDocExcerpt(ctx.docs.roadmap)}`);
-  lines.push(`  FEATURE.md: ${formatDocExcerpt(ctx.docs.feature)}`);
-  lines.push(`  HANDOFF.md: ${formatDocExcerpt(ctx.docs.handoff)}`);
+  lines.push(`  ${WORKSPACE_DOCUMENTS.concept}: ${formatDocExcerpt(ctx.docs.concept)}`);
+  lines.push(`  ${WORKSPACE_DOCUMENTS.roadmap}: ${formatDocExcerpt(ctx.docs.roadmap)}`);
+  lines.push(`  ${WORKSPACE_DOCUMENTS.feature}: ${formatDocExcerpt(ctx.docs.feature)}`);
+  lines.push(`  ${WORKSPACE_DOCUMENTS.handoff}: ${formatDocExcerpt(ctx.docs.handoff)}`);
 
   return lines.join("\n");
 }

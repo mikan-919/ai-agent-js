@@ -13,7 +13,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function initRepo(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-git-context-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-harness-git-context-"));
   dirs.push(dir);
   await git(dir, ["init", "-q", "-b", "main"]);
   await git(dir, ["config", "user.email", "test@example.com"]);

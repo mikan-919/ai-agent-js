@@ -14,7 +14,7 @@ describe("transcriptPath", () => {
 describe("save/load/delete transcript", () => {
   let baseDir: string;
   beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "nook-transcript-test-"));
+    baseDir = await mkdtemp(join(tmpdir(), "agent-harness-transcript-test-"));
   });
   afterEach(async () => {
     await rm(baseDir, { recursive: true, force: true });

@@ -25,7 +25,7 @@ a human judgment call, handled through the docs agent, not by you.
 
 You have a create_issue tool, capped at a fixed number of calls this run.
 You have no read/write/edit/bash/create_pull_request tools: you cannot open
-CONCEPT.md, FEATURE.md, or the source code, and filing issues from the
+${WORKSPACE_DOCUMENTS.concept}, ${WORKSPACE_DOCUMENTS.feature}, or the source code, and filing issues from the
 excerpts below doesn't require it.`;
 
 function extractSection(markdown: string, heading: string): string | null {
@@ -38,16 +38,21 @@ function extractSection(markdown: string, heading: string): string | null {
 }
 
 export function extractRoadmapGaps(roadmap: string | null): string {
-  if (roadmap === null) return "(ROADMAP.md not found)";
+  if (roadmap === null) return `(${WORKSPACE_DOCUMENTS.roadmap} not found)`;
   const sections = ["次の優先順位", "未解決の論点"]
     .map((heading) => extractSection(roadmap, heading))
     .filter((section): section is string => section !== null);
-  return sections.length > 0 ? sections.join("\n\n") : "(neither section found in ROADMAP.md)";
+  return sections.length > 0
+    ? sections.join("\n\n")
+    : `(neither section found in ${WORKSPACE_DOCUMENTS.roadmap})`;
 }
 
 export function extractHandoffNote(handoff: string | null): string {
-  if (handoff === null) return "(HANDOFF.md not found)";
-  return extractSection(handoff, "次のセッションへの申し送り") ?? "(section not found in HANDOFF.md)";
+  if (handoff === null) return `(${WORKSPACE_DOCUMENTS.handoff} not found)`;
+  return (
+    extractSection(handoff, "次のセッションへの申し送り") ??
+    `(section not found in ${WORKSPACE_DOCUMENTS.handoff})`
+  );
 }
 
 function renderOpenIssues(issues: OpenIssueRef[]): string {
@@ -66,8 +71,8 @@ export function buildTicketExtractionSystemPrompt(options: BuildTicketExtraction
   return [
     TICKET_EXTRACTION_PREAMBLE,
     `You may create at most ${options.maxIssues} issue(s) in this run.`,
-    `## ROADMAP.md gaps\n\n${extractRoadmapGaps(options.roadmap)}`,
-    `## HANDOFF.md handoff\n\n${extractHandoffNote(options.handoff)}`,
+    `## ${WORKSPACE_DOCUMENTS.roadmap} gaps\n\n${extractRoadmapGaps(options.roadmap)}`,
+    `## ${WORKSPACE_DOCUMENTS.handoff} handoff\n\n${extractHandoffNote(options.handoff)}`,
     `## Existing open issues (check before filing — avoid duplicates)\n\n${renderOpenIssues(options.openIssues)}`,
   ].join("\n\n");
 }

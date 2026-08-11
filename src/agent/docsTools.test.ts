@@ -8,7 +8,7 @@ describe("docs tools file allowlist", () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nook-docs-tools-"));
+    dir = await mkdtemp(join(tmpdir(), "agent-harness-docs-tools-"));
     await Bun.write(join(dir, "CONCEPT.md"), "concept content");
   });
 

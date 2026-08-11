@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { resolveGitContext } from "../context/git";
 import { installFakeGithubLockApi } from "../lock/test-helpers";
+import { containerName } from "./docker";
 import { createSandbox, destroySandbox } from "./manager";
 
 const owner = "acme";
@@ -19,7 +20,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function initRepo(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-docker-sandbox-repo-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-harness-docker-sandbox-repo-"));
   await git(dir, ["init", "-q", "-b", "main"]);
   await git(dir, ["config", "user.email", "test@example.com"]);
   await git(dir, ["config", "user.name", "test"]);
@@ -56,7 +57,7 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
   });
 
   function trackedName(branch: string): string {
-    const name = `nook-${owner}-${repo}-${branch}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
+    const name = containerName(owner, repo, branch);
     createdContainers.push(name);
     return name;
   }
@@ -78,7 +79,7 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
     expect(result.sandbox.resumed).toBe(false);
     expect(result.sandbox.path).toBe("/workspace");
 
-    const name = `nook-${owner}-${repo}-feature-x`;
+    const name = containerName(owner, repo, "feature-x");
     const checkedOutBranch = (await $`docker exec ${name} git -C /workspace rev-parse --abbrev-ref HEAD`.text()).trim();
     expect(checkedOutBranch).toBe("feature-x");
   }, 30000);
@@ -96,7 +97,7 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
     expect(first.ok).toBe(true);
     if (!first.ok) return;
 
-    const name = `nook-${owner}-${repo}-feature-x`;
+    const name = containerName(owner, repo, "feature-x");
     await $`docker exec ${name} sh -c ${"echo hello > /workspace/marker.txt"}`.quiet();
     await $`docker stop ${name}`.quiet();
 
@@ -132,7 +133,7 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
     const created = await createSandbox({ repoPath, branch: "feature-x", token, holder: "agent-a", backend: "docker", image });
     expect(created.ok).toBe(true);
 
-    const name = `nook-${owner}-${repo}-feature-x`;
+    const name = containerName(owner, repo, "feature-x");
     await $`docker exec ${name} sh -c ${"echo dirty > /workspace/dirty.txt"}`.quiet();
 
     const refused = await destroySandbox({ repoPath, branch: "feature-x", token, backend: "docker" });
@@ -159,7 +160,7 @@ describe.if(await dockerAvailable())("sandbox manager (docker backend)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    const name = `nook-${owner}-${repo}-feature-z`;
+    const name = containerName(owner, repo, "feature-z");
     const checkedOutBranch = (await $`docker exec ${name} git -C /workspace rev-parse --abbrev-ref HEAD`.text()).trim();
     expect(checkedOutBranch).toBe("feature-z");
 

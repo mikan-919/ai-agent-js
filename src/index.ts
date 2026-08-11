@@ -88,8 +88,8 @@ async function runSandbox(args: string[]) {
 }
 
 /**
- * Interactive local session for tending CONCEPT.md/ROADMAP.md/FEATURE.md/
- * HANDOFF.md. Unlike the implementation agent, this goes through the same
+ * Interactive local session for tending the workspace documents. Unlike the
+ * implementation agent, this goes through the same
  * sandbox/lock lifecycle (no bypass — see ROADMAP.md) but on whatever branch
  * is already checked out, so it never creates a new branch, and its tools
  * are scoped to just those four files plus commit/push (no bash, no PR).

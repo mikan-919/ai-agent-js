@@ -158,14 +158,14 @@ describe("formatCreateSandboxResult", () => {
       sandbox: {
         branch: "feature/x",
         backend: "worktree",
-        path: "/home/user/.nook/sandboxes/acme-demo/feature-x",
+        path: "/home/user/app-state/sandboxes/acme-demo/feature-x",
         holder: "host:123",
         createdAt: "2026-08-10T00:00:00.000Z",
         resumed: false,
       },
     });
     expect(output).toBe(
-      "sandbox created: feature/x [worktree] -> /home/user/.nook/sandboxes/acme-demo/feature-x (holder: host:123)",
+      "sandbox created: feature/x [worktree] -> /home/user/app-state/sandboxes/acme-demo/feature-x (holder: host:123)",
     );
   });
 

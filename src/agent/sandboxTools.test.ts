@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveSandboxPath } from "./sandboxTools";
 
 describe("resolveSandboxPath", () => {
-  const cwd = "/home/user/.nook/sandboxes/acme-demo/feature-x";
+  const cwd = "/home/user/app-state/sandboxes/acme-demo/feature-x";
 
   test("resolves a relative path inside the sandbox", () => {
     expect(resolveSandboxPath(cwd, "src/index.ts")).toBe(join(cwd, "src/index.ts"));

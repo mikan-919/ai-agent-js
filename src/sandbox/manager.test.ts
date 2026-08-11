@@ -18,7 +18,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function initRepo(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-sandbox-repo-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-harness-sandbox-repo-"));
   await git(dir, ["init", "-q", "-b", "main"]);
   await git(dir, ["config", "user.email", "test@example.com"]);
   await git(dir, ["config", "user.name", "test"]);
@@ -35,7 +35,7 @@ describe("sandbox manager", () => {
   beforeEach(async () => {
     restoreGithub = installFakeGithubLockApi(owner, repo);
     repoPath = await initRepo();
-    baseDir = await mkdtemp(join(tmpdir(), "nook-sandbox-base-"));
+    baseDir = await mkdtemp(join(tmpdir(), "agent-harness-sandbox-base-"));
   });
 
   afterEach(async () => {

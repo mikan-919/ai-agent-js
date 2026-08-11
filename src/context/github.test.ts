@@ -13,7 +13,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function initRepoWithOrigin(url: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-github-context-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-harness-github-context-"));
   dirs.push(dir);
   await git(dir, ["init", "-q", "-b", "main"]);
   await git(dir, ["remote", "add", "origin", url]);

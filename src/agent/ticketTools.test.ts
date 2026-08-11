@@ -64,10 +64,10 @@ describe("listIssueComments", () => {
 
 describe("getAuthenticatedLogin", () => {
   test("returns the token's login", async () => {
-    const login = await withFetch(() => new Response(JSON.stringify({ login: "nook-bot" })), () =>
+    const login = await withFetch(() => new Response(JSON.stringify({ login: "test-bot" })), () =>
       getAuthenticatedLogin("token"),
     );
-    expect(login).toBe("nook-bot");
+    expect(login).toBe("test-bot");
   });
 });
 

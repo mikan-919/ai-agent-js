@@ -15,7 +15,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function initRepoWithoutRemote(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-ticket-run-noremote-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-harness-ticket-run-noremote-"));
   await git(dir, ["init", "-q", "-b", "main"]);
   await git(dir, ["config", "user.email", "test@example.com"]);
   await git(dir, ["config", "user.name", "test"]);
@@ -69,14 +69,14 @@ describe("runTicketPollPass", () => {
     await expect(runTicketPollPass(dir, token)).rejects.toThrow("could not determine owner/repo");
   });
 
-  test("skips every issue whose latest comment is already nook's own, replying to none", async () => {
+  test("skips every issue whose latest comment is already the harness's own, replying to none", async () => {
     const dir = await initRepoWithRemote();
     dirs.push(dir);
 
     const result = await withFetch(
       (url) => {
         if (url === "https://api.github.com/user") {
-          return new Response(JSON.stringify({ login: "nook-bot" }));
+          return new Response(JSON.stringify({ login: "test-bot" }));
         }
         if (url.startsWith(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&labels=`)) {
           return new Response(
@@ -87,10 +87,10 @@ describe("runTicketPollPass", () => {
           );
         }
         if (url === `https://api.github.com/repos/${owner}/${repo}/issues/1/comments?per_page=100`) {
-          return new Response(JSON.stringify([{ user: { login: "nook-bot" }, body: "on it" }]));
+          return new Response(JSON.stringify([{ user: { login: "test-bot" }, body: "on it" }]));
         }
         if (url === `https://api.github.com/repos/${owner}/${repo}/issues/2/comments?per_page=100`) {
-          return new Response(JSON.stringify([{ user: { login: "nook-bot" }, body: "acknowledged" }]));
+          return new Response(JSON.stringify([{ user: { login: "test-bot" }, body: "acknowledged" }]));
         }
         throw new Error(`unhandled fake GitHub request: ${url}`);
       },
@@ -107,7 +107,7 @@ describe("runTicketPollPass", () => {
     const result = await withFetch(
       (url) => {
         if (url === "https://api.github.com/user") {
-          return new Response(JSON.stringify({ login: "nook-bot" }));
+          return new Response(JSON.stringify({ login: "test-bot" }));
         }
         if (url.startsWith(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&labels=`)) {
           return new Response(JSON.stringify([{ number: 10, title: "Gap C", body: "detail", html_url: "https://x/10" }]));

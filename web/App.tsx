@@ -40,7 +40,7 @@ export function App() {
           <div className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <FolderGit2 className="size-4" />
           </div>
-          <span className="text-base font-semibold tracking-tight">nook</span>
+          <span className="text-base font-semibold tracking-tight">Agent workspace</span>
         </div>
         <form
           className="flex flex-1 items-center gap-2"

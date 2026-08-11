@@ -1,5 +1,5 @@
 import type { WorkContext } from "../context";
-import { WORKSPACE_DOCUMENT_FILES } from "../config";
+import { WORKSPACE_DOCUMENT_FILES, WORKSPACE_DOCUMENTS } from "../config";
 import { renderDocs, renderGit, renderPreviousSession } from "./systemPrompt";
 
 /**
@@ -23,12 +23,12 @@ branch and go through the same GitHub PR Open→Merged approval gate as any
 other change — you never open or merge a PR yourself; that part is left to
 the human.
 
-The rules for what belongs in which document, and the HANDOFF.md
+The rules for what belongs in which document, and the ${WORKSPACE_DOCUMENTS.handoff}
 distillation flow, are defined in this repository's own CLAUDE.md, embedded
 below. Treat it as the authoritative source rather than re-deriving the
 rules yourself. If you find a contradiction between CLAUDE.md and what these
 docs currently say, or the human asks you to add/remove/change one of
-CONCEPT.md's invariant principles, say so and ask the human directly instead
+${WORKSPACE_DOCUMENTS.concept}'s invariant principles, say so and ask the human directly instead
 of editing unilaterally — CLAUDE.md itself says principle changes go through
 human confirmation, not an agent's own judgment.`;
 
