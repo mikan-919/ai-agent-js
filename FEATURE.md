@@ -5,7 +5,7 @@
 ## スコープに含むもの
 
 - **WorkContext resolver**: Git・GitHub・Linear・workspace docsの4ソースを統合し、作業文脈を再構成する。sandbox概念に依存せず、pathのみを引数に取る。
-- **`serve`サブコマンド**: Agent loopをホストし、tool registryを完全所有するローカルサーバ。
+- **`serve`サブコマンド**（正確な起動名は [CLAUDE.mdの実行時識別子一覧](CLAUDE.md#実行時識別子)）: Agent loopをホストし、tool registryを完全所有するローカルサーバ。
 - **lock manager**: `refs/harness-locks/<branch>`によるbranch単位の排他制御。
 - **sandbox**: git worktree / Dockerによる、1 branch = 1 sandboxの実行環境。lock managerと一体化する。
 - **CLI**: `serve`サブコマンドの薄いラッパー。

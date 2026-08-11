@@ -4,6 +4,5 @@
 
 ## 次のセッションへの申し送り
 
-- HANDOFF.mdの前回の申し送りにあった「`serve`サブコマンド内での定期実行（cron相当の自動配線）」を実装した。`ticket`サブコマンド/`ticket poll`サブコマンドの中身（抽出パス・pollパス）を`src/agent/ticketRun.ts`の`runTicketExtractionPass`/`runTicketPollPass`へ切り出し、CLI（`src/index.ts`）と`serve`サブコマンド（`src/serve.ts`）の両方がこれを呼ぶ構成にした。`serve`サブコマンド側はチケットポーリング間隔の環境変数が設定されているときだけ有効になるopt-in（デフォルト無効）——理由・多重実行防止（`runInProgress`フラグ）の詳細はROADMAP.mdのticket切り出しagent項目に反映済み。`bun test`: 101 pass / 7 skip（新規テストは`src/agent/ticketRun.test.ts`、`runTicketExtractionPass`/`runTicketPollPass`のno-remoteエラー経路・skip経路・sandbox失敗時のper-issueエラー記録経路をfetchモックでカバー）、`bunx tsc --noEmit`・`bun run build:web`ともにクリーン。
-- 実GitHub API・LLM providerでの通し検証はまだできていない——このセッション環境の`GITHUB_TOKEN`が`GET /repos/.../issues`に403を返す制約（論点3）とLLM provider側API keyが無い制約（論点5と同種）が今回も残っている。チケットポーリング間隔の環境変数を設定した`serve`サブコマンドを、本物のGITHUB_TOKEN・LLM provider API keyが使える環境で一度通しで動かし、抽出パス→pollパスが実際にIssue作成・返信まで届くか確認するとよい。
-- 論点3〜5（実GitHub token・LLM provider API key・Dockerデーモンが無い制約）はこのセッション環境でも変わらず未解決。
+- チケットポーリング間隔の設定を有効にした`serve`サブコマンドを、本物のGITHUB_TOKEN・LLM provider API keyが使える環境で一度通しで動かし、抽出パス→pollパスが実際にIssue作成・返信まで届くか確認する。正確なコマンド名・環境変数名は [CLAUDE.mdの実行時識別子一覧](CLAUDE.md#実行時識別子) を参照。
+- 実GitHub API・LLM provider・Dockerデーモンを使った通し検証は、このセッション環境の制約により未完了。詳細はROADMAP.mdの「未解決の論点3〜5」を参照。

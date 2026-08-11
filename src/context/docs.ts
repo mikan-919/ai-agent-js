@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { DRIFT_WATCHED_DOCUMENT_FILES, WORKSPACE_DOCUMENT_FILES } from "../config";
+import { DRIFT_WATCHED_DOCUMENT_FILES, WORKSPACE_DOCUMENTS } from "../config";
 import type { DocsContext, GitDiffFileStat } from "./types";
 
 async function readIfExists(path: string): Promise<string | null> {
@@ -29,9 +29,12 @@ export function detectDocsDrift(diffFiles: GitDiffFileStat[]): string[] {
 }
 
 export async function resolveDocsContext(repoPath: string, diffFiles: GitDiffFileStat[]): Promise<DocsContext> {
-  const [concept, roadmap, feature, handoff] = await Promise.all(
-    WORKSPACE_DOCUMENT_FILES.map((file) => readIfExists(join(repoPath, file))),
-  );
+  const [concept, roadmap, feature, handoff] = await Promise.all([
+    readIfExists(join(repoPath, WORKSPACE_DOCUMENTS.concept)),
+    readIfExists(join(repoPath, WORKSPACE_DOCUMENTS.roadmap)),
+    readIfExists(join(repoPath, WORKSPACE_DOCUMENTS.feature)),
+    readIfExists(join(repoPath, WORKSPACE_DOCUMENTS.handoff)),
+  ]);
   return {
     concept: concept ?? null,
     roadmap: roadmap ?? null,
