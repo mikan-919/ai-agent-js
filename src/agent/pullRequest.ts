@@ -5,6 +5,7 @@ import { $ } from "bun";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { PullRequestOutcome } from "./types";
+import { ENV, PROJECT_CODENAME, PROJECT_USER_AGENT } from "../config";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -12,7 +13,7 @@ function authHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
-    "User-Agent": "nook",
+    "User-Agent": PROJECT_USER_AGENT,
   };
 }
 
@@ -63,14 +64,14 @@ async function createPullRequest(
  * output for the git subprocess.
  */
 export async function pushBranch(cwd: string, branch: string, token: string): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "nook-askpass-"));
+  const dir = await mkdtemp(join(tmpdir(), `${PROJECT_CODENAME}-askpass-`));
   const scriptPath = join(dir, "askpass.sh");
   try {
-    await writeFile(scriptPath, '#!/bin/sh\necho "$NOOK_GIT_TOKEN"\n', { mode: 0o700 });
+    await writeFile(scriptPath, `#!/bin/sh\necho "$${ENV.gitToken}"\n`, { mode: 0o700 });
     await $`git -C ${cwd} push origin HEAD:refs/heads/${branch}`.env({
       ...process.env,
       GIT_ASKPASS: scriptPath,
-      NOOK_GIT_TOKEN: token,
+      [ENV.gitToken]: token,
       GIT_TERMINAL_PROMPT: "0",
     });
   } finally {

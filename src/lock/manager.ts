@@ -1,4 +1,5 @@
 import type { AcquireLockResult, LockInfo, LockStatus, ReleaseLockResult } from "./types";
+import { PROJECT_CODENAME, PROJECT_USER_AGENT } from "../config";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -13,7 +14,7 @@ function authHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
-    "User-Agent": "nook",
+    "User-Agent": PROJECT_USER_AGENT,
   };
 }
 
@@ -58,8 +59,8 @@ async function createLockCommit(
       message,
       tree: treeSha,
       parents: [],
-      author: { name: "nook", email: "nook@localhost", date: iso },
-      committer: { name: "nook", email: "nook@localhost", date: iso },
+      author: { name: PROJECT_CODENAME, email: `${PROJECT_CODENAME}@localhost`, date: iso },
+      committer: { name: PROJECT_CODENAME, email: `${PROJECT_CODENAME}@localhost`, date: iso },
     }),
   });
   if (!response.ok) {

@@ -10,18 +10,19 @@ import { parseSandboxArgs } from "./cli/sandbox";
 import { parseTicketArgs } from "./cli/ticket";
 import { resolveGitContext } from "./context/git";
 import { resolveWorkContext } from "./context";
+import { PROPOSED_ISSUE_LABEL, PROJECT_CODENAME } from "./config";
 import { createServer } from "./serve";
 import { createSandbox, destroySandbox } from "./sandbox";
 
 const DEFAULT_PORT = 4319;
 
 function usage(): never {
-  console.error("usage: nook <serve|status|sandbox|docs|ticket> [--json]");
-  console.error("  nook sandbox create <branch> [--backend worktree|docker] [--json]");
-  console.error("  nook sandbox destroy <branch> [--backend worktree|docker] [--force] [--json]");
-  console.error("  nook docs [branch]");
-  console.error("  nook ticket [--json]");
-  console.error("  nook ticket poll");
+  console.error(`usage: ${PROJECT_CODENAME} <serve|status|sandbox|docs|ticket> [--json]`);
+  console.error(`  ${PROJECT_CODENAME} sandbox create <branch> [--backend worktree|docker] [--json]`);
+  console.error(`  ${PROJECT_CODENAME} sandbox destroy <branch> [--backend worktree|docker] [--force] [--json]`);
+  console.error(`  ${PROJECT_CODENAME} docs [branch]`);
+  console.error(`  ${PROJECT_CODENAME} ticket [--json]`);
+  console.error(`  ${PROJECT_CODENAME} ticket poll`);
   process.exit(1);
 }
 
@@ -39,13 +40,13 @@ async function runServe() {
 
   const app = createServer(repoPath);
 
-  console.log(`nook serve: watching ${repoPath} on http://localhost:${port}`);
+  console.log(`${PROJECT_CODENAME} serve: watching ${repoPath} on http://localhost:${port}`);
   Bun.serve({ fetch: app.fetch, port });
 }
 
 /**
  * Resolves work context in-process rather than talking to a running
- * `nook serve` — resolveWorkContext holds no server-side state (CONCEPT.md
+ * The server command — resolveWorkContext holds no server-side state (CONCEPT.md
  * principle 1), so there's nothing an HTTP round trip would add here.
  */
 async function runStatus(json: boolean) {
@@ -99,7 +100,7 @@ async function runDocs(args: string[]) {
   const { branch: argBranch } = parseDocsArgs(args);
   const branch = argBranch ?? (await resolveGitContext(repoPath)).branch;
 
-  console.log(`nook docs: opening sandbox for branch '${branch}'…`);
+  console.log(`${PROJECT_CODENAME} docs: opening sandbox for branch '${branch}'…`);
 
   const sessionResult = await createSession({
     repoPath,
@@ -159,7 +160,7 @@ async function runDocs(args: string[]) {
 }
 
 /**
- * Files nook:proposed GitHub issues for gaps the human has already flagged
+ * Files proposed GitHub issues for gaps the human has already flagged
  * in ROADMAP.md/HANDOFF.md (see ROADMAP.md's ticket-extraction agent
  * design). Always targets the repo's default branch, never whatever branch
  * happens to be checked out — the point is project-wide direction, not a
@@ -168,13 +169,13 @@ async function runDocs(args: string[]) {
  * writes to its worktree, so there's nothing worth keeping it around for.
  *
  * Thin CLI wrapper: the pass itself (runTicketExtractionPass) is shared with
- * nook serve's periodic wiring (serve.ts) so both drive the same logic.
+ * the server's periodic wiring (serve.ts) so both drive the same logic.
  */
 async function runTicketExtract(json: boolean) {
   const repoPath = process.cwd();
   const token = requireGithubToken();
 
-  console.log("nook ticket: running extraction pass…");
+  console.log(`${PROJECT_CODENAME} ticket: running extraction pass…`);
   const result = await runTicketExtractionPass(repoPath, token);
 
   if (!result.ok) {
@@ -191,23 +192,25 @@ async function runTicketExtract(json: boolean) {
 
 /**
  * Stateless polling pass for the ticket-extraction agent's issue-conversation
- * extension (ROADMAP.md): for every open nook:proposed issue, replies if and
- * only if the latest comment wasn't posted by nook itself. No "last seen"
+ * extension (ROADMAP.md): for every open proposed issue, replies if and only
+ * if the latest comment wasn't posted by the harness. No "last seen"
  * cursor is kept between passes (CONCEPT.md principle 1) — "does this need a
  * reply" is re-derived from the thread every time this runs.
  *
- * Thin CLI wrapper: the pass itself (runTicketPollPass) is shared with nook
+ * Thin CLI wrapper: the pass itself (runTicketPollPass) is shared with the
  * serve's periodic wiring (serve.ts) so both drive the same logic.
  */
 async function runTicketPoll() {
   const repoPath = process.cwd();
   const token = requireGithubToken();
 
-  const result = await runTicketPollPass(repoPath, token, (message) => console.log(`nook ticket poll: ${message}`));
+  const result = await runTicketPollPass(repoPath, token, (message) =>
+    console.log(`${PROJECT_CODENAME} ticket poll: ${message}`),
+  );
   for (const error of result.errors) console.error(error);
 
   console.log(
-    `nook ticket poll: replied on ${result.repliedCount} issue(s) (${result.checkedCount} nook:proposed issue(s) checked).`,
+    `${PROJECT_CODENAME} ticket poll: replied on ${result.repliedCount} issue(s) (${result.checkedCount} ${PROPOSED_ISSUE_LABEL} issue(s) checked).`,
   );
 }
 

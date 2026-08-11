@@ -6,6 +6,7 @@ import type {
   GithubReviewDecision,
   SourceResult,
 } from "./types";
+import { PROJECT_USER_AGENT } from "../config";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -50,7 +51,7 @@ async function findPullRequestForBranch(
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "nook",
+      "User-Agent": PROJECT_USER_AGENT,
     },
   });
   if (!response.ok) {
@@ -109,7 +110,7 @@ async function findPullRequestDetails(
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-      "User-Agent": "nook",
+      "User-Agent": PROJECT_USER_AGENT,
     },
     body: JSON.stringify({ query, variables: { owner, repo, number: pullNumber } }),
   });

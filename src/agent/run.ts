@@ -7,8 +7,8 @@ import type { PullRequestOutcome, RunAgentOptions, RunAgentResult } from "./type
 /**
  * Creates (or resumes) the sandbox for `branch`, runs one agent turn to
  * completion (a single-send session), and leaves the sandbox and its lock in
- * place afterward — cleanup is a separate, explicit step (`nook sandbox
- * destroy`), not something this run does implicitly. This also holds for a
+ * place afterward — cleanup is a separate, explicit step (the sandbox
+ * destroy subcommand), not something this run does implicitly. This also holds for a
  * run that idle-times-out: whatever the agent already did (commits, pushed
  * branches) survives in the sandbox, so retrying with the same branch
  * resumes rather than restarts.

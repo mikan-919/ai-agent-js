@@ -1,10 +1,11 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { WORKSPACE_DOCUMENT_FILES } from "../config";
 import { pushBranch } from "./pullRequest";
 import { resolveSandboxPath } from "./sandboxTools";
 
 /** The only files the docs agent's tools are allowed to touch — see CLAUDE.md's document responsibility table. */
-export const DOCS_FILES = ["CONCEPT.md", "ROADMAP.md", "FEATURE.md", "HANDOFF.md"] as const;
+export const DOCS_FILES = WORKSPACE_DOCUMENT_FILES;
 export type DocsFile = (typeof DOCS_FILES)[number];
 
 function assertDocsFile(path: string): asserts path is DocsFile {
@@ -96,7 +97,7 @@ export function createDocsCommitTool(cwd: string): AgentTool<typeof commitParams
   return {
     name: "git_commit",
     label: "Commit docs",
-    description: `Stage and commit changes to the workspace docs (${DOCS_FILES.join(", ")}) only. Staging is limited to those four files, so this can't accidentally commit anything else in the working tree.`,
+    description: `Stage and commit changes to the workspace docs (${DOCS_FILES.join(", ")}) only. Staging is limited to these files, so this can't accidentally commit anything else in the working tree.`,
     parameters: commitParams,
     execute: async (_toolCallId, params) => {
       const add = await runGit(cwd, ["add", ...DOCS_FILES]);

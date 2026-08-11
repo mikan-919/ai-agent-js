@@ -1,12 +1,13 @@
 import type { WorkContext } from "../context";
+import { WORKSPACE_DOCUMENTS } from "../config";
 
 /**
- * nook's own operating instructions for the agent — not project content, so
+ * The harness's own operating instructions for the agent — not project content, so
  * it doesn't duplicate CONCEPT.md (CONCEPT.md principle 3). This explains
  * what the agent may and may not do; the *why* behind those rules lives in
  * CONCEPT.md itself, which is embedded below alongside the rest of docs.
  */
-const HARNESS_PREAMBLE = `You are an autonomous coding agent running inside nook, an execution harness.
+const HARNESS_PREAMBLE = `You are an autonomous coding agent running inside an execution harness.
 
 You are working in a sandbox checked out on a dedicated branch. You have file
 read/write/edit tools and a bash tool scoped to this sandbox, plus a
@@ -81,10 +82,10 @@ export function renderDocs(docs: WorkContext["docs"]): string {
     );
   }
   lines.push(
-    renderDoc("CONCEPT.md", docs.concept),
-    renderDoc("ROADMAP.md", docs.roadmap),
-    renderDoc("FEATURE.md", docs.feature),
-    renderDoc("HANDOFF.md", docs.handoff),
+    renderDoc(WORKSPACE_DOCUMENTS.concept, docs.concept),
+    renderDoc(WORKSPACE_DOCUMENTS.roadmap, docs.roadmap),
+    renderDoc(WORKSPACE_DOCUMENTS.feature, docs.feature),
+    renderDoc(WORKSPACE_DOCUMENTS.handoff, docs.handoff),
   );
   return lines.join("\n\n");
 }
@@ -94,7 +95,7 @@ export interface BuildSystemPromptOptions {
    * Compressed checkpoint from this sandbox's previous agent run, when
    * resuming one that has it. Not part of WorkContext: unlike git/github/
    * linear/docs, it isn't reconstructed from an external source of truth —
-   * it's a summary nook itself generated of the agent's own prior transcript.
+   * it's a summary the harness generated of the agent's own prior transcript.
    */
   previousSessionSummary?: string | null;
 }

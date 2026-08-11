@@ -1,16 +1,17 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { ENV, PROPOSED_ISSUE_LABEL, PROJECT_USER_AGENT } from "../config";
 
 const GITHUB_API = "https://api.github.com";
 
 /** Label the ticket-extraction agent uses for every issue it opens, and the only label its poll pass looks for. */
-export const PROPOSED_LABEL = "nook:proposed";
+export const PROPOSED_LABEL = PROPOSED_ISSUE_LABEL;
 
 function authHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
-    "User-Agent": "nook",
+    "User-Agent": PROJECT_USER_AGENT,
   };
 }
 
@@ -53,7 +54,7 @@ export interface ProposedIssue {
   url: string;
 }
 
-/** Open issues carrying `nook:proposed`, for the poll pass to check for pending human replies. Excludes PRs. */
+/** Open issues carrying the proposed-ticket label, for the poll pass to check for pending human replies. Excludes PRs. */
 export async function listProposedIssues(owner: string, repo: string, token: string): Promise<ProposedIssue[]> {
   const url = `${GITHUB_API}/repos/${owner}/${repo}/issues?state=open&labels=${encodeURIComponent(PROPOSED_LABEL)}&per_page=100`;
   const response = await fetch(url, { headers: authHeaders(token) });
@@ -86,7 +87,7 @@ export async function listIssueComments(
   return results.map((comment) => ({ login: comment.user?.login ?? "", body: comment.body ?? "" }));
 }
 
-/** Identifies which GitHub login the configured token posts as, so the poll pass can tell "nook already replied" from "a human is waiting on a reply". */
+/** Identifies which GitHub login the configured token posts as, so the poll pass can tell "the harness already replied" from "a human is waiting on a reply". */
 export async function getAuthenticatedLogin(token: string): Promise<string> {
   const response = await fetch(`${GITHUB_API}/user`, { headers: authHeaders(token) });
   if (!response.ok) {
@@ -139,7 +140,7 @@ async function addIssueComment(
 export const DEFAULT_MAX_ISSUES_PER_RUN = 5;
 
 export function resolveMaxIssuesPerRun(): number {
-  const raw = process.env.NOOK_TICKET_MAX_ISSUES;
+  const raw = process.env[ENV.ticketMaxIssues];
   const parsed = raw ? Number(raw) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_ISSUES_PER_RUN;
 }

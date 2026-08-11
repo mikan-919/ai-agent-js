@@ -1,11 +1,12 @@
 import { resolve } from "node:path";
 import { detectMainBranch, refExists, resolveRef, run as runGit } from "../context/git";
+import { PROJECT_CODENAME } from "../config";
 
 export const DEFAULT_DOCKER_IMAGE = "oven/bun:1";
 export const CONTAINER_WORKSPACE = "/workspace";
 
 export function containerName(owner: string, repo: string, branch: string): string {
-  return `nook-${owner}-${repo}-${branch}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  return `${PROJECT_CODENAME}-${owner}-${repo}-${branch}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
 }
 
 async function runDocker(args: string[]): Promise<string> {
@@ -48,7 +49,7 @@ async function createContainer(repoPath: string, name: string, image: string): P
     "-v",
     `${hostPath}:${hostPath}`,
     "--label",
-    "nook.sandbox=true",
+    `${PROJECT_CODENAME}.sandbox=true`,
     // Overriding the entrypoint means any image works as a passive host: the
     // container is only ever interacted with via `docker exec`, so its own
     // entrypoint/cmd is irrelevant — it just needs to stay alive.

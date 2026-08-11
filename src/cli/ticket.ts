@@ -3,7 +3,7 @@ export interface TicketArgs {
   json: boolean;
 }
 
-/** `nook ticket` extracts (default); `nook ticket poll` runs the issue-reply pass instead. */
+/** The ticket subcommand extracts by default; its `poll` mode runs the issue-reply pass. */
 export function parseTicketArgs(args: string[]): TicketArgs {
   const positional: string[] = [];
   let json = false;

@@ -10,6 +10,7 @@ import { buildSystemPrompt } from "./agent/systemPrompt";
 import { runTicketExtractionPass, runTicketPollPass } from "./agent/ticketRun";
 import type { PullRequestOutcome, RunAgentResult } from "./agent/types";
 import { resolveWorkContext } from "./context";
+import { ENV, PROJECT_CODENAME } from "./config";
 import { createSandbox, destroySandbox } from "./sandbox";
 
 const DEFAULT_CHAT_SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -17,15 +18,15 @@ const DEFAULT_CHAT_SESSION_IDLE_MS = 30 * 60 * 1000;
 const CHAT_SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 function resolveChatSessionIdleMs(): number {
-  const raw = process.env.NOOK_CHAT_SESSION_IDLE_MS;
+  const raw = process.env[ENV.chatSessionIdleMs];
   const parsed = raw ? Number(raw) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_SESSION_IDLE_MS;
 }
 
 /**
- * Opt-in only: unset means nook serve never runs the ticket-extraction
- * agent on its own, same as before this wiring existed — `nook ticket` /
- * `nook ticket poll` from a shell or external cron remain the only trigger.
+ * Opt-in only: unset means the server never runs the ticket-extraction agent
+ * on its own. The ticket subcommands from a shell or external cron remain
+ * the only trigger.
  * This pass creates GitHub issues and posts comments on its own (no per-run
  * human approval gate, unlike PR merge/Linear triage — see CONCEPT.md
  * principle 2, which this pass doesn't touch), and spends LLM calls doing
@@ -33,7 +34,7 @@ function resolveChatSessionIdleMs(): number {
  * makes by setting this env var, not a default.
  */
 function resolveTicketPollIntervalMs(): number | null {
-  const raw = process.env.NOOK_TICKET_POLL_INTERVAL_MS;
+  const raw = process.env[ENV.ticketPollIntervalMs];
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -122,8 +123,8 @@ export function createServer(repoPath: string) {
   }
 
   /**
-   * Frees sessions nobody has talked to in a while so a long-running `nook
-   * serve` doesn't accumulate one live Agent per branch forever (ROADMAP.md
+   * Frees sessions nobody has talked to in a while so a long-running server
+   * doesn't accumulate one live Agent per branch forever (ROADMAP.md
    * unresolved issue 6). This only evicts the in-memory session — the
    * sandbox and its lock are untouched and outlive it, same as they already
    * do for runAgent's one-shot sessions; the next chat message on that
@@ -143,12 +144,12 @@ export function createServer(repoPath: string) {
   /**
    * The ticket-extraction agent's automatic trigger (ROADMAP.md: "起動
    * トリガーは...pollingによる自動起動はまだ配線していない"). Runs the same two
-   * passes `nook ticket` / `nook ticket poll` run from a shell — an
-   * extraction pass (files nook:proposed issues for known ROADMAP/HANDOFF
-   * gaps) followed by a poll pass (replies on nook:proposed issues awaiting
+   * passes run from a shell — an extraction pass (files proposed issues for
+   * known ROADMAP/HANDOFF gaps) followed by a poll pass (replies on proposed
+   * issues awaiting
    * a human reply) — on a fixed interval instead of requiring a human or
    * external cron to invoke the CLI. Only enabled when
-   * NOOK_TICKET_POLL_INTERVAL_MS is set (see resolveTicketPollIntervalMs).
+   * the ticket poll interval setting is set (see resolveTicketPollIntervalMs).
    * `runInProgress` skips a tick rather than overlapping if a previous pass
    * is still running past the next interval.
    */
@@ -164,20 +165,20 @@ export function createServer(repoPath: string) {
       try {
         const extraction = await runTicketExtractionPass(repoPath, token);
         if (!extraction.ok) {
-          console.error(`nook serve: ticket extraction pass failed: ${extraction.error}`);
+          console.error(`${PROJECT_CODENAME} serve: ticket extraction pass failed: ${extraction.error}`);
         } else if (extraction.createdCount > 0) {
-          console.log(`nook serve: ticket extraction pass created ${extraction.createdCount} issue(s).`);
+          console.log(`${PROJECT_CODENAME} serve: ticket extraction pass created ${extraction.createdCount} issue(s).`);
         }
 
         const poll = await runTicketPollPass(repoPath, token, (message) =>
-          console.log(`nook serve: ticket poll: ${message}`),
+          console.log(`${PROJECT_CODENAME} serve: ticket poll: ${message}`),
         );
-        for (const error of poll.errors) console.error(`nook serve: ticket poll: ${error}`);
+        for (const error of poll.errors) console.error(`${PROJECT_CODENAME} serve: ticket poll: ${error}`);
         if (poll.repliedCount > 0) {
-          console.log(`nook serve: ticket poll replied on ${poll.repliedCount} issue(s).`);
+          console.log(`${PROJECT_CODENAME} serve: ticket poll replied on ${poll.repliedCount} issue(s).`);
         }
       } catch (error) {
-        console.error(`nook serve: ticket pass failed: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`${PROJECT_CODENAME} serve: ticket pass failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         runInProgress = false;
       }

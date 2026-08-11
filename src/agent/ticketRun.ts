@@ -1,5 +1,6 @@
 import { detectMainBranch } from "../context/git";
 import { getOwnerRepo } from "../context/github";
+import { PROPOSED_ISSUE_LABEL, WORKSPACE_DOCUMENTS } from "../config";
 import { destroySandbox } from "../sandbox";
 import { createSession } from "./session";
 import { buildTicketExtractionSystemPrompt, buildTicketReplySystemPrompt } from "./ticketSystemPrompt";
@@ -18,9 +19,9 @@ export type TicketExtractionResult =
   | { ok: false; createdCount: number; error: string; timedOut?: boolean };
 
 /**
- * One extraction pass: files nook:proposed issues for gaps already flagged in
- * ROADMAP.md/HANDOFF.md. Shared by the `nook ticket` CLI command and nook
- * serve's periodic wiring (see serve.ts) — both just differ in how they
+ * One extraction pass: files proposed issues for gaps already flagged in the
+ * roadmap/handoff documents. Shared by the ticket CLI command and the
+ * server's periodic wiring (see serve.ts) — both just differ in how they
  * report the result, not in what the pass does.
  */
 export async function runTicketExtractionPass(repoPath: string, token: string): Promise<TicketExtractionResult> {
@@ -56,9 +57,9 @@ export async function runTicketExtractionPass(repoPath: string, token: string): 
   const { session } = sessionResult;
 
   const result = await session.send(
-    "Review ROADMAP.md's next priorities and open questions, and HANDOFF.md's " +
+    `Review ${WORKSPACE_DOCUMENTS.roadmap}'s next priorities and open questions, and ${WORKSPACE_DOCUMENTS.handoff}'s ` +
       "handoff note, for gaps that don't yet have a matching open issue. File a " +
-      "nook:proposed issue for each genuinely new gap; skip anything the existing " +
+      `${PROPOSED_ISSUE_LABEL} issue for each genuinely new gap; skip anything the existing ` +
       "open issues already cover. If there's nothing new, create nothing and say so.",
   );
   await session.close();
@@ -84,9 +85,9 @@ export interface TicketPollResult {
 }
 
 /**
- * One poll pass over every open nook:proposed issue: replies via
- * reply_to_issue if and only if the latest comment wasn't posted by nook
- * itself. Stateless (CONCEPT.md principle 1) — re-derives "does this need a
+ * One poll pass over every open proposed issue: replies via reply_to_issue if
+ * and only if the latest comment wasn't posted by the harness. Stateless
+ * (CONCEPT.md principle 1) — re-derives "does this need a
  * reply" from the thread every call rather than tracking a cursor.
  *
  * Each issue gets its own freshly created-then-destroyed sandbox/lock (see

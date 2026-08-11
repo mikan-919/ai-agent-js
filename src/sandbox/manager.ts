@@ -1,6 +1,7 @@
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { defaultTranscriptsBaseDir, deleteTranscript, transcriptPath } from "../agent/transcript";
+import { PROJECT_STATE_DIRECTORY } from "../config";
 import { getOwnerRepo } from "../context/github";
 import { containerName, DEFAULT_DOCKER_IMAGE, destroyDockerSandbox, ensureDockerSandbox } from "./docker";
 import { acquireLock, getLockStatus, releaseLock } from "../lock";
@@ -12,7 +13,7 @@ function defaultHolder(): string {
 }
 
 function defaultBaseDir(): string {
-  return join(homedir(), ".nook", "sandboxes");
+  return join(homedir(), PROJECT_STATE_DIRECTORY, "sandboxes");
 }
 
 export interface CreateSandboxOptions {
@@ -25,7 +26,7 @@ export interface CreateSandboxOptions {
   note?: string | null;
   /** Defaults to "worktree". */
   backend?: SandboxBackend;
-  /** git worktree backend only. Defaults to `~/.nook/sandboxes`. */
+  /** git worktree backend only. Defaults to the application's state directory. */
   baseDir?: string;
   /** docker backend only. Defaults to `DEFAULT_DOCKER_IMAGE`. */
   image?: string;

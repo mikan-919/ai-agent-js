@@ -58,7 +58,7 @@ export interface GithubContext {
     baseRefName: string;
     /** Merge-gate approval state (CONCEPT.md principle 2: read-only). */
     reviewDecision: GithubReviewDecision;
-    /** CI status of the PR head commit (the "nook status reads CI" role in ROADMAP.md). */
+    /** CI status of the PR head commit (the status command reads this). */
     checksStatus: GithubChecksStatus;
   } | null;
   linkedIssues: GithubIssueRef[];
@@ -86,7 +86,7 @@ export interface DocsContext {
   feature: string | null;
   handoff: string | null;
   /**
-   * Names of watched docs (currently CONCEPT.md, ROADMAP.md) that differ
+   * Names of watched documents that differ
    * between branch HEAD and main HEAD — i.e. the version embedded in this
    * WorkContext may not match what main currently says. Empty when none
    * drifted.

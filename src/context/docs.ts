@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { DRIFT_WATCHED_DOCUMENT_FILES, WORKSPACE_DOCUMENT_FILES } from "../config";
 import type { DocsContext, GitDiffFileStat } from "./types";
 
 async function readIfExists(path: string): Promise<string | null> {
@@ -8,14 +9,12 @@ async function readIfExists(path: string): Promise<string | null> {
 }
 
 /**
- * Docs whose drift against main is worth flagging to the agent: CONCEPT.md
- * (why nook exists) and ROADMAP.md (where it's headed). FEATURE.md/HANDOFF.md
+ * Docs whose drift against main is worth flagging to the agent: the concept
+ * and roadmap documents. The feature and handoff documents
  * are excluded — HANDOFF.md is expected to differ per-branch by design (it's
  * a per-session note), and FEATURE.md drift isn't tracked separately from
  * ROADMAP.md per the confirmed v1 scope (FEATURE.md "やらないこと").
  */
-const DRIFT_WATCHED_DOCS = ["CONCEPT.md", "ROADMAP.md"] as const;
-
 /**
  * Detects doc drift from the already-computed branch-vs-main diff (git.ts),
  * rather than issuing a separate git call — a file's presence in that diff
@@ -26,15 +25,18 @@ const DRIFT_WATCHED_DOCS = ["CONCEPT.md", "ROADMAP.md"] as const;
  */
 export function detectDocsDrift(diffFiles: GitDiffFileStat[]): string[] {
   const changed = new Set(diffFiles.map((f) => f.path));
-  return DRIFT_WATCHED_DOCS.filter((name) => changed.has(name));
+  return DRIFT_WATCHED_DOCUMENT_FILES.filter((name) => changed.has(name));
 }
 
 export async function resolveDocsContext(repoPath: string, diffFiles: GitDiffFileStat[]): Promise<DocsContext> {
-  const [concept, roadmap, feature, handoff] = await Promise.all([
-    readIfExists(join(repoPath, "CONCEPT.md")),
-    readIfExists(join(repoPath, "ROADMAP.md")),
-    readIfExists(join(repoPath, "FEATURE.md")),
-    readIfExists(join(repoPath, "HANDOFF.md")),
-  ]);
-  return { concept, roadmap, feature, handoff, driftedAgainstMain: detectDocsDrift(diffFiles) };
+  const [concept, roadmap, feature, handoff] = await Promise.all(
+    WORKSPACE_DOCUMENT_FILES.map((file) => readIfExists(join(repoPath, file))),
+  );
+  return {
+    concept: concept ?? null,
+    roadmap: roadmap ?? null,
+    feature: feature ?? null,
+    handoff: handoff ?? null,
+    driftedAgainstMain: detectDocsDrift(diffFiles),
+  };
 }

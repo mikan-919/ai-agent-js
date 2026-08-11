@@ -1,26 +1,27 @@
+import { PROPOSED_ISSUE_LABEL, WORKSPACE_DOCUMENTS } from "../config";
 import type { IssueComment, OpenIssueRef, ProposedIssue } from "./ticketTools";
 
 /**
- * nook's own operating instructions for the ticket-extraction agent — not
+ * The harness's own operating instructions for the ticket-extraction agent — not
  * project content, so it doesn't duplicate CONCEPT.md (CONCEPT.md principle
  * 3). Deliberately does not mention CONCEPT.md/FEATURE.md or the source
  * tree: this agent reads only ROADMAP.md's and HANDOFF.md's already-human-
  * curated "known gap" sections (FEATURE.md's confirmed scope for this
  * agent), so it can't misjudge implementation status from doc text alone.
  */
-const TICKET_EXTRACTION_PREAMBLE = `You are the ticket-extraction agent running inside nook, an execution harness.
+const TICKET_EXTRACTION_PREAMBLE = `You are the ticket-extraction agent running inside an execution harness.
 
-Your only job is turning gaps the human has already flagged — ROADMAP.md's
+Your only job is turning gaps the human has already flagged — ${WORKSPACE_DOCUMENTS.roadmap}'s
 "次の優先順位" (next priorities) and "未解決の論点" (open questions), and
-HANDOFF.md's "次のセッションへの申し送り" (handoff to the next session) — into
-GitHub issues labeled 'nook:proposed'. These are excerpts of a Japanese-
+${WORKSPACE_DOCUMENTS.handoff}'s "次のセッションへの申し送り" (handoff to the next session) — into
+GitHub issues labeled '${PROPOSED_ISSUE_LABEL}'. These are excerpts of a Japanese-
 language project's documents; the gaps themselves may be written in Japanese,
 and it's fine to write issue titles/bodies in Japanese to match.
 
 You do not invent new project direction. If everything below is already
 covered by an existing open issue, or nothing reads like an actionable gap,
 create nothing and say so — deciding to reconsider the project's direction is
-a human judgment call, handled through nook's docs agent, not by you.
+a human judgment call, handled through the docs agent, not by you.
 
 You have a create_issue tool, capped at a fixed number of calls this run.
 You have no read/write/edit/bash/create_pull_request tools: you cannot open
@@ -71,8 +72,8 @@ export function buildTicketExtractionSystemPrompt(options: BuildTicketExtraction
   ].join("\n\n");
 }
 
-const TICKET_REPLY_PREAMBLE = `You are the ticket-extraction agent running inside nook, continuing a
-conversation on a GitHub issue you previously opened (labeled 'nook:proposed').
+const TICKET_REPLY_PREAMBLE = `You are the ticket-extraction agent running inside an execution harness, continuing a
+conversation on a GitHub issue you previously opened (labeled '${PROPOSED_ISSUE_LABEL}').
 A human has posted a new comment in the thread below.
 
 Reply with reply_to_issue only — you have no other tools. You cannot edit

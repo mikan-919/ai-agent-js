@@ -2,6 +2,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
 import type { WorkContext } from "../context";
 import { resolveWorkContext } from "../context";
+import { ENV } from "../config";
 import { getOwnerRepo } from "../context/github";
 import { DEFAULT_TTL_MS, renewLock } from "../lock";
 import { createSandbox } from "../sandbox";
@@ -25,7 +26,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const LOCK_RENEW_INTERVAL_MS = DEFAULT_TTL_MS / 4;
 
 function resolveIdleTimeoutMs(): number {
-  const raw = process.env.NOOK_AGENT_IDLE_TIMEOUT_MS;
+  const raw = process.env[ENV.agentIdleTimeoutMs];
   const parsed = raw ? Number(raw) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_IDLE_TIMEOUT_MS;
 }

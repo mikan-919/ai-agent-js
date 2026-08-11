@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { generateSummary } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model, Models } from "@earendil-works/pi-ai";
+import { PROJECT_STATE_DIRECTORY } from "../config";
 
 /**
  * Tied to the sandbox by (owner, repo, branch), not to the sandbox directory
@@ -13,7 +14,7 @@ import type { Api, Model, Models } from "@earendil-works/pi-ai";
  * sandbox's own git status (see destroySandbox's dirty-worktree check).
  */
 export function defaultTranscriptsBaseDir(): string {
-  return join(homedir(), ".nook", "transcripts");
+  return join(homedir(), PROJECT_STATE_DIRECTORY, "transcripts");
 }
 
 export function transcriptPath(baseDir: string, owner: string, repo: string, branch: string): string {
