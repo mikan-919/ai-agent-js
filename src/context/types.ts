@@ -32,6 +32,18 @@ export interface GithubIssueRef {
   url: string;
 }
 
+/**
+ * GitHub's PullRequest.reviewDecision GraphQL enum, plus `null` for "no
+ * reviews requested/submitted yet".
+ */
+export type GithubReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+
+/**
+ * GitHub's StatusCheckRollupState GraphQL enum for the PR head commit,
+ * plus `null` when the commit has no checks configured at all.
+ */
+export type GithubChecksStatus = "SUCCESS" | "FAILURE" | "ERROR" | "PENDING" | "EXPECTED" | null;
+
 export interface GithubContext {
   owner: string;
   repo: string;
@@ -44,6 +56,10 @@ export interface GithubContext {
     body: string | null;
     headRefName: string;
     baseRefName: string;
+    /** Merge-gate approval state (CONCEPT.md principle 2: read-only). */
+    reviewDecision: GithubReviewDecision;
+    /** CI status of the PR head commit (the "nook status reads CI" role in ROADMAP.md). */
+    checksStatus: GithubChecksStatus;
   } | null;
   linkedIssues: GithubIssueRef[];
 }

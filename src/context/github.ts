@@ -1,5 +1,11 @@
 import { $ } from "bun";
-import type { GithubContext, GithubIssueRef, SourceResult } from "./types";
+import type {
+  GithubChecksStatus,
+  GithubContext,
+  GithubIssueRef,
+  GithubReviewDecision,
+  SourceResult,
+} from "./types";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -54,12 +60,16 @@ async function findPullRequestForBranch(
   return results[0] ?? null;
 }
 
-interface ClosingIssuesGraphqlResponse {
+interface PullRequestDetailsGraphqlResponse {
   data?: {
     repository?: {
       pullRequest?: {
+        reviewDecision: GithubReviewDecision;
         closingIssuesReferences?: {
           nodes: { number: number; title: string; state: string; url: string }[];
+        };
+        commits?: {
+          nodes: { commit: { statusCheckRollup: { state: GithubChecksStatus } | null } }[];
         };
       };
     };
@@ -67,18 +77,28 @@ interface ClosingIssuesGraphqlResponse {
   errors?: { message: string }[];
 }
 
-async function findLinkedIssues(
+interface PullRequestDetails {
+  linkedIssues: GithubIssueRef[];
+  reviewDecision: GithubReviewDecision;
+  checksStatus: GithubChecksStatus;
+}
+
+async function findPullRequestDetails(
   owner: string,
   repo: string,
   pullNumber: number,
   token: string,
-): Promise<GithubIssueRef[]> {
+): Promise<PullRequestDetails> {
   const query = `
     query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
+          reviewDecision
           closingIssuesReferences(first: 10) {
             nodes { number title state url }
+          }
+          commits(last: 1) {
+            nodes { commit { statusCheckRollup { state } } }
           }
         }
       }
@@ -96,12 +116,16 @@ async function findLinkedIssues(
   if (!response.ok) {
     throw new Error(`GitHub GraphQL request failed: ${response.status} ${response.statusText}`);
   }
-  const json = (await response.json()) as ClosingIssuesGraphqlResponse;
+  const json = (await response.json()) as PullRequestDetailsGraphqlResponse;
   if (json.errors?.length) {
     throw new Error(`GitHub GraphQL error: ${json.errors.map((e) => e.message).join("; ")}`);
   }
-  const nodes = json.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
-  return nodes;
+  const pr = json.data?.repository?.pullRequest;
+  return {
+    linkedIssues: pr?.closingIssuesReferences?.nodes ?? [],
+    reviewDecision: pr?.reviewDecision ?? null,
+    checksStatus: pr?.commits?.nodes[0]?.commit.statusCheckRollup?.state ?? null,
+  };
 }
 
 export async function resolveGithubContext(
@@ -125,7 +149,12 @@ export async function resolveGithubContext(
       return { ok: true, data: { owner, repo, pullRequest: null, linkedIssues: [] } };
     }
 
-    const linkedIssues = await findLinkedIssues(owner, repo, pr.number, token);
+    const { linkedIssues, reviewDecision, checksStatus } = await findPullRequestDetails(
+      owner,
+      repo,
+      pr.number,
+      token,
+    );
 
     return {
       ok: true,
@@ -141,6 +170,8 @@ export async function resolveGithubContext(
           body: pr.body,
           headRefName: pr.head.ref,
           baseRefName: pr.base.ref,
+          reviewDecision,
+          checksStatus,
         },
         linkedIssues,
       },

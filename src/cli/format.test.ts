@@ -46,6 +46,8 @@ describe("formatWorkContext", () => {
               body: null,
               headRefName: "feature/x",
               baseRefName: "main",
+              reviewDecision: "CHANGES_REQUESTED",
+              checksStatus: "FAILURE",
             },
             linkedIssues: [{ number: 7, title: "Bug", state: "open", url: "https://github.com/acme/demo/issues/7" }],
           },
@@ -53,7 +55,36 @@ describe("formatWorkContext", () => {
       }),
     );
     expect(output).toContain("PR #42 [draft] Add feature (open) https://github.com/acme/demo/pull/42");
+    expect(output).toContain("Review: CHANGES_REQUESTED · Checks: FAILURE");
     expect(output).toContain("Linked issues: #7");
+  });
+
+  test("reports missing review/checks state as their default text", () => {
+    const output = formatWorkContext(
+      baseContext({
+        github: {
+          ok: true,
+          data: {
+            owner: "acme",
+            repo: "demo",
+            pullRequest: {
+              number: 1,
+              title: "Add feature",
+              state: "open",
+              isDraft: false,
+              url: "https://github.com/acme/demo/pull/1",
+              body: null,
+              headRefName: "feature/x",
+              baseRefName: "main",
+              reviewDecision: null,
+              checksStatus: null,
+            },
+            linkedIssues: [],
+          },
+        },
+      }),
+    );
+    expect(output).toContain("Review: no review yet · Checks: no checks");
   });
 
   test("reports no PR yet when github resolves but finds none", () => {

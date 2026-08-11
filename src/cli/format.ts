@@ -49,6 +49,9 @@ export function formatWorkContext(ctx: WorkContext): string {
       lines.push(
         `  PR #${pullRequest.number}${draft} ${pullRequest.title} (${pullRequest.state}) ${pullRequest.url}`,
       );
+      lines.push(
+        `  Review: ${pullRequest.reviewDecision ?? "no review yet"} · Checks: ${pullRequest.checksStatus ?? "no checks"}`,
+      );
       if (linkedIssues.length > 0) {
         lines.push(`  Linked issues: ${linkedIssues.map((issue) => `#${issue.number}`).join(", ")}`);
       }
