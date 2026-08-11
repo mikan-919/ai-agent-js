@@ -16,6 +16,7 @@ describe("project configuration", () => {
     expect(PROJECT_STATE_DIRECTORY).toBe(`.${PROJECT_CODENAME}`);
     expect(PROPOSED_ISSUE_LABEL).toBe(`${PROJECT_CODENAME}:proposed`);
     expect(ENV.modelProvider).toBe(`${PROJECT_CODENAME.toUpperCase()}_MODEL_PROVIDER`);
+    expect(ENV.modelBaseUrl).toBe(`${PROJECT_CODENAME.toUpperCase()}_MODEL_BASE_URL`);
   });
 
   test("keeps the workspace document manifest and drift subset together", () => {

@@ -23,7 +23,9 @@
 
 - CLI: `sable`
 - サブコマンド: `sable serve`、`sable docs [branch]`、`sable ticket`、`sable ticket poll`
-- 環境変数: `SABLE_AGENT_IDLE_TIMEOUT_MS`、`SABLE_CHAT_SESSION_IDLE_MS`、`SABLE_GIT_TOKEN`、`SABLE_MODEL_ID`、`SABLE_MODEL_PROVIDER`、`SABLE_TICKET_MAX_ISSUES`、`SABLE_TICKET_POLL_INTERVAL_MS`
+- 環境変数: `SABLE_AGENT_IDLE_TIMEOUT_MS`、`SABLE_CHAT_SESSION_IDLE_MS`、`SABLE_GIT_TOKEN`、`SABLE_MODEL_API_KEY`、`SABLE_MODEL_BASE_URL`、`SABLE_MODEL_ID`、`SABLE_MODEL_PROVIDER`、`SABLE_TICKET_MAX_ISSUES`、`SABLE_TICKET_POLL_INTERVAL_MS`
+
+LM Studioを使う場合は、`SABLE_MODEL_PROVIDER=lmstudio`、`SABLE_MODEL_ID`（LM Studioの`/v1/models`で確認したID）、`SABLE_MODEL_BASE_URL`（通常は`http://localhost:1234/v1`）を設定する。ローカルサーバが認証を要求する場合だけ `SABLE_MODEL_API_KEY` を設定し、未設定時は `lm-studio` を送る。
 
 `package.json`の`name`/`bin`と`bun.lock`の`name`はパッケージ管理用の宣言・生成物であり、TypeScriptの実行時設定から参照できないため、この正本の例外として扱う。アプリケーションコードで識別子を使う場合は、必ず `src/config.ts` の定数を参照すること。
 

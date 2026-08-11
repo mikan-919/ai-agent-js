@@ -23,7 +23,7 @@
 
 - 言語/ランタイム: TypeScript + Bun + Hono
 - 認証情報: resolverはGitHub token / Linear API keyを環境変数（`.env`）から読む（v1はこれで十分。複数リポジトリ横断や`serve`サブコマンド常駐化が必要になったら`アプリケーション状態ディレクトリ/config`等へ移行）
-- **Agent SDK: pi**（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）。provider非依存のtool-callingレイヤー（`Agent`クラス、`pi-agent-core`）を直接使い、`pi-coding-agent`（セッション永続化・拡張機能・TUIを持つインタラクティブCLI向けの上位パッケージ）は使わない——ハーネス自身がsystem promptとtool registryを毎回組み立てるため、そちらの機構は不要かつ原則1（状態は外部に置く）と重複する。LLM自体のprovider/modelはモデルprovider・モデルID設定で切り替え可能（デフォルト: anthropic / claude-sonnet-5）。プロバイダのAPI key（例: `ANTHROPIC_API_KEY`）はpi-ai自身が標準env varから解決し、ハーネスのコードは直接読まない。
+- **Agent SDK: pi**（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）。provider非依存のtool-callingレイヤー（`Agent`クラス、`pi-agent-core`）を直接使い、`pi-coding-agent`（セッション永続化・拡張機能・TUIを持つインタラクティブCLI向けの上位パッケージ）は使わない——ハーネス自身がsystem promptとtool registryを毎回組み立てるため、そちらの機構は不要かつ原則1（状態は外部に置く）と重複する。LLM自体のprovider・model・base URLは設定で切り替え可能（デフォルト: anthropic / claude-sonnet-5）。LM StudioのようなローカルOpenAI互換サーバも選択できる。プロバイダのAPI keyはpi-ai自身が各プロバイダの標準env varから解決し、ハーネスのコードは直接読まない。正確な設定名はCLAUDE.mdの実行時識別子一覧を参照する。
 
 ## 次の優先順位
 

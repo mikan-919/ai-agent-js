@@ -14,6 +14,8 @@ export const ENV = {
   agentIdleTimeoutMs: `${ENV_PREFIX}_AGENT_IDLE_TIMEOUT_MS`,
   chatSessionIdleMs: `${ENV_PREFIX}_CHAT_SESSION_IDLE_MS`,
   gitToken: `${ENV_PREFIX}_GIT_TOKEN`,
+  modelApiKey: `${ENV_PREFIX}_MODEL_API_KEY`,
+  modelBaseUrl: `${ENV_PREFIX}_MODEL_BASE_URL`,
   modelId: `${ENV_PREFIX}_MODEL_ID`,
   modelProvider: `${ENV_PREFIX}_MODEL_PROVIDER`,
   ticketMaxIssues: `${ENV_PREFIX}_TICKET_MAX_ISSUES`,
