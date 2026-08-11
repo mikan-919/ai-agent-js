@@ -1,40 +1,82 @@
 # CONCEPT
 
-## ハーネスとは何か
+## この実行ハーネスは何か
 
-この実行ハーネスは、AIエージェントによる開発を人間のレビュー・承認を介して回すための実行ハーネスである。GitHub・Linear・Git・workspace documents（このファイルとROADMAP.md）を情報源として、エージェントに「現在の作業文脈」を都度組み立てて渡す。
+この実行ハーネスは、GitHubとLinearを制御面として、複数のローカル環境で開発Agentを動かす分散実行ハーネスである。
+
+仕事の入口・承認・状態・成果は外部サービスに置き、コード編集・build・test・Agent実行はローカルで行う。クラウド上でコードを実行するサービスではない。体験は外部から進捗と成果が見えるクラウド型Agentに近づけつつ、実行環境、ソースコード、詳細な会話履歴、credentialは利用者のローカル側に置く。
+
+## 仕事の正本
+
+一つのJobは次の三つを横断して進む。
+
+- **GitHub Issue — WHAT**: 何を解決するか。Jobの恒久的な識別子。
+- **Linear issue — HOW＋実行承認**: どう解決するか。人間がTriageからTodoへ移すことで実行を承認する。
+- **GitHub Pull Request — DO＋最終承認**: 実際に何を変更したか。人間がmergeすることで採用を承認する。
+
+Web UIの会話やローカルtranscriptはJobの正本ではない。別のローカル実行環境が会話履歴なしでも実行できる内容まで、WHATとHOWへ確定してからJobにする。
 
 ## 目標
 
-**人間は2つの承認ゲート（Linear: Triage→Todo、GitHub: PR Open→Merged）で判断を下すことだけをする。** それ以外——文脈をかき集める、状況を思い出す、実装を書く、進捗を追いかける——は一切人間の手を離れる、という状態を目指す。
+人間は、通常の実装ループでは二つの承認ゲートだけを判断する。
 
-「不変の原則」（後述）はすべてこの目標に従属する。状態を外部に置くのも、情報源を複製しないのも、結局は「人間が承認の瞬間に、正しい判断材料を過不足なく受け取れる」ためにある。この目標が揺らがない限り、原則の表現や実装は変わってよい。
+1. Linear: Triage → Todo
+2. GitHub: Pull Request → Merged
 
-## 出発点となった問題
-
-- エージェントはPRレビューを人間が返すまでの間、生きたまま待機できない。プロセスは終了し、次に呼ばれたときには文脈が失われている。
-- CONCEPT.md / ROADMAP.mdのようなプロジェクト方針ドキュメントはGit管理されているため、branchごとに見えている内容が異なる。「現在のプロジェクト方針」と「そのcommit時点の方針」が混ざり、古いbranchで動くエージェントが古い方針のまま動いてしまう。
-
-この2つへの回答は一貫している。**エージェントは待機しない。必要になるたびに、Git・GitHub・Linear・workspace documentsという「今そこにある一次情報」から作業文脈を再構成する。** 専用のhandoff DBや、肥大化したconversation historyには依存しない。
+それ以外の、外部状態の観測、作業文脈の再構成、Jobの取得、ローカル実行、進捗反映、レビュー後の再開は実行ハーネスが担う。
 
 ## 不変の原則
 
-### 1. 状態は外部に置く。ハーネス自身は内部に持たない — resumability
+### 1. チームが判断する状態をローカルだけに閉じない
 
-状態が無いのではない。Git（今のbranch・diff）、GitHub（Issue/PR）、Linear（承認された解決アプローチ）、workspace docs（CONCEPT/ROADMAP）という、すでに存在する外部システムにすべて持たせる。ハーネスはそれを都度読んで文脈を組み立て直すだけで、独自形式では何も保存しない。これにより、いつ・どのプロセスが読んでも同じ文脈が再構成でき、「途中から始める・作業を引き継ぐ」（resumability）が特別な仕組みなしに成り立つ。この設計が壊れている兆候は、「ハーネスの内部状態を直接編集しないと辻褄が合わない」という状況が生まれること。
+WHAT、HOW、承認状態、実行状態、成果、レビュー結果はGitHubまたはLinearから確認できなければならない。sandbox、process、cache、transcriptなどのローカル運転状態はローカルに置いてよいが、それらを失っただけでJobそのものが行方不明になってはならない。
 
-### 2. 承認は能力の不在で担保する。判定ロジックでは担保しない
+一つのローカル実行環境が失われても、GitHub、Linear、Git上のcheckpointから別の実行環境が仕事を再開できることを設計条件とする。
 
-Agentは何を書いても（提案しても）よい。しかしどちらの承認ゲート（Linear: Triage→Todo、GitHub: PR Open→Merged）も、Agent自身が「通過」を宣言することはできない。この境界は「Agentは行儀よく振る舞うはずだ」という信頼にではなく、「Agent実行環境にはLinear API key/GitHub tokenそのものを渡さない」という物理的な不可能性に置く。ここが緩んだ瞬間、ハーネスは別のプロダクトになる。
+### 2. 承認ゲートは能力の不在で守る
 
-### 3. 情報源はそれぞれ一つの役割だけを持つ。複製しない
+Agent sandboxへGitHub・Linear credentialを渡さない。credentialを保持するのは、人間が登録時に信頼したローカル`serve`プロセスである。GitHub・Linearへの書き込みは`serve`が提供する制限された操作だけを通す。
 
-GitHub Issueは「発見された問題（WHAT）」、Linearは「人間が吟味・合意した解決アプローチ（HOW＋承認）」、Pull Requestは「実際の変更とレビュー」、CONCEPT/ROADMAPは「プロジェクトの思想と方向性」。同じ情報を別の場所へ複製せず、ハーネスはこれらを横断して読むだけの層に徹する。新しい情報の置き場所が必要になったとき、既存のどれにも当てはまらないなら、ハーネス独自の規約を発明する前に「本当に必要か」を疑う。
+AgentはTriage上でHOWを提案・修正できるが、TriageからTodoへ移せない。Agentはbranch、commit、PRを提案できるが、PRをmergeできない。
 
-## このドキュメントとROADMAP.md / FEATURE.mdの違い
+承認後の機械的な状態反映として、実行ハーネスはTodoからIn Progress、PR merge後のDone、およびWHAT/HOW変更時のTriageへの差し戻しを行ってよい。
 
-- **CONCEPT.md（このファイル）**: なぜハーネスが存在するか、何を絶対に譲らないか。実装やbranchが変わっても、ここに書かれたことが変わるなら、それはハーネス自体の存在意義が変わったということ。
-- **ROADMAP.md**: 今どこに向かっているか。優先順位、次のマイルストーン。頻繁に変わってよい。
-- **FEATURE.md**: 今何をして・何をしないかの一覧。実装が進むたびに更新される、ある時点でのスコープのスナップショット。
+### 3. 情報源は一つの役割だけを持つ
 
-判定に迷ったら：「なぜ」の話ならCONCEPT、「今どうするか／何をするしないか」の話ならROADMAPかFEATURE。
+GitHub IssueはWHAT、LinearはHOWと実行承認、Pull RequestはDOと最終承認を持つ。同じ判断内容をローカルDBや会話履歴へ正本として複製しない。
+
+共有ROADMAP文書をJobの入力にはしない。各人が何を作りたいかはGitHub Issueとして表し、方向と優先順位はGitHub IssueとLinearのviewとして見る。
+
+### 4. 外部イベントは通知であり、現在状態が正本である
+
+GitHub・Linear webhookはローカル`serve`を早く起こすための通知である。通知を失っても、`serve`はGitHub・Linear・Gitの現在状態を読み直して同じ判断を再構成できなければならない。公開relayはJob DBやAgent sessionを正本として持たない。
+
+### 5. 分散実行では所有権を外部操作の直前に確認する
+
+JobはGitHub Issue単位の期限付きleaseとbranch単位のlockを取得した一つの`serve`だけが実行する。push、PR操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は有効なleaseをまだ所有していることを確認する。leaseを失った古い実行は外部状態を書き換えられない。
+
+## プロジェクト文脈
+
+CONCEPT.mdは、なぜ作るか、何をするか、何をしないかをAgentへ渡す推奨文書である。存在する場合は作業branch版を読み、default branchとの差分を人間とAgentの両方へ提示する。差分があることだけを理由に実行は止めない。
+
+CONCEPT.mdがないrepositoryでは、AGENTS.mdなど通常のコーディングAgentが読むinstructionsを使う。専用manifestの導入を必須にはしない。
+
+## ローカル実行とクラウドrelayの境界
+
+ローカル`serve`はrepository単位で起動し、Agent、sandbox、transcript、GitHubの短命token、Linear tokenを保持する。Web UIも同じ`serve`がlocalhostで提供する。
+
+公開relayはGitHub App・Linear webhookの公開口、OAuth callback、短命GitHub tokenの発行、接続中`serve`への通知と検索要求の中継だけを担う。コード、Job DB、Agent session、transcriptは保存しない。
+
+初期のrelayは独自アカウントを要求せず、GitHub App installationとGitHubログインを利用単位とする。
+
+## ローカル履歴
+
+transcriptは各`serve`がローカルに保存し、自動削除しない。人間がWeb UIから明示した場合だけ削除する。
+
+Agentは必要に応じて、自分の`serve`と、relayへ接続中の同一repositoryを担当する他の`serve`へ履歴検索を依頼できる。検索範囲はlocal、current Job、repositoryとし、relayは問い合わせを中継するだけで内容を保存しない。
+
+## checkpointと引き継ぎ
+
+Agentは安定した区切りでcheckpoint commitをpushする。checkpointには、その地点から別の実行環境が再開するためのHANDOFF.mdを含める。HANDOFF.mdは追記ログではなく、現在地、確定した判断、未解決点、次の一手だけを持つ。
+
+HANDOFF.mdはPRをreadyにする前に削除し、最終差分には含めない。途中のcommit履歴に残ることは許容する。

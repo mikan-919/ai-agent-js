@@ -1,40 +1,104 @@
 # ROADMAP
 
-今ハーネスがどこに向かっているか。優先順位・次のマイルストーン。頻繁に変わってよい。「今何をして・何をしないか」の詳細スコープはFEATURE.md、変わらない思想はCONCEPT.mdを参照。
+この文書は、現在の実装を新しい分散実行モデルへ移行する間だけ、移行方向と未解決事項を保持する。共有ROADMAPを恒久的なJob入力にはしない。移行後、作りたいものと優先順位はGitHub IssueとLinearのviewへ移し、この文書は廃止する。
 
-## 全体アーキテクチャの方向性
+## 移行するアーキテクチャ
 
-- **`serve`サブコマンドが中心的インターフェース。** CLI（`status`サブコマンド等）はその薄いラッパーとして後回しにする。ただし「薄いラッパー」とは同じロジックを再利用するという意味であり、HTTP経由で起動中の`serve`サブコマンドプロセスに問い合わせる、という意味ではない。`resolveWorkContext`等のresolverはサーバ側状態を一切持たない（原則1）ため、CLIはresolverを直接呼び出し、`serve`サブコマンドが起動している前提を置かない。
-- **Agent loopをハーネスが直接ホストする。** 「既存のhosted agent productにMCP経由で接続するだけの薄いcontext provider」には留まらない。理由はUXの好みではなく、Agentのtool registryをハーネスが完全に所有することで、「Agentに生credentialを渡さない」という境界（CONCEPT.md原則2）をコードの構造で保証できるため。旧案が既存ハーネス（Claude Code等）をラップする「meta-harness」案は検討の上、不採用と確認済み。
-- **サーバは概念的に2種類**: 外部（GitHub/Linear）からのwebhookを受ける公開relay（secretを持たない薄い口、v1では未実装）と、ハーネス Core・credential・Agentセッションを保持するローカル側。
-- **v1はpollingのみ。** 起動時/一定間隔で「前回見た状態」との差分を検知すれば十分とし、webhook relayはpollingが実際に不便になった時点で後付けする。
-- **GitHub Actionsはagent起動アクターではない。** Agentが`serve`サブコマンド内でホストされる以上、GitHub Actions runner上でagentを動かす経路は不要。GitHub Actionsは、リポジトリ自体のtest/build pipeline（`status`サブコマンドが結果を読むだけの対象）としての役割のみ。「CI」という語をこの2つの意味で混同しないこと。
-- **サンドボックス**: 1 branch(=1作業) = 1サンドボックス（git worktree / Docker、セッション単位で選択可）。`resume`時も同じサンドボックスを再利用する。ロックマネージャ（`refs/harness-locks/<branch>`）とサンドボックス作成は一体化し、サンドボックス作成時にロックを取得する。
-- **`POST /agent/run`のタイムアウトはアイドルタイムアウト方式**: 固定の壁時計タイムアウトではなく、「agentが一定時間（デフォルト10分、[agentアイドルタイムアウトの環境変数](CLAUDE.md#実行時識別子)で上書き可）何のイベントも出さない」ことをハング判定に使う。エージェントが進捗を出し続けている限り実行時間は制限しない。ハング検知時は`Agent.abort()`で中断してエラーを返すのみで、sandbox/lockはそのまま残す（クリーンアップは既存方針どおり別ステップ）。agentのイベント発火は、branch lockのTTL（`refs/harness-locks/<branch>`）を一定間隔（`DEFAULT_TTL_MS`の1/4＝15分ごとにスロットル）で更新するハートビートも兼ねる。これにより、長時間だが生きているrunがTTL切れで他プロセスに横取りされることを防ぐ。
-- **sandbox resume時、直前のagent会話transcriptを圧縮して引き継ぐ**: `runAgent`は実行終了時（成功・失敗・タイムアウトいずれでも）に`agent.state.messages`をホスト側`アプリケーション状態ディレクトリ/transcripts/<owner>-<repo>/<branch>.json`へ上書き保存する（sandbox内には置かない — worktree/dockerのバックエンド差、および`destroySandbox`の未コミット変更チェックの誤検知を避けるため。蓄積はせず直近1回分のみ保持）。resume時（`sandbox.resumed`かつ保存済みtranscriptがある場合のみ）、pi-agent-coreの`generateSummary`（要約プロンプト・LLM呼び出しは再利用）に渡す前に、thinking blockの除去とtool呼び出し引数の切り詰めを行う機械的圧縮を一段挟んでから要約し、結果を`buildSystemPrompt`の新セクション（`## Previous session in this sandbox`）としてのみ注入する——`WorkContext`型自体には含めない（Git/GitHub/Linear/docsという「外部一次情報の再構成」という意味と、ハーネス自身が生成する要約は別物であるため）。`destroySandbox`はtranscriptファイルもあわせて削除し、sandboxのライフサイクルと一致させる。CONCEPT.mdの「肥大化したconversation historyには依存しない」という文言は変更していない：この判断ロジック（何を根拠にするか）は常にGit/GitHub/Linear/docsの外部一次情報から再構成し、transcriptは代替にしない。会話transcript自体はそれら4ソースのどこにも存在しない一次情報であり、原則3（情報源の複製禁止）には抵触しないという整理。
-- **web UIが人間向けの主要インターフェース。** 別プロセス/別ポートは持たず、既存の`serve`サブコマンド（Hono app）に統合する——閲覧用の静的フロントエンドとAPIを同じプロセス・同じポートで提供し、「`serve`サブコマンドが中心的インターフェース」という方針をCLIだけでなくブラウザにも適用したもの。役割は2つ: (1) branch単位のwork context閲覧（`GET /work-context/:branch` — 既存`createSandbox`でそのbranchのsandboxをcreate/resumeしてから中で`resolveWorkContext`を呼ぶ。閲覧開始とchat開始が同じsandbox/lockライフサイクルを通る）、(2) agentとのchat（`POST /agent/run/stream` — 既存`POST /agent/run`と同じ`runAgent`呼び出しを、SSEで包んで進捗をそのまま転送するだけの薄いラッパー。`runAgent`は`onEvent`コールバックを受け取れるようになり、pi-agent-coreの`AgentEvent`をそのまま外へ流す)。chatの複数ターンは、branchごとに生きた`Agent`セッションをサーバのメモリに保持し（`chatSessions`、詳細は次の項目の「agent session」参照）、2ターン目以降は圧縮なしの`agent.prompt()`のみで進める。以前は「1メッセージ送信 = 1 sandbox resume + transcript要約サイクル」を毎回踏襲していたが、これは会話が生きている間も毎回コールドリジューム扱いする無駄な設計だったと判明し、session方式に置き換えた。承認ゲート（PR merge、Linear Triage→Todo）はstate表示とGitHub/Linearへの外部リンクのみで、UIから直接操作する手段は持たない（原則2をUI層でも維持）。認証は既存方針どおりlocalhost bind前提でなし。フロントエンドはReact + Tailwind CSS v4 + shadcn/ui（`components.json`でCLI管理）、Bunネイティブの`Bun.build` + `bun-plugin-tailwind`でビルドし（Vite等の別ビルドツールは導入しない）、成果物`dist/web`を`serve`サブコマンドが`hono/bun`の`serveStatic`で配信する。
-- **agent session**: sandbox作成〜1回のagent実行という単位（`runAgent`）とは別に、同じsandbox上で複数ターンを送り続けられる`createSession`（`src/agent/session.ts`）を導入した。`createSession`は「sandbox create/resume→（初回のみ、かつ前回のtranscriptが残っている場合のみ）要約→`Agent`インスタンス生成」までを1回だけ行い、以後は`session.send(prompt)`を呼ぶだけで次のターンが進む——2ターン目以降は圧縮もsandbox再作成も発生しない。transcriptは`send`のたびにdiskへ保存する（要約はしない、ただの書き込みなので安い）。これにより「生きている間はメモリ上の`Agent`が正、プロセスが死んだ後の再開はdisk上のtranscriptから要約して復元する」という役割分担になり、原則1（状態は外部に置く）は壊れない——sessionはあくまで「生きている間の速度のためのキャッシュ」であり、唯一の正本は変わらずdisk上のtranscript。`runAgent`（`POST /agent/run`が使う一発実行）も内部的には`createSession`→`send`を1回→`close`に書き換えたが、外部から見た挙動（sandbox/lockは残す、1リクエスト=1タスクの一発実行）は変えていない。web UIのchat（`POST /agent/run/stream`）はbranchごとに`AgentSession`をサーバのメモリに保持し続ける形に変え、無駄な毎ターン要約を解消した——ただしsessionの明示的な終了・タイムアウトによる破棄は未実装で、`serve`サブコマンドを長時間動かし続けた場合のメモリ使用量は未検証（次の「未解決の論点」参照）。
-- **docsエージェント（`docs`サブコマンド（branch指定可））**: CONCEPT.md/ROADMAP.md/FEATURE.md/HANDOFF.mdの4ファイルだけを対象に、ローカルで対話的に編集するための専用エージェント。実装エージェントと**同じ**sandbox/lockの実行モデルを使う（例外を作らない）——ただし`createSandbox`に渡すbranchは新規作成せず、呼び出し時点で既にcheckoutされているbranch名をそのまま使う（`ensureWorktree`は既存refからworktreeを生やすだけで`-b`は使わない、つまり新しいbranchは切られない）。tool registryだけが違う: `read_file`/`write_file`/`edit_file`はCONCEPT/ROADMAP/FEATURE/HANDOFFの4ファイルにのみ許可し（`src/agent/docsTools.ts`のallowlist）、`bash`は持たせない。代わりに`git_commit`（staging対象もその4ファイルに限定）と`git_push`を持つ——ただし`git_push`は対象branchがrepoのmain/default branchと一致する場合は拒否する。これはdocsの変更であってもGitHub PR Open→Merged承認ゲート（CONCEPT.md原則2）を経由させるための制約で、mainへの直pushだけを塞ぐことで「commit/pushはさせるがPRは作らせない」という利便性と両立させている。system prompt（`src/agent/docsSystemPrompt.ts`）はこのリポジトリ自身のCLAUDE.mdをそのまま埋め込み、ドキュメントの役割分担やHANDOFF蒸留フローのルールを重複定義しない（原則3）。
-- **ticket切り出しagent（`ticket`サブコマンド）**: 「あるticketに対してのワークフロー」（実装エージェント）はv1からあったが、「そのticketをどこから切り出すか」は暗黙にスコープ外（人間が起票する前提）だった。このagentはその手前——ROADMAP.mdの「未解決の論点」「次の優先順位」とHANDOFF.mdの「次のセッションへの申し送り」、つまり**人間がすでに自覚しているが未着手の事項**——を読み、GitHub Issueとして切り出す。CONCEPT.md/FEATURE.mdの全文やソースコードは読まない：FEATURE.mdは実装状況を意図的に持たない（原則3）ため、agentが「スコープ項目が実装済みかどうか」をドキュメントのみから自己判定するのは誤判定のもとであり、ROADMAP/HANDOFFの2つはすでに人間がキュレーションした「未着手」情報として直接使える。既存のopen GitHub Issue一覧も読み、重複起票を避ける。切り出したIssueは提案ラベル付きで**即座に**作成する——`create_pull_request`ツールと同じ「作成自体は提案にすぎず、確定させるのは人間（GitHub上でclose/放置/Linear起票へ昇格）」というPRパターンを踏襲したもので、承認前のドラフトを一時的に保持するような新しい内部状態は持たない（原則1）。1回の実行で作成するIssue数には上限を設ける（デフォルト5件、環境変数で上書き可能）。ROADMAP/HANDOFFの既知ギャップが尽きていれば何も作成せず終了する——**agent自身が新しい方向性（ROADMAP自体の再構想）を提案することはしない**設計判断で、それはCONCEPT.mdの目標に照らした人間の判断が必要な領域であり、既存の`docs`サブコマンド（人間との対話）に委ねる（詳細はFEATURE.mdの「やらないこと」）。tool registryは`create_issue`のみで、write/edit/bash/git_commit/git_push/create_pull_requestは持たない——ROADMAP/HANDOFFの該当セクション抜粋と既存open Issue一覧は、ツール経由でagentに取得させるのではなくsystem promptへ直接埋め込む（`src/agent/ticketSystemPrompt.ts`のextractSectionが`## 見出し`単位でMarkdownセクションを抽出する）。docsエージェント/実装エージェントが埋め込む対象がdiff・GitHub PR・docs全文であるのに対し、このagentが埋め込むのはROADMAP/HANDOFFの2セクションだけという違いであり、「読みのためだけにtool callを増やさない」という既存パターン（system promptに埋め込む vs 読み取り専用tool）をそのまま踏襲したもの。docsエージェントと同様、実装エージェントと同じsandbox/lockの実行モデルを使う（例外を作らない）が、対象branchは呼び出し時のbranchではなく**常にdefault branch固定**とする——「プロジェクト全体の方向性からギャップを見つける」という目的上、未マージのfeature branchの（古い可能性がある）ドキュメントを読むとノイズになるため。ただしこのagentはsandbox内のファイルを一切書き換えないため、seesionを閉じた直後に`destroySandbox`でsandbox/lockを都度破棄する——実装/docsエージェントが sandbox を次回resume用に残すのとは異なる、このagent固有の判断。抽出パス（`create_issue`）とpollパス（`reply_to_issue`）の実処理は`src/agent/ticketRun.ts`の`runTicketExtractionPass`/`runTicketPollPass`に共通化されており、`ticket`サブコマンド/`ticket poll`サブコマンド（CLI）と下記の`serve`サブコマンド定期実行は同じロジックを呼ぶだけの薄いラッパーという関係になっている。
-  - **提案ラベル付きIssueでの会話（同agentの拡張）**: 切り出したIssueに人間がコメントを付けると、そのIssueに紐づく会話を同じagentが続けられる。対象は提案ラベル付きIssueに限定し、人間が手動で作ったIssueには割り込まない。トリガー検知はpollingで行うが、「最後にどこまで見たか」を示す内部カーソルは持たず（原則1）、毎回「Issue上の最新コメントの発言者がハーネス自身ではないか」をGitHub APIから判定するステートレスな方式にする（雑談的なコメントにも反応しうるが、対象をハーネス自身が作ったIssueに絞ることでリスクを抑える）。会話中のagentは`reply_to_issue`ツールによるコメント返信のみを行い、Issue本文・タイトルは編集しない——合意形成の履歴をコメントスレッドとして残し、確定した仕様変更は人間が本文に反映する。複数ターンの会話は既存の`createSession`/`AgentSession`基盤（web UI chatが使っているものと同じ）を再利用する。sandbox/lockモデル・対象branch常にdefault固定、という方針はticket切り出しagent本体と同じ。実装は`ticket poll`サブコマンド（CLI、1回のpollingパスを実行して終了）——複数Issueへの返信が同じpassに含まれる場合、default branch上のsandboxをIssueごとに作成→返信→即`destroySandbox`する（本体と同じ「都度破棄」）。これは性能上の妥協ではなく正しさのための選択で、sandboxを使い回すと`createSession`が前のIssueのtranscriptを「このsandboxの前回セッション」として要約し、無関係な文脈として次のIssueの返信に混入してしまうため。
-  - **`serve`サブコマンド内での定期実行**: `createServer`（`src/serve.ts`）が[チケットポーリング間隔の環境変数](CLAUDE.md#実行時識別子)を読み、設定されている場合のみ抽出パス→pollパスの順で一定間隔ごとに自動実行する（`setInterval`＋`unref()`、chat sessionのidle sweepと同じパターン）。デフォルトは未設定＝無効——このagentはGitHub Issueの作成・コメント投稿を人間の承認なしに自律実行し、実行のたびにLLM呼び出しのコストも発生するため、「動かすかどうか」はoperatorが環境変数で明示的に選ぶ判断とし、`serve`サブコマンドを起動しただけで自動的に有効化される挙動にはしなかった。実行中は前回パスが終わっていなければ次回tickをスキップし（多重実行しない）、`GITHUB_TOKEN`が未設定のtickは何もしない。これにより「今のpolling相当は`ticket poll`サブコマンドを外部cronで叩く形にとどまる」という以前の制約は解消され、`serve`サブコマンド単体でticket切り出しagentの起動トリガーが完結するようになった。
+```text
+GitHub Issue (WHAT / Job ID)
+        │
+        ▼
+Linear issue (HOW / Triage→Todo approval)
+        │ webhook
+        ▼
+public relay
+        │ notification / short-lived token
+        ▼
+repository-scoped local serve instances
+        │ Job lease + branch lock
+        ▼
+local Agent / sandbox
+        │ checkpoint / push / PR
+        ▼
+GitHub Pull Request (DO / merge approval)
+```
 
-## 技術スタック
+### 公開relay
 
-- 言語/ランタイム: TypeScript + Bun + Hono
-- 認証情報: resolverはGitHub token / Linear API keyを環境変数（`.env`）から読む（v1はこれで十分。複数リポジトリ横断や`serve`サブコマンド常駐化が必要になったら`アプリケーション状態ディレクトリ/config`等へ移行）
-- **Agent SDK: pi**（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）。provider非依存のtool-callingレイヤー（`Agent`クラス、`pi-agent-core`）を直接使い、`pi-coding-agent`（セッション永続化・拡張機能・TUIを持つインタラクティブCLI向けの上位パッケージ）は使わない——ハーネス自身がsystem promptとtool registryを毎回組み立てるため、そちらの機構は不要かつ原則1（状態は外部に置く）と重複する。LLM自体のprovider・model・base URLは設定で切り替え可能（デフォルト: anthropic / claude-sonnet-5）。LM StudioのようなローカルOpenAI互換サーバも選択できる。プロバイダのAPI keyはpi-ai自身が各プロバイダの標準env varから解決し、ハーネスのコードは直接読まない。正確な設定名はCLAUDE.mdの実行時識別子一覧を参照する。
+- GitHub App webhookとLinear webhookを受ける。
+- GitHub App秘密鍵を保持し、repositoryと権限を絞った短命installation tokenを発行する。
+- Linear OAuth＋PKCEのcallbackをローカル`serve`へ中継する。
+- 接続中`serve`への状態変更通知とtranscript検索要求を中継する。
+- Job DB、scheduler、コード、transcript、Agent sessionは保存しない。
+- 初期は独自アカウントを持たず、GitHub App installationを利用単位とする。
 
-## 次の優先順位
+### ローカル`serve`
 
-1. web UI（`serve`サブコマンド統合のchat + work context閲覧）。設計判断は確定し実装済み。ただしこのセッション環境では`GITHUB_TOKEN`がGitHub API直叩きに403を返す制約があり（未解決の論点3、以前から既知）、`createSandbox`が絡む経路（`GET /work-context/:branch`・chat開始）の実地検証はモックでのUI確認止まり。ユーザー自身の環境で一度通しで確認するとよい。
-2. Agent SDK統合（`POST /agent/run`、pi採用）の実地検証。このセッション環境にはLLM provider側のAPI keyが無く、実際のモデル呼び出しは未検証（sandbox resume時のtranscript要約呼び出しも同様に未検証）。web UIのchatも同じ`runAgent`を使うため、この検証が済めばchatも通しで動くはずという位置づけ。
-3. ticket切り出しagent（`ticket`サブコマンド）。設計判断どおり実装済み（`src/agent/ticketTools.ts`の`create_issue`/`reply_to_issue`、`src/agent/ticketSystemPrompt.ts`、`src/agent/ticketRun.ts`の共通パス、`src/cli/ticket.ts`、`ticket`サブコマンド/`ticket poll`サブコマンド、および[チケットポーリング間隔の環境変数](CLAUDE.md#実行時識別子)による`serve`サブコマンド内定期実行）。ただしこのセッション環境の`GITHUB_TOKEN`は`GET /user`には応答するが`GET /repos/.../issues`には403を返す制約があり（論点3と同じ既知の制約）、`create_issue`/`listOpenIssues`等の実GitHub API相手の実地検証、および`serve`サブコマンド定期実行パスの通しでの実地検証はできていない。ユーザー自身の環境で一度通しで確認するとよい。
+- 一つのrepositoryを担当する。
+- 初回にブラウザで人間が登録・承認する。
+- GitHub短命tokenとLinear OAuth tokenをOSのcredential storeへ保存する。
+- Web UIをlocalhostで提供する。
+- Agent sandboxへcredentialを渡さず、外部操作を専用toolとして提供する。
+- webhookを逃した場合はGitHub・Linearの現在状態を読み直す。
 
-## 未解決の論点
+### Jobの発見と取得
 
-1. **Agentへdiffを生で渡すか、ハーネスが意味的に要約するか**: v1スコープ（ファイル一覧+統計のみ）は確定した。
-2. **WorkContextの各ソースキーの詳細フィールドスキーマ**: トップレベルは`git`/`github`/`linear`/`docs`のソース別JSONで確定したが、フィールドレベルは実装しながら詰める。
-3. **`resolveGithubContext` / `resolveLinearContext` / lock managerの実GitHub API相手の実地検証**: このセッション環境の`GITHUB_TOKEN`はAPI直叩きに403を返す制約があり未検証。ユーザー自身の環境（本物のPATが使える場所）で一度確認するとよい。
-4. **Dockerサンドボックスのデフォルトimage（`oven/bun:1`）は未検証**: テストでは軽量な`alpine/git`で動作確認したのみで、実運用でエージェント実行に足りるかは未確認。このセッション環境ではDockerデーモン自体が起動しておらず検証不可だった。
-5. **docsエージェント（`docs`サブコマンド）とweb UI chatのsession化の実地検証**: このセッション環境にはLLM provider側のAPI key・実GitHub tokenが無く（論点3と同じ制約）、`createSession`経由の実際のAgent実行・`git_commit`/`git_push`ツール・main branchへのpush拒否は、ユニットテスト（ツールのallowlistチェック、push拒否ロジック）の範囲でしか確認できていない。同じ制約により、chat sessionのアイドル退避（`src/serve.ts`の`evictChatSession`・sweep）も型チェックとユニットテストの範囲でしか確認できていない。ユーザー自身の環境で一度通しで確認するとよい。
+- GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。
+- 対応するLinear issueが一つだけでTodoの場合に実行候補とする。
+- GitHub Issue単位のremote Git ref leaseを取得する。
+- Linear issueが示すbranch名に対するbranch lockを取得する。
+- どちらかを取得できなければ実行しない。
+- 一つのJobにつきactiveなbranchとPRは一つにする。
+
+### Jobの状態遷移
+
+- claim成功時にLinearをTodoからIn Progressへ更新する。
+- WHATまたはHOWが承認後に変わったら実行を止め、leaseを解放し、LinearをTriageへ戻す。
+- PRが未mergeでcloseされた場合も自動再試行せず、Linearの再承認を待つ。
+- PR merge後にLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
+- PRレビュー対応は前回workerを優先し、利用できない場合は別workerが引き継ぐ。
+
+### checkpointと履歴
+
+- Agentは安定点でcheckpoint commitとHANDOFF.mdをpushする。
+- PRをreadyにする前にHANDOFF.mdを削除する。
+- transcriptはsandboxと分離してローカルに保存し、自動削除しない。
+- local、current Job、repositoryの範囲で、接続中`serve`間の検索を可能にする。
+
+### 実行環境
+
+- Nixを必須にせず、repositoryが持つNix、Docker、Dev Container、local worktree等の環境定義を利用する。
+- host OSと、Jobへ提供する実行環境を区別する。Windows上のWSLはLinux実行環境として扱う。
+- capabilityのschemaと設定値はYAMLで記述する。
+- v1ではOS、architecture、利用可能なsandbox方式など自動検査できる項目だけを扱う。
+- 自動検査できない汎用能力指定は、実例が出るまで設計しない。
+
+## 文書構成の移行
+
+- FEATURE.mdの「する／しない」はCONCEPT.mdへ統合する。
+- ROADMAP.mdを恒久的な共有計画としては使わず、GitHub IssueとLinearのviewへ移す。
+- HANDOFF.mdは共有計画ではなくcheckpoint再開情報として扱い、PRの最終差分から除く。
+- 現行コードが4文書を固定参照している間はファイルを残し、resolver・docs agent・ticket agentの移行と同時に整理する。
+
+## 未解決の実装詳細
+
+- Job lease refの形式、期限、heartbeat、引き継ぎ手順
+- relayと`serve`間の接続方式と検索要求の認可
+- relayのhosting先、installation単位の利用制限、worker登録解除
+- GitHub／Linear OAuthとOS credential storeの実装
+- WHAT／HOW変更検知に使う版の記録方法
+- YAML schemaの詳細とruntime validation
+- sandbox backendの検出順序
+- draft PRを作る時点とcheckpoint頻度を調整するAgent prompt
+- 現行のbranch中心resolver・session・ticket agentからJob中心reconcilerへの移行順序
+
+## 当面の実装順序
+
+1. GitHub Issue URLからLinear issueを解決し、Job候補を構成する。
+2. branch lockと分離したIssue単位のJob leaseを導入する。
+3. 外部操作の直前にlease所有を検証する。
+4. `serve`をrepository単位workerとして整理し、状態遷移を実装する。
+5. GitHub App／Linear webhookを受ける公開relayとworker登録を導入する。
+6. credentialをAgent sandboxから完全に分離し、OS credential storeへ移す。
+7. checkpoint HANDOFFとrepository内transcript検索を導入する。
+8. 4文書前提とticket切り出しagentを新しいIssue中心モデルへ移行する。

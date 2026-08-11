@@ -1,8 +1,9 @@
 # 対話ハンドオフ
 
-このドキュメントは直近セッションの「次への申し送り」だけを持つ。確定した思想・原則はCONCEPT.md、方向性・優先順位・未解決論点はROADMAP.md、実装済み/未実装/やらないことのスコープはFEATURE.mdを参照。過去の実装ログの詳細はgit commit履歴を参照(原則1: 状態は外部に置く)。
-
 ## 次のセッションへの申し送り
 
-- チケットポーリング間隔の設定を有効にした`serve`サブコマンドを、本物のGITHUB_TOKEN・LLM provider API keyが使える環境で一度通しで動かし、抽出パス→pollパスが実際にIssue作成・返信まで届くか確認する。正確なコマンド名・環境変数名は [CLAUDE.mdの実行時識別子一覧](CLAUDE.md#実行時識別子) を参照。
-- 実GitHub API・LLM provider・Dockerデーモンを使った通し検証は、このセッション環境の制約により未完了。詳細はROADMAP.mdの「未解決の論点3〜5」を参照。
+- CONCEPT.mdを「GitHub／Linearを制御面とする分散ローカル実行ハーネス」という合意内容へ更新した。
+- ROADMAP.mdには、現行実装からJob中心モデルへ移す順序と未解決の実装詳細を保存した。
+- FEATURE.mdの役割はCONCEPT.mdへ統合し、現行コードが4文書を固定参照する間だけ互換用に残した。
+- 次はROADMAP.mdの「当面の実装順序」1から始める。GitHub Issue URLをLinear attachment APIへ渡して対応issueを一意に解決し、branch作成前のJob候補を構成する。
+- 実装時は、ユーザーの既存変更であるCLAUDE.mdと未追跡のAGENTS.mdを変更・commitしない。
