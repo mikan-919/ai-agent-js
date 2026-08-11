@@ -11,6 +11,16 @@ import type { PullRequestOutcome, RunAgentResult } from "./agent/types";
 import { resolveWorkContext } from "./context";
 import { createSandbox, destroySandbox } from "./sandbox";
 
+const DEFAULT_CHAT_SESSION_IDLE_MS = 30 * 60 * 1000;
+/** How often the idle sweep checks chatSessions for eviction candidates. */
+const CHAT_SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+function resolveChatSessionIdleMs(): number {
+  const raw = process.env.NOOK_CHAT_SESSION_IDLE_MS;
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CHAT_SESSION_IDLE_MS;
+}
+
 /**
  * The server is fixed to the repo path (and whatever branch is currently
  * checked out there) it was started with. There is no per-request
@@ -40,12 +50,16 @@ export function createServer(repoPath: string) {
   interface ChatSessionEntry {
     session: AgentSession;
     pullRequestRef: { current: PullRequestOutcome | null };
+    lastActivityAt: number;
   }
   const chatSessions = new Map<string, ChatSessionEntry>();
 
   async function getOrCreateChatSession(branch: string, token: string) {
     const existing = chatSessions.get(branch);
-    if (existing) return { ok: true as const, entry: existing };
+    if (existing) {
+      existing.lastActivityAt = Date.now();
+      return { ok: true as const, entry: existing };
+    }
 
     const pullRequestRef: { current: PullRequestOutcome | null } = { current: null };
     const result = await createSession({
@@ -70,10 +84,43 @@ export function createServer(repoPath: string) {
     });
     if (!result.ok) return result;
 
-    const entry = { session: result.session, pullRequestRef };
+    const entry = { session: result.session, pullRequestRef, lastActivityAt: Date.now() };
     chatSessions.set(branch, entry);
     return { ok: true as const, entry };
   }
+
+  /**
+   * Removes a branch's live chat session, if any, persisting its transcript
+   * one last time first (AgentSession.close). Called both when the sandbox
+   * backing it is explicitly destroyed and by the idle sweep below — the two
+   * are the same cleanup, just triggered differently, so this is the one
+   * place that does it (CONCEPT.md principle 3: don't duplicate).
+   */
+  async function evictChatSession(branch: string): Promise<void> {
+    const entry = chatSessions.get(branch);
+    if (!entry) return;
+    chatSessions.delete(branch);
+    await entry.session.close().catch(() => {});
+  }
+
+  /**
+   * Frees sessions nobody has talked to in a while so a long-running `nook
+   * serve` doesn't accumulate one live Agent per branch forever (ROADMAP.md
+   * unresolved issue 6). This only evicts the in-memory session — the
+   * sandbox and its lock are untouched and outlive it, same as they already
+   * do for runAgent's one-shot sessions; the next chat message on that
+   * branch just pays the cold-start (resume + summarize) cost again.
+   */
+  const sweepInterval = setInterval(() => {
+    const idleMs = resolveChatSessionIdleMs();
+    const now = Date.now();
+    for (const [branch, entry] of chatSessions) {
+      if (now - entry.lastActivityAt >= idleMs) {
+        void evictChatSession(branch);
+      }
+    }
+  }, CHAT_SESSION_SWEEP_INTERVAL_MS);
+  sweepInterval.unref();
 
   app.get("/work-context", async (c) => {
     const workContext = await resolveWorkContext(repoPath);
@@ -93,16 +140,7 @@ export function createServer(repoPath: string) {
     if (!token) return c.json({ ok: false, error: "GITHUB_TOKEN not set" }, 503);
 
     const branch = c.req.param("branch");
-    let sandboxResult: Awaited<ReturnType<typeof createSandbox>>;
-    try {
-      sandboxResult = await createSandbox({ repoPath, branch, token });
-    } catch (error) {
-      // createSandbox's own try/catch doesn't cover its lock-status check
-      // (a GitHub API failure there throws rather than returning
-      // { ok: false }) — caught here so a transient GitHub error surfaces as
-      // JSON instead of crashing the response.
-      return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 502);
-    }
+    const sandboxResult = await createSandbox({ repoPath, branch, token });
     if (!sandboxResult.ok) return c.json({ ok: false, error: sandboxResult.error }, 409);
 
     const workContext = await resolveWorkContext(sandboxResult.sandbox.path);
@@ -194,6 +232,7 @@ export function createServer(repoPath: string) {
       const sendResult = await entry.session.send(prompt, (event) => {
         void stream.writeSSE({ event: "agent", data: JSON.stringify(event) });
       });
+      entry.lastActivityAt = Date.now();
 
       const result: RunAgentResult = sendResult.ok
         ? {
@@ -217,6 +256,7 @@ export function createServer(repoPath: string) {
     const force = c.req.query("force") === "true";
     const backend = c.req.query("backend") === "docker" ? "docker" : undefined;
     const result = await destroySandbox({ repoPath, branch, token, force, backend });
+    if (result.ok) await evictChatSession(branch);
     return c.json(result, result.ok ? 200 : 409);
   });
 

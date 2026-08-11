@@ -86,6 +86,21 @@ describe("sandbox manager", () => {
     }
   });
 
+  test("returns ok:false instead of throwing when the lock API fails unexpectedly", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => {
+      throw new Error("network unreachable");
+    }) as unknown as typeof fetch;
+
+    try {
+      const result = await createSandbox({ repoPath, branch: "feature-x", token, holder: "agent-a", baseDir });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("network unreachable");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("builds the worktree from an existing remote-tracking branch when the local branch is missing", async () => {
     await git(repoPath, ["branch", "feature-y"]);
     await git(repoPath, ["update-ref", "refs/remotes/origin/feature-y", "refs/heads/feature-y"]);
