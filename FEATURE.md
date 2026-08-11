@@ -14,6 +14,7 @@ nookが「何を対象にして・何を対象にしないか」というスコ�
 
 - **agent session**: 1回のsandbox作成に対して複数ターンの対話を送り続けられる`createSession`/`AgentSession`（`src/agent/session.ts`）。一発実行の`runAgent`（`POST /agent/run`が使う）とweb UIのchat（`POST /agent/run/stream`、branchごとに`nook serve`のメモリ上でsessionを保持）の両方がこの上に乗る共通基盤（詳細はROADMAP.md）。
 - **docsエージェント（`nook docs [branch]`）**: CONCEPT.md/ROADMAP.md/FEATURE.md/HANDOFF.mdの4ファイルに対象を絞った、ローカル対話用のエージェント。実装エージェントと同じsandbox/lockの実行モデルを使うが、branchは新規作成せず呼び出し時点のbranchをそのまま使う。tool registryは4ファイルへのread/write/edit・`git_commit`（staging対象も同じ4ファイルに限定）・`git_push`（main/default branchへの直pushのみ拒否）に絞り、`bash`と`create_pull_request`は持たない（詳細はROADMAP.md）。
+- **ticket切り出しagent（`nook ticket`）**: ROADMAP.mdの「未解決の論点」「次の優先順位」とHANDOFF.mdの「次のセッションへの申し送り」——人間がすでに自覚している未着手事項——を読み、GitHub Issueとして切り出す。読み取り対象はこの2ファイルの該当セクションと、重複起票防止のための既存open GitHub Issue一覧に限定し、CONCEPT.md/FEATURE.mdの全文やソースコードは読まない（実装状況の自己判定はしない）。切り出したIssueは`nook:proposed`ラベル付きで直接作成し（1回の実行での作成数に上限あり）、実装エージェント・docsエージェントと同じsandbox/lockの実行モデルを使うが対象branchは常にdefault branchに固定する。tool registryはread（対象ドキュメント＋Issue一覧）+`create_issue`のみで、write/edit/bash/git_commit/git_push/create_pull_requestは持たない。起動トリガーは手動実行とpolling実行の両方に対応する。`nook:proposed`Issueへの人間のコメントに対しては、同agentが`reply_to_issue`ツール（コメント返信のみ、Issue本文・タイトルは編集しない）で会話を継続できる（詳細はROADMAP.md）。
 
 各要素の優先順位・着手順はROADMAP.mdを参照。
 
@@ -27,3 +28,5 @@ nookが「何を対象にして・何を対象にしないか」というスコ�
 - **webhook relay**: 公開relay + ローカル`nook serve`への転送という二層構成はv1では実装しない。起動時/一定間隔のpollingで差分検知する。relayが実際に不便になった時点で後付けする。
 - **ROADMAP driftのmerge-base基準3点区別**: branch HEAD と main HEAD の単純diffのみを対象にする。merge-base基準の3点区別は対象外。
 - **diffの意味的要約**: WorkContextはdiffをファイル一覧+統計（+N/-M）のみ対象にし、本文（生diffテキスト）もLLMによる要約も対象にしない。
+- **ticket切り出しagentによる新しい方向性の提案**: ROADMAP.md/HANDOFF.mdに書かれた既知のギャップが尽きていても、agentが自らプロジェクトの新しい方向性を考えて起票することはしない。方向性そのものの検討はCONCEPT.mdの目標に照らした人間の判断が必要な領域であり、既存の`nook docs`（人間との対話）に委ねる。
+- **ticket切り出しagentによるIssue本文・タイトルの編集**: `nook:proposed`Issue上の会話機能はコメント返信のみに留め、Issue自体の書き換えはしない。合意形成の履歴はコメントスレッドに残し、確定した変更は人間が本文へ反映する。
