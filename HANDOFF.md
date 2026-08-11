@@ -4,7 +4,7 @@
 
 ## 次のセッションへの申し送り
 
-- ROADMAP.mdの未解決論点2（WorkContextの各ソースキーのフィールドレベルスキーマ）に沿って、`GithubContext.pullRequest`に`reviewDecision`（GraphQLの`reviewDecision`: `APPROVED`/`CHANGES_REQUESTED`/`REVIEW_REQUIRED`/`null`）と`checksStatus`（PR head commitの`statusCheckRollup.state`: `SUCCESS`/`FAILURE`/`ERROR`/`PENDING`/`EXPECTED`/`null`）を追加した（`src/context/types.ts`・`src/context/github.ts`）。既存の`closingIssuesReferences`取得用GraphQLクエリに同居させ、往復を増やさずに取得している。GitHub PR Open→Merged承認ゲートの状態（CONCEPT.md原則2）と、「GitHub ActionsはCIとして`nook status`が結果を読むだけの対象」というROADMAP.mdの役割分担を、実際にWorkContextのフィールドとして反映させたもの。system prompt（`renderGithub`）・CLIの`nook status`出力（`formatWorkContext`）・web UIの`WorkContextPanel`のPRカードにも反映済み。
-- テスト: `src/context/github.test.ts`を新規追加（一時gitリポジトリ＋`fetch`モックで`resolveGithubContext`の`reviewDecision`/`checksStatus`の分岐を検証——このリポジトリにはGitHub APIを叩く既存のresolverテストが無かったため、モック込みのテストパターンとしてもこれが最初の例になる）。`src/cli/format.test.ts`にレビュー/CIありなしの2ケースを追加。`bun test`: 76 pass / 7 skip、`bunx tsc --noEmit`・`bun run build:web`ともにクリーン。
-- 論点2自体は「トップレベル確定・フィールドレベルは実装しながら詰める」という継続方針のため、今回で完了にはならない。次に候補になりそうなのは`LinearContext`への担当者/優先度の追加や`GitContext`のconflict検知などだが、先回りして追加はしない——web UI/agentが実際に必要とするタイミングで判断する。
-- 論点3〜5（実GitHub token・LLM provider API key・Dockerデーモンが無い制約）はこのセッション環境でも変わらず未解決。今回追加した`reviewDecision`/`checksStatus`の実GraphQL応答での検証もこの制約に含まれる——ユーザー自身の環境で一度通しで確認するとよい。
+- ROADMAP.mdの次の優先順位3、ticket切り出しagent（`nook ticket`）を実装した（`src/agent/ticketTools.ts`の`create_issue`/`reply_to_issue`、`src/agent/ticketSystemPrompt.ts`、`src/cli/ticket.ts`、`src/index.ts`への`nook ticket`/`nook ticket poll`配線）。設計の詳細（system promptへの埋め込み方式・sandbox都度破棄の理由）はROADMAP.mdの当該項目に反映済み。`bun test`: 97 pass / 7 skip、`bunx tsc --noEmit`・`bun run build:web`ともにクリーン。
+- 実GitHub APIでの検証: このセッション環境の`GITHUB_TOKEN`は`GET /user`には応答する（`mikan-919`として認証できることを確認済み）が、`GET /repos/.../issues`には403を返す——論点3として既知の制約が今回も再現した。そのため`create_issue`/`listOpenIssues`/`listProposedIssues`/`reply_to_issue`の実地検証はできていない。ユーザー自身の環境（本物のPATが使える場所）で`nook ticket`を一度通しで確認するとよい。
+- `nook ticket poll`はCLIから叩く1回きりのpollingパスとして実装した。`nook serve`内での定期実行（cron相当の自動配線）はまだ行っていない——次にticket切り出しagentへ手を入れるならここが候補になる。
+- 論点3〜5（実GitHub token・LLM provider API key・Dockerデーモンが無い制約）はこのセッション環境でも変わらず未解決。
