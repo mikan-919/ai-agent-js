@@ -47,21 +47,21 @@ relayはWebSocketによって`serve`の接続状態を把握する。切断は�
 
 webhookは起床通知であり正本ではない。重複や欠落を前提とし、workerはGitHubとLinearの現在状態から必要な処理を再構成して、外部操作をidempotentにする。
 
-### `serve`、harness、sandbox
+### `serve`、harness、実行backend
 
 ローカルruntimeを三層に分ける。
 
 - **`serve`**: repository単位の常駐process。relay接続、Web UI、local stateとcredential、harnessの監督、外部操作のpolicy enforcementを担当する。
 - **harness**: Jobごとに作られる別process。worker session、transcript、toolを制御し、認証済みlocal IPC経由で`serve`へ外部操作を依頼する。
-- **sandbox**: Jobごとの隔離実行環境。checkoutを持ち、コード調査、編集、build、testを実行する。
+- **実行backend**: Jobごとのcheckoutを持ち、コード調査、編集、build、testを実行する。v1ではworktreeだけを使う。
 
-sandboxはJob間で共有しない。対話Jobは必要に応じてread-only checkoutを使える。実装JobとPR対応Jobはそれぞれ独立したwritable sandboxを使う。worker間の永続的な引き継ぎには共有filesystemではなくcommit、push、checkpointのHANDOFFを使う。再生成可能なcacheだけは共有してよい。
+worktreeはJob間で共有しない。対話Jobは必要に応じてread-only checkoutを使える。実装JobとPR対応Jobはそれぞれ独立したwritable worktreeを使う。worker間の永続的な引き継ぎには共有filesystemではなくcommit、push、checkpointのHANDOFFを使う。再生成可能なcacheだけは共有してよい。
 
-sandboxのv1境界は、Agentが実行するcommandからhostとcredentialを守ることである。repository worktreeと明示したcache以外のhost filesystem、GitHub・Linear・model credential、Docker socket、任意のhost mountを渡さない。依存取得のためのoutbound networkは許可し、repository設定で無効化できる。
+worktreeはcheckoutを分けるが、同じOS userがアクセスできるhost filesystem、process、networkからAgent commandを隔離しない。v1は強いhost isolationを保証しない。GitHub、Linear、model credentialをharnessの環境変数、引数、tool入力へ明示的に渡さず、外部操作を`serve`の制限されたinterfaceだけへ絞る境界は維持する。
 
-workerはsandbox内でファイル編集、Git状態の確認、local commitを行える。remoteへのpush、remote branch操作、Pull Request操作はharnessと`serve`を経由する。
+workerはworktree内でファイル編集、Git状態の確認、local commitを行える。remoteへのpush、remote branch操作、Pull Request操作はharnessと`serve`を経由する。
 
-実装workerが内部でreview subagentを使う場合、そのsubagentは同じ実装Job、harness、sandbox、権限、lifecycleに属する。分散schedulerが扱う独立Jobにはしない。
+実装workerが内部でreview subagentを使う場合、そのsubagentは同じ実装Job、harness、worktree、権限、lifecycleに属する。分散schedulerが扱う独立Jobにはしない。
 
 ### 外部操作interface
 
@@ -84,11 +84,11 @@ relayが永続保存できるのは、再接続と認可に必要なdevice regis
 
 - GitHub App installation ID
 - repository ID
-- 登録済み`serve`のIDと公開鍵
+- 登録済み`serve`のID、device tokenのhash、表示用metadata
 - 登録日時と失効日時
 - routingに使うLinear workspace IDとteam ID
 
-browserはrelayへ直接接続せず、localhostのWeb UIから`serve`を通す。`serve`は登録したdevice keyでWebSocketを認証する。同じinstallationかつrepositoryに登録された`serve`間だけ、通知、transcript閲覧、検索を中継できる。
+browserはrelayへ直接接続せず、localhostのWeb UIから`serve`を通す。`serve`は登録したrepository scopeのbearer device tokenでWebSocketを認証する。同じinstallationかつrepositoryに登録された`serve`間だけ、通知、transcript閲覧、検索を中継できる。
 
 各`serve`はLinear OAuthを個別に完了し、tokenをOS credential storeへ保存する。relayはworkspace IDとteam IDでLinear通知をrouteするが、Linear tokenを保持しない。
 
@@ -114,11 +114,11 @@ transcriptは自動削除しない。人間がWeb UIから明示した場合だ�
 
 ### repository実行設定
 
-コード変更を伴うJobには、sandbox backendを明示するrepository設定を必須とする。Nix、Dev Container、Dockerなどに暗黙の優先順位を設けない。設定がない場合、Issue対話とLinear対話は動かせるが、実装JobとPR対応Jobはコードを実行しない。
+コード変更を伴うJobには、repository rootの`.oriel.yaml`を必須とする。v1で選べる実行backendはworktreeだけであり、`schemaVersion: 1`、`execution.backend: worktree`、`execution.autonomous: true`を明示した場合だけ自立実行を許可する。設定がない場合、Issue対話とLinear対話は動かせるが、実装JobとPR対応Jobはコードを実行しない。
 
-実装JobとPR対応Jobがsandboxを作る際は、Pull Requestのtarget branch上にある設定だけを信頼する。working branch上でAgentが変更したsandbox設定は、mergeされるまでworker実行へ採用しない。
+実装JobとPR対応Jobがworktreeを作る際は、Pull Requestのtarget branch上にある設定だけを信頼する。working branch上でAgentが変更した実行設定は、mergeされるまでworker実行へ採用しない。
 
-capabilityの語彙とYAML schemaはharnessのversionに同梱し、一か所を正本とする。repository YAMLは自動検査可能な必要条件を宣言する。各`serve`はhostと実行環境のcapabilityを起動時に検査し、repositoryへcommitしない。条件を満たす`serve`がなければJobを開始せず、LinearをTodoに保ち、不足条件をLinear commentへ記録する。
+YAML 1.2としてparseした設定をValibotのstrict schemaで検証し、そのschemaを一か所の正本とする。欠落、未知field、未知versionはfail closedにする。実行可能なTypeScript設定、環境変数展開、YAML custom tagは許可しない。
 
 model providerとcredentialは`serve`のlocal設定とする。repositoryは自動検査可能なmodel capabilityを要求できるが、provider固有のmodel IDを選ばない。実行に使ったmodelはtranscriptへ記録する。
 
@@ -135,8 +135,9 @@ checkpointはcanonical branchへpushしたcommitである。別workerが外部�
 - relayはschedulerやWorkflow DBにならず、routingとcredential境界に留まる。
 - Job単位のleaseにより同じWorkflowの対話と実装を並行でき、branch lockでコード変更を保護できる。
 - 詳細なAgent実行履歴をrelayへuploadせず、Web UIから確認できる。
-- sandbox設定がないrepositoryではコード実行を始められないが、暗黙に危険または不整合な環境を選ばずに済む。
-- harnessの別process化とJob単位sandboxにはoverheadがあるが、crash isolationと信頼境界が明確になる。
+- 実行設定がないrepositoryではコード実行を始められず、worktreeによる自立実行にはrepositoryの明示的な許可が必要になる。
+- harnessの別process化とJob単位worktreeにはoverheadがあるが、crash isolationとcheckoutの所有範囲が明確になる。
+- worktreeは強いhost isolationを提供しないため、v1は悪意あるrepository codeからsame-userのfilesystem、process、credential storeを保護する用途には使えない。
 
 ## 保留事項
 
@@ -144,9 +145,6 @@ checkpointはcanonical branchへpushしたcommitである。別workerが外部�
 
 - remote Git refの形式、lease期間、heartbeat、引き継ぎ手順
 - 承認済みWHAT/HOW revisionの記録・比較方法
-- relayのhosting先
-- YAMLのfile名とschema field
-- 対応するsandbox backend
 - concurrency、CI retry、checkpoint、timeout、resource limitなどの運用値
 
 これらはAPI調査、prototype、運用上の証拠を踏まえて決め、このADRの境界を維持する。

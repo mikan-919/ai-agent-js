@@ -33,13 +33,15 @@ WHAT、HOW、承認状態、実行状態、成果、レビュー結果はGitHub�
 
 一つのローカル実行環境が失われても、GitHub、Linear、Git上のcheckpointから別の実行環境が仕事を再開できることを設計条件とする。
 
-### 2. 承認ゲートは能力の不在で守る
+### 2. 承認ゲートはcredentialの非委譲と制限された外部操作で守る
 
-Agent sandboxへGitHub・Linear credentialを渡さない。credentialを保持するのは、人間が登録時に信頼したローカル`serve`プロセスである。GitHub・Linearへの書き込みは`serve`が提供する制限された操作だけを通す。
+実行ハーネスの環境変数、引数、tool入力へGitHub・Linear credentialを渡さない。credentialを保持するのは、人間が登録時に信頼したローカル`serve`プロセスである。GitHub・Linearへの書き込みは`serve`が提供する制限された操作だけを通す。
 
 AgentはTriage上でHOWを提案・修正できるが、TriageからTodoへ移せない。Agentはbranch、commit、PRを提案できるが、PRをmergeできない。
 
 承認後の機械的な状態反映として、実行ハーネスはTodoからIn Progress、PR merge後のDone、およびWHAT/HOW変更時のTriageへの差し戻しを行ってよい。
+
+v1のworktree backendは同じOS userでcommandを実行するため、host filesystem、process、credential storeからの強い隔離を保証しない。悪意あるrepository codeからsame-userのsecretを保護するsecurity sandboxではなく、製品がcredentialを明示的に委譲せず、外部操作interfaceをJobと対象へ限定する境界である。自立Jobはrepositoryのtarget branchが明示的に許可した場合だけ実行する。
 
 ### 3. 情報源は一つの役割だけを持つ
 
