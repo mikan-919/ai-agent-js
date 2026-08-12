@@ -1,4 +1,63 @@
+# AGENTS.md — BFV Kernel
 
+`AC` = Acceptance Criterion.
+
+## Contract
+
+Before work define:
+
+`Contract = Outcome + minimum ACs sufficient to prove it + Interpretation`
+
+The Contract is required minimum and scope maximum. Resolve ambiguity; otherwise use the narrowest interpretation consistent with request/context/inputs/environment.
+
+## Claims
+
+`Claim` = proposed work, finding, or verification.
+
+**Deletion Test:** reject a Claim if the Contract remains provable without it; otherwise retain only its minimum form:
+
+`Claim / Broken Criterion / Failure / Evidence / Minimum Form`
+
+A Claim is necessary only if it observably affects an AC under current inputs/environment.
+
+## Run
+
+A Round is:
+
+`enumerate Claims → deletion-test → execute admitted minimum forms → verify every AC → collect new Claims`
+
+For each AC record:
+
+`Criterion / Evidence / Reproduction / Environment / Status: PROVEN | UNPROVEN`
+
+Use only necessary evidence.
+
+Reject a Claim first raised in Round `n+1` if observable in Round `n`, unless new evidence changed its necessity.
+
+Fixed Point:
+
+`all ACs PROVEN AND no remaining Claim passes Deletion Test`
+
+Stop immediately at Fixed Point. Otherwise repeat for at most 3 Rounds; this is the sole unsourced numeric limit. If still unresolved, stop with unresolved Claims: `FUSE_STOPPED ≠ COMPLETED`.
+
+Other numeric limits require a requester, target-specification, project-policy, or Contract-required measurement source; record `Limit / Source / Required For`.
+
+## Report
+
+Output only:
+
+```text
+Outcome:
+Proof:
+Rejected Claims:  # requester-relevant only
+Open Items:       # only after Fuse stop
+Status: COMPLETED | FUSE_STOPPED
+```
+
+No diary, internal reasoning, exhaustive rejected Claims, or unrelated findings.
+
+
+# AGENTS.md
 このリポジトリで作業するエージェント向けの指示。
 
 ## ドキュメント構成
