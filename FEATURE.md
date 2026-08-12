@@ -10,7 +10,7 @@
 - GitHub loginとApp installationを使ってrepository単位のdeviceを登録し、Web UIからdeviceを失効できるようにする。
 - Jobごとのharness processとworktreeを作り、repositoryが`.oriel.yaml`で`worktree`と`autonomous: true`を明示した場合に自立Jobを許可する。
 - AgentへGitHub、Linear、model credentialを渡さず、`serve`がJobと対象を限定した外部操作を提供する。
-- GitHub Issue単位のleaseとbranch lockにより、外部操作直前の所有権を確認する。
+- Job単位のleaseと、コードを変更するJobだけのcanonical branch lockにより、外部操作直前の所有権を確認する。
 - local SQLiteへJob state、outbox、transcriptを保存し、自動削除せず、Web UIからの明示操作だけで削除する。
 - local、current Job、repositoryの範囲でtranscriptを検索し、同じrepositoryを担当する接続中`serve`間の検索をrelayする。
 - checkpoint commitと一時的なHANDOFFにより、別の`serve`がGitHub、Linear、GitからJobを再構成できるようにする。
