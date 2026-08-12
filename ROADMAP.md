@@ -135,7 +135,8 @@ packages/identity
 - LM Studioは`serve`側の暫定接続部で対応する。pi-aiの公式providerが利用可能になった後、同じ検証を通過した版へ更新するときに暫定接続部を削除して置き換える。
 - transcriptは`serve`が所有する単一の時系列記録とし、モデルからのstreamと実行ハーネス側のAgent lifecycle・ツール実行eventを統合する。provider eventを別の正本として二重保存しない。
 - プロセス切断時は進行中のturnを`interrupted`として記録する。受信済みeventは残すが、未完了のassistant messageを次のmodel contextへ入れず、モデルへの要求と完了未確認のtool callを自動再実行しない。
-- 採用前に、固定したpi-agent-coreとpi-aiの版について、Bun上でtext、thinking、tool call argument、ツール実行後の次のturn、中止、IPC経由のstream、LM Studio暫定providerを検証する。通過した版だけを採用する。
+- v1は`@earendil-works/pi-agent-core@0.84.1`と`@earendil-works/pi-ai@0.84.1`を、Bun互換gate（text、thinking、tool call引数の差分、ツール実行後の次のturn、中止、IPC経由のstream、LM Studio暫定provider）に合格した初期採用版として固定する。gateの証拠と既知の限界は[docs/research/agent-provider-stack.md](./docs/research/agent-provider-stack.md)を正本とする。
+- 版を上げる場合は、新しい版で同じBun互換gateを再度通過させてから切り替える。
 
 ### device登録とlocalhost境界
 

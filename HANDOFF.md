@@ -2,11 +2,6 @@
 
 ## 次のセッションへの申し送り
 
-- 既存実装を削除し、設計文書だけの状態へ戻した。削除前の実装はgit履歴から復元できる。
-- CONCEPT.mdの不変の原則は変更していない。
-- v1技術スタックのgrillを完了し、確定事項をROADMAP.md、対象／非対象をFEATURE.mdへ保存した。
-- v1の実行backendはworktreeだけであり、`.oriel.yaml`で`execution.backend: worktree`と`execution.autonomous: true`を明示したrepositoryでは自立Jobを許可する。worktreeは強いhost隔離を提供しない。
-- Agent loopはharnessの`@earendil-works/pi-agent-core`、model接続は`serve`の`@earendil-works/pi-ai`が担う。採用前に固定版のBun適合試験を通す。
-- 実装はまだ再開しない。次はremote ref lease、承認revision、reconciliation、tool APIの未解決事項を狭め、最初のtracer bulletを定義する。
+- pi-agent-core/pi-aiのBun互換gateは完了した。v1は`@earendil-works/pi-agent-core@0.84.1`と`@earendil-works/pi-ai@0.84.1`を初期採用版として固定済み。証拠と既知の限界は[docs/research/agent-provider-stack.md](./docs/research/agent-provider-stack.md)、採用ルールは[ROADMAP.md](./ROADMAP.md)「Agentとモデル提供元」を参照。
+- 次の実装作業は、ROADMAP.mdの「実装前に決めること」に残る未解決事項を狭めた上で定義する、最小構成のproduction workspaceと最初のtracer bulletである。
 - 設計が固まったらGitHub IssueとLinearへ作業を分解し、最初のtracer bulletを人間が承認してから実装する。
-- GitHub repositoryは`mikan-919/oriel`へ改名済みだが、local `origin` URLは旧`mikan-919/sable`のままである。

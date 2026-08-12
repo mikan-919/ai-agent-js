@@ -11,7 +11,7 @@ v1は **`@earendil-works/pi-agent-core` をharnessのAgent loop、`@earendil-wor
 - LiteLLMは強力なprovider gatewayだがAgent loopではない。採用するとPython proxy processと、原則OpenAI形式への追加変換層が増える。v1の受け入れ基準に中央集約されたrate limit、予算、fallback、仮想keyがまだない限り、この追加層は不要である。
 - Vercel AI SDKはTypeScriptのAgent/provider基盤として有力だが、`serve`とharnessをcredential境界で分ける公式の専用transportは確認できなかった。採用するなら独自providerまたはローカルgateway protocolを設計する必要があり、現時点ではpiより余分な実装になる。
 
-ただし、piとVercel AI SDKの公開packageはいずれも現在`engines.node`を宣言している。TypeScript/ESMであることとBun上での正式な互換性保証は同義ではないため、採用確定前に選んだpackage/versionをBunで実行する小さな互換性spikeが必要である。
+ただし、piとVercel AI SDKの公開packageはいずれも現在`engines.node`を宣言している。TypeScript/ESMであることとBun上での正式な互換性保証は同義ではないため、採用確定前に選んだpackage/versionをBunで実行する小さな互換性spikeが必要だった。pi-agent-core/pi-aiについてはこのspikeを実施済みで、結果は下記「Bun互換gateの結果」に記録する。
 
 ## 前提となる設計境界
 
@@ -108,6 +108,28 @@ transcriptは`serve`が所有する単一の時系列記録とする。`serve`�
 LM Studio暫定providerは`serve`側に置き、pi-aiの`Provider`契約を実装する。公式providerがmergeされても自動では切り替えない。同じ検証を通過し、認証情報の境界とstream eventの意味を維持でき、暫定接続部を完全に削除できる版へ更新するときだけ置き換える。
 
 中央予算、rate limit、provider fallback、仮想keyがv1の受け入れ基準に入らない限り、LiteLLMは採用しない。
+
+## Bun互換gateの結果（2026-08-12実施）
+
+固定した`@earendil-works/pi-agent-core@0.84.1`と`@earendil-works/pi-ai@0.84.1`について、Bun 1.3.14上で上記7項目すべてを検証し、全て合格した。
+
+- text stream: `pi-ai`の`fauxProvider`で、thinking deltaに続けてtext deltaが順序通り届き、完了messageで終わることを確認した。
+- thinking stream: 同上。
+- tool call引数の差分: `pi-agent-core`の`Agent`が公開する`message_update`の`toolcall_delta`列を連結し、`tool_execution_start`より前に完全な引数JSONへ復元できることを確認した。
+- ツール実行後の次のturn: tool実行後にAgentが2回目のturnへ進み、follow-up応答を返すことを確認した。
+- 中止: `agent.abort()`実行中の呼び出しで、例外を投げずに`stopReason: "aborted"`の最終messageへ収束することを確認した。
+- `StreamFn`をNDJSON経由のBun子processへ跨がせた場合のstream: 別のBun子processが`pi-ai`のevent streamをNDJSON化して送り返し、親のAgentがeventをreshapeせずに同じ結果へ到達することを確認した。子processは`process.execPath`（実行中Bunの絶対path）で起動し、PATH上の`bun`解決には依存しない。
+- LM Studio暫定provider: 実LM Studio processではなく、`Bun.serve`によるlocal mockに対して検証した。mockは実際に届いたPOSTボディを検証し、model id、`stream: true`、ユーザー入力のOpenAI Responses `input_text`アイテムが期待通りであることを確認した上で、streamした応答をpi-aiが完成させることを確認した。
+
+`bun install --frozen-lockfile`はexit 0（`engines.node >= 22.19.0`宣言に対する失敗・警告なし）。テストは5 pass / 0 fail / 31 expect() calls（3ファイル）。検証に使った使い捨てtest workspaceはPRから削除済みで、この記録が正本である。
+
+既知の限界:
+
+- LM Studio検証はwire protocolを再現したlocal mockに対するものであり、実LM Studio processへは未接続。
+- 正式なIPC contract（`packages/contracts`のschema化）と、process再接続protocolは対象外のまま。
+- `StreamFn`が返すevent streamの完了（`agent.prompt()`の解決）と、それを供給する子processの実際のexitは別のlifecycleである。両方の完了を確認したい呼び出し側は明示的に同期する必要がある。
+
+採用含意: v1は`@earendil-works/pi-agent-core@0.84.1`と`@earendil-works/pi-ai@0.84.1`を初期採用版として固定する（[ROADMAP.md](../../ROADMAP.md)「Agentとモデル提供元」）。版を上げる場合は同じ7項目のgateを新しい版で再度通過させる。
 
 ## 今回追加比較しなかったもの
 
