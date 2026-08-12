@@ -2,6 +2,6 @@
 
 ## 次のセッションへの申し送り
 
-- pi-agent-core/pi-aiのBun互換gateは完了した。v1は`@earendil-works/pi-agent-core@0.84.1`と`@earendil-works/pi-ai@0.84.1`を初期採用版として固定済み。証拠と既知の限界は[docs/research/agent-provider-stack.md](./docs/research/agent-provider-stack.md)、採用ルールは[ROADMAP.md](./ROADMAP.md)「Agentとモデル提供元」を参照。
-- 次の実装作業は、ROADMAP.mdの「実装前に決めること」に残る未解決事項を狭めた上で定義する、最小構成のproduction workspaceと最初のtracer bulletである。
-- 設計が固まったらGitHub IssueとLinearへ作業を分解し、最初のtracer bulletを人間が承認してから実装する。
+- [ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)を正本として、GitHub Issueで識別する長期のWorkflow、Workflow内の一回の実行であるJob、Jobを実行する一回のharness process attemptであるworkerを使う。
+- 次は[ROADMAP.md](./ROADMAP.md)の設計順序3に従い、GitHub、Linear、relay、`serve`間のeventとreconciliationを時系列で定義する。
+- exactなJob identity encoding、providerごとのtrigger/input key対応、WHAT/HOW revision表現、remote lease ref、外部操作ごとのreconciliationは未解決である。

@@ -8,13 +8,13 @@
 
 ## 仕事の正本
 
-一つのJobは次の三つを横断して進む。
+一つのWorkflowは次の三つを横断して進む。
 
-- **GitHub Issue — WHAT**: 何を解決するか。Jobの恒久的な識別子。
+- **GitHub Issue — WHAT**: 何を解決するか。Workflowの恒久的な識別子。
 - **Linear issue — HOW＋実行承認**: どう解決するか。人間がTriageからTodoへ移すことで実行を承認する。
 - **GitHub Pull Request — DO＋最終承認**: 実際に何を変更したか。人間がmergeすることで採用を承認する。
 
-Web UIの会話やローカルtranscriptはJobの正本ではない。別のローカル実行環境が会話履歴なしでも実行できる内容まで、WHATとHOWへ確定してからJobにする。
+Web UIの会話やローカルtranscriptはWorkflowの正本ではない。別のローカル実行環境が会話履歴なしでも実行できる内容まで、WHATとHOWへ確定してから実行する。
 
 ## 目標
 
@@ -29,9 +29,9 @@ Web UIの会話やローカルtranscriptはJobの正本ではない。別のロ�
 
 ### 1. チームが判断する状態をローカルだけに閉じない
 
-WHAT、HOW、承認状態、実行状態、成果、レビュー結果はGitHubまたはLinearから確認できなければならない。sandbox、process、cache、transcriptなどのローカル運転状態はローカルに置いてよいが、それらを失っただけでJobそのものが行方不明になってはならない。
+WHAT、HOW、承認状態、Workflowレベルでチームに見える実行状態、成果、レビュー結果はGitHubまたはLinearから確認できなければならない。sandbox、process、cache、transcriptなどのローカル運転状態はローカルに置いてよいが、それらを失っただけでWorkflowそのものが行方不明になってはならない。
 
-一つのローカル実行環境が失われても、GitHub、Linear、Git上のcheckpointから別の実行環境が仕事を再開できることを設計条件とする。
+一つのローカル実行環境が失われても、GitHub、Linear、Git上のcheckpointから別の実行環境がWorkflowを再構成し、Jobを再開できることを設計条件とする。
 
 ### 2. 承認ゲートはcredentialの非委譲と制限された外部操作で守る
 
@@ -55,7 +55,7 @@ GitHub・Linear webhookはローカル`serve`を早く起こすための通知�
 
 ### 5. 分散実行では所有権を外部操作の直前に確認する
 
-JobはGitHub Issue単位の期限付きleaseとbranch単位のlockを取得した一つの`serve`だけが実行する。push、PR操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は有効なleaseをまだ所有していることを確認する。leaseを失った古い実行は外部状態を書き換えられない。
+JobはJob単位の期限付きleaseを取得した一つの`serve`だけが実行する。コードを変更するJobは、さらにcanonical branch単位のlockを取得する。push、PR操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は有効なleaseをまだ所有していることを確認し、branchまたはPRを変更する場合はlockも確認する。外部APIに対する操作はこの確認と原子的にはできないため、所有権を失った古い実行は停止し、結果不明の操作を自動再実行しない。
 
 ## プロジェクト文脈
 
