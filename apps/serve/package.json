@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@mikan-919/oriel-identity": "workspace:*"
+    "@mikan-919/oriel-identity": "workspace:*",
+    "hono": "4.13.1"
   }
 }
