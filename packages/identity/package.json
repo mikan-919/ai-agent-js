@@ -1,0 +1,6 @@
+{
+  "name": "@mikan-919/oriel-identity",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts"
+}

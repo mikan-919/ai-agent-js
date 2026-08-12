@@ -1,0 +1,8 @@
+{
+  "name": "@mikan-919/oriel-serve",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mikan-919/oriel-identity": "workspace:*"
+  }
+}
