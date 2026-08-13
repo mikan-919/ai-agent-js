@@ -96,7 +96,7 @@ branch lockのtakeoverまたはreplacementは、current Job lease ownerだけが
 
 lease generationとbranch-lock generationは、より新しいownerを観測した`serve`が古いworkerの新規requestを拒否するためのfencing tokenである。しかしGitHub、Linear、remote Gitの外部APIは、このハーネスのlease fencingをatomicな書込み前提条件として強制しない。preflight後にleaseを失う、または既に送信したwriteがtakeover後に成功するraceを、generationだけで防ぐことはできない。
 
-そのため、`serve`はpreflight直後に操作を送信し、operationごとに条件付き更新、providerが受け取るidempotency key、または観測可能な結果によるreconciliationを用いる。timeout、crash、所有権喪失により結果が不明なwriteは`interrupted`としてfail closedにし、盲目的に再試行しない。次のworkerはGitHub、Linear、Gitの現在状態を読んで既に反映済みかを判定し、操作固有の安全な続行方法が定義されるまで停止する。各external operationのconditional/idempotent protocolとreconciliationは別のADRで定める。
+そのため、`serve`はpreflight直後に操作を送信し、operationごとに条件付き更新、providerが受け取るidempotency key、または観測可能な結果によるreconciliationを用いる。timeout、crash、所有権喪失により結果が不明なwriteは`interrupted`としてfail closedにし、盲目的に再試行しない。次のworkerはGitHub、Linear、Gitの現在状態を読んで既に反映済みかを判定し、操作固有の安全な続行方法が定義されるまで停止する。Todo→Triage差し戻しはADR 0003、その他のexternal operationは今後の個別protocolを正本とする。
 
 ## crashと重複通知の不変条件
 
@@ -108,5 +108,5 @@ lease generationとbranch-lock generationは、より新しいownerを観測し�
 ## 保留事項
 
 - remote lease refの形式、Job identityのうちapproval fingerprint以外の構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、lease TTL、heartbeat間隔、takeover猶予
-- GitHub、Linear、Gitの各操作に対するconditional update、idempotency key、結果不明時のreconciliation手順
+- Todo→Triage差し戻し以外のGitHub、Linear、Git操作に対するconditional update、idempotency key、結果不明時のreconciliation手順
 - concurrency、retry、checkpoint、timeout、resource limitの運用値

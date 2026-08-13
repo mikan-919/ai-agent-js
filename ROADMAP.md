@@ -161,7 +161,6 @@ packages/identity
 ## 実装前に決めること
 
 - Job lease refの形式、期限、heartbeat、引き継ぎ手順
-- Todo→Triage差し戻しwriteのidempotency、条件付き更新、結果不明時のreconciliation手順。
 - 同fingerprintのfresh approvalが既存canonical branchをadoptできる安全なcheckpoint/known-write証明と、operation-specific branch takeover/reconciliation protocol。
 - draft PRを作る時点とcheckpoint頻度を調整するAgent prompt
 - relay、serve、harness、worktree間のtool APIの詳細
@@ -172,7 +171,7 @@ packages/identity
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
 2. Jobの状態遷移、lease、branch lockの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)）。
-3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。現在値の二重確認、承認指紋、branch seal、観測した不一致でTriageへ戻す方針はAccepted（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)）だが、差し戻し、対話、PR、その他の外部writeの個別protocolは未解決。
+3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。現在値の二重確認、承認指紋、branch seal、観測した不一致でTriageへ戻す手順はAccepted（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)）だが、対話、PR、その他の外部writeの個別protocolは未解決。
 4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。
 5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。
 6. capability schemaと実行環境選択を定義する。

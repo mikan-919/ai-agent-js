@@ -97,7 +97,18 @@ admissionと外部操作前の確認は、provider-native historyではなく現
 
 一致しなければ`serve`はworkerを開始せず、running中なら新しい外部操作を拒否してworkerを停止する。`serve`はcurrent Job leaseと対象Workflowを再確認してからLinear IssueをTodoからTriageへ戻し、人間のfresh Triage→Todoを待つ。この差し戻しは承認ではなく、無効になった承認状態の機械的な反映である。relay、Agent、harnessは差し戻しを実行しない。
 
-差し戻しの送信結果が不明なら盲目的に再送せず、Jobを`interrupted`として現在のLinear stateとoperation recordを再調停する。差し戻しwriteのidempotencyと結果判定の詳細は別途定義する。
+差し戻しは次の手順だけで行う。
+
+1. current Job leaseを持つ`serve`がworkerを停止し、新しい外部操作を拒否する。コード変更Jobではbranch lockも保持したままにする。他の`serve`、relay、Agent、harnessは差し戻さない。
+2. `serve`はcurrent lease generation、対象Workflow、対象Linear Issue、差し戻し原因になったfingerprint不一致を再確認する。担当権が変わっていたら何も書かない。
+3. Linear Issueの現在stateを読み直す。Todoの場合だけ、Triageへの更新attemptを作る。すでにTriageなら成功として扱い、それ以外のstateなら人間または他処理の変更を上書きせず終了する。
+4. 更新送信前に、Job identity、lease generation、Linear Issue ID、operation kind `return-to-triage`、一意なattempt IDを持つoperation recordを永続化する。このattempt IDを内部のidempotency keyとし、自動処理は同じattemptを二度送信しない。
+5. 更新後にLinear Issueを読み直す。Triageなら成功、Todoのままなら失敗または結果不明、それ以外なら外部変更を優先した終了として記録する。理由commentは投稿しない。
+6. 成功または外部変更による終了では、branch lock、Job leaseの順に解放する。TodoのままならJobを`interrupted`とし、workerを停止したまま、担当権を再試行のためだけに延長せず通常の期限で失効させる。
+
+Todoのままになったattemptを自動再送しない。ローカルWeb UIは差し戻しに失敗したことと手動の「再試行」を表示する。人間が再試行を明示した場合だけ、同じ`serve`がcurrent Job leaseをまだ持つこととLinear IssueがなおTodoであることを再確認し、新しいattempt IDでstep 4以降を実行する。担当権を失っていれば再試行を拒否する。
+
+Linearのstate更新にcurrent stateを原子的な比較条件として渡せない場合、step 3のreadとwriteの間で人間がstateを変えるraceは残る。v1はこのraceを受け入れ、応答後のreadで観測したstateを正本として扱う。
 
 native historyはこの一致判定の入力にしない。履歴の欠落、group化、provider間の順序不明だけを理由にautomatic admissionを無効化しない。履歴が完全でない理由と許容するraceは[approval history capability調査](../research/approval-history-capabilities.md)に記録する。
 
@@ -128,7 +139,6 @@ approval fingerprintを伴う外部operation requestは、[ADR 0002](./0002-job-
 ## 対象外
 
 - Issue/Linear対話、comment、本文更新
-- Triageへの機械的な差し戻しwriteのidempotency key、条件付き更新、結果不明時の個別reconciliation
 - Pull Request、Git push、checkpoint、PR review、required checkの個別reconciliation
 - lease refの保存形式、TTL、heartbeat、takeover猶予
 - device登録、OAuth、webhook署名、relay認可
