@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   GitHubRepository,
@@ -24,6 +24,7 @@ export interface JobOwnershipVerifier {
 export interface GitHubIssueComment {
   id: number;
   body: string;
+  authorLogin: string;
 }
 
 export interface GitHubIssueCommentPublisher {
@@ -32,6 +33,7 @@ export interface GitHubIssueCommentPublisher {
     issueNumber: number;
     body: string;
   }): Promise<{ id: number }>;
+  getActorLogin(): Promise<string>;
   listIssueComments(input: {
     repository: GitHubRepository;
     issueNumber: number;
@@ -87,7 +89,12 @@ export function createOctokitIssueCommentPublisher(
       return comments.map((comment) => ({
         id: comment.id,
         body: comment.body ?? "",
+        authorLogin: comment.user?.login ?? "",
       }));
+    },
+    async getActorLogin() {
+      const response = await octokit.rest.users.getAuthenticated();
+      return response.data.login;
     },
     async deleteIssueComment({ repository, id }) {
       await octokit.rest.issues.deleteComment({
@@ -104,7 +111,8 @@ type IssueCommentOperationStatus =
 
 export interface IssueCommentOutboxOperation extends IssueCommentRequest {
   operationId: string;
-  baselineCommentIds: number[] | null;
+  githubActorLogin: string | null;
+  bodyDigest: string | null;
   status: IssueCommentOperationStatus;
   githubCommentId: number | null;
 }
@@ -118,7 +126,8 @@ interface IssueCommentOutboxRow {
   repositoryName: string;
   issueNumber: number;
   body: string;
-  baselineCommentIdsJson: string | null;
+  githubActorLogin: string | null;
+  bodyDigest: string | null;
   status: IssueCommentOperationStatus;
   githubCommentId: number | null;
 }
@@ -133,7 +142,8 @@ export function createIssueCommentOutbox(database: Database) {
       repository_name AS repositoryName,
       issue_number AS issueNumber,
       body,
-      baseline_comment_ids_json AS baselineCommentIdsJson,
+      github_actor_login AS githubActorLogin,
+      body_digest AS bodyDigest,
       status,
       github_comment_id AS githubCommentId
     FROM issue_comment_outbox`;
@@ -152,10 +162,11 @@ export function createIssueCommentOutbox(database: Database) {
             repository_name,
             issue_number,
             body,
-            baseline_comment_ids_json,
+            github_actor_login,
+            body_digest,
             status,
             github_comment_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           operation.operationId,
@@ -166,17 +177,16 @@ export function createIssueCommentOutbox(database: Database) {
           operation.repository.name,
           operation.issueNumber,
           operation.body,
-          operation.baselineCommentIds === null
-            ? null
-            : JSON.stringify(operation.baselineCommentIds),
+          operation.githubActorLogin,
+          operation.bodyDigest,
           operation.status,
           operation.githubCommentId,
         );
     },
     find(operationId: string): IssueCommentOutboxOperation | null {
-      const row = selectOperation.get(
-        operationId,
-      ) as IssueCommentOutboxRow | null;
+      const row = database
+        .query(`${selectOperationSql} WHERE operation_id = ?`)
+        .get(operationId) as IssueCommentOutboxRow | null;
 
       return row === null ? null : fromRow(row);
     },
@@ -190,14 +200,14 @@ export function createIssueCommentOutbox(database: Database) {
 
       return row === null ? null : fromRow(row);
     },
-    setBaseline(operationId: string, commentIds: number[]) {
+    setActorLogin(operationId: string, actorLogin: string) {
       database
         .query(
           `UPDATE issue_comment_outbox
-          SET baseline_comment_ids_json = ?
+          SET github_actor_login = ?
           WHERE operation_id = ?`,
         )
-        .run(JSON.stringify(commentIds), operationId);
+        .run(actorLogin, operationId);
     },
     complete(operationId: string, githubCommentId: number) {
       database
@@ -251,10 +261,8 @@ function fromRow(row: IssueCommentOutboxRow): IssueCommentOutboxOperation {
     },
     issueNumber: row.issueNumber,
     body: row.body,
-    baselineCommentIds:
-      row.baselineCommentIdsJson === null
-        ? null
-        : (JSON.parse(row.baselineCommentIdsJson) as number[]),
+    githubActorLogin: row.githubActorLogin,
+    bodyDigest: row.bodyDigest,
     status: row.status,
     githubCommentId: row.githubCommentId,
   };
@@ -303,10 +311,12 @@ export function createIssueCommentService({
     const operation: IssueCommentOutboxOperation = {
       ...request,
       operationId,
-      baselineCommentIds: null,
+      githubActorLogin: null,
+      bodyDigest: null,
       status: "pending",
       githubCommentId: null,
     };
+    operation.bodyDigest = digest(commentBody(operation));
 
     try {
       outbox.enqueue(operation);
@@ -364,33 +374,30 @@ export function createIssueCommentService({
       return;
     }
 
-    let baselineOperation = operation;
+    let deliverableOperation = operation;
 
-    if (baselineOperation.baselineCommentIds === null) {
-      const comments = await publisher.listIssueComments(baselineOperation);
-      outbox.setBaseline(
-        baselineOperation.operationId,
-        comments.map((comment) => comment.id),
-      );
-      baselineOperation = outbox.find(operationId) ?? baselineOperation;
+    if (deliverableOperation.githubActorLogin === null) {
+      const actorLogin = await publisher.getActorLogin();
+      outbox.setActorLogin(deliverableOperation.operationId, actorLogin);
+      deliverableOperation = outbox.find(operationId) ?? deliverableOperation;
     }
 
-    if (!(await hasCurrentOwnership(baselineOperation))) {
-      finishRejected(baselineOperation, "ownership_not_current");
+    if (!(await hasCurrentOwnership(deliverableOperation))) {
+      finishRejected(deliverableOperation, "ownership_not_current");
       return;
     }
 
     try {
       const comment = await publisher.createIssueComment({
-        repository: baselineOperation.repository,
-        issueNumber: baselineOperation.issueNumber,
-        body: commentBody(baselineOperation),
+        repository: deliverableOperation.repository,
+        issueNumber: deliverableOperation.issueNumber,
+        body: commentBody(deliverableOperation),
       });
-      outbox.complete(baselineOperation.operationId, comment.id);
-      notify(completed(outbox.find(baselineOperation.operationId)!));
+      outbox.complete(deliverableOperation.operationId, comment.id);
+      notify(completed(outbox.find(deliverableOperation.operationId)!));
     } catch (error) {
       await reconcile(
-        baselineOperation,
+        deliverableOperation,
         error instanceof GitHubIssueCommentRejectedError,
       );
     }
@@ -410,7 +417,11 @@ export function createIssueCommentService({
     definitelyRejected: boolean,
   ): Promise<void> {
     const matches = comments
-      .filter((comment) => comment.body.includes(operationMarker(operation)))
+      .filter(
+        (comment) =>
+          comment.authorLogin === operation.githubActorLogin &&
+          digest(comment.body) === expectedBodyDigest(operation),
+      )
       .sort((left, right) => left.id - right.id);
 
     if (matches.length === 0) {
@@ -478,8 +489,17 @@ export function createIssueCommentService({
     }
   }
 
-  function resumePending() {
+  function resumePending(
+    binding?: Pick<
+      IssueCommentRequest,
+      "jobId" | "jobLeaseId" | "repository" | "issueNumber"
+    >,
+  ) {
     for (const operation of outbox.pending()) {
+      if (binding !== undefined && !sameBinding(operation, binding)) {
+        continue;
+      }
+
       void resume(operation).catch(() => {
         requireReconciliation(operation);
       });
@@ -487,22 +507,37 @@ export function createIssueCommentService({
   }
 
   async function resume(operation: IssueCommentOutboxOperation): Promise<void> {
+    if (!(await hasCurrentOwnership(operation))) {
+      return;
+    }
+
     if (operation.status === "reconciliation_required") {
       await reconcile(operation, false);
       return;
     }
 
-    const comments = await publisher.listIssueComments(operation);
-    const markerExists = comments.some((comment) =>
-      comment.body.includes(operationMarker(operation)),
+    let resumableOperation = operation;
+
+    if (resumableOperation.githubActorLogin === null) {
+      const actorLogin = await publisher.getActorLogin();
+      outbox.setActorLogin(resumableOperation.operationId, actorLogin);
+      resumableOperation =
+        outbox.find(resumableOperation.operationId) ?? resumableOperation;
+    }
+
+    const comments = await publisher.listIssueComments(resumableOperation);
+    const markerExists = comments.some(
+      (comment) =>
+        comment.authorLogin === resumableOperation.githubActorLogin &&
+        digest(comment.body) === expectedBodyDigest(resumableOperation),
     );
 
     if (markerExists) {
-      await reconcileComments(operation, comments, false);
+      await reconcileComments(resumableOperation, comments, false);
       return;
     }
 
-    await dispatch(operation.operationId);
+    await dispatch(resumableOperation.operationId);
   }
 
   return { accept, dispatch, resumePending, waitForOutcome };
@@ -540,6 +575,22 @@ function sameRequest(
     operation.repository.name === request.repository.name &&
     operation.issueNumber === request.issueNumber &&
     operation.body === request.body
+  );
+}
+
+function sameBinding(
+  operation: IssueCommentOutboxOperation,
+  binding: Pick<
+    IssueCommentRequest,
+    "jobId" | "jobLeaseId" | "repository" | "issueNumber"
+  >,
+) {
+  return (
+    operation.jobId === binding.jobId &&
+    operation.jobLeaseId === binding.jobLeaseId &&
+    operation.repository.owner === binding.repository.owner &&
+    operation.repository.name === binding.repository.name &&
+    operation.issueNumber === binding.issueNumber
   );
 }
 
@@ -620,4 +671,12 @@ function operationMarker(operation: IssueCommentOutboxOperation) {
 
 function commentBody(operation: IssueCommentOutboxOperation) {
   return `${operation.body}\n\n${operationMarker(operation)}`;
+}
+
+function expectedBodyDigest(operation: IssueCommentOutboxOperation) {
+  return operation.bodyDigest ?? digest(commentBody(operation));
+}
+
+function digest(value: string) {
+  return createHash("sha256").update(value).digest("hex");
 }

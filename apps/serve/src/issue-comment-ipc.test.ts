@@ -16,6 +16,7 @@ test("serves only the bound harness Job through its stdio NDJSON channel", async
     ownershipVerifier: { hasCurrentJobOwnership: () => true },
     publisher: {
       createIssueComment: async () => ({ id: 1234 }),
+      getActorLogin: async () => "oriel-bot",
       listIssueComments: async () => [],
       deleteIssueComment: async () => {},
     },
@@ -95,6 +96,7 @@ test("rejects a harness request that does not match its serve-owned Job binding"
       },
       publisher: {
         createIssueComment: async () => ({ id: 1234 }),
+        getActorLogin: async () => "oriel-bot",
         listIssueComments: async () => [],
         deleteIssueComment: async () => {},
       },

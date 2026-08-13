@@ -30,7 +30,6 @@ export function startIssueCommentRuntime({
     ownershipVerifier,
     publisher: createOctokitIssueCommentPublisher(octokit),
   });
-  service.resumePending();
 
   return {
     serveHarnessIssueConversation(
@@ -38,6 +37,7 @@ export function startIssueCommentRuntime({
       output: WritableStream<Uint8Array>,
       binding: IssueConversationBinding,
     ) {
+      service.resumePending(binding);
       return serveOwnedHarnessIssueCommentIpc(input, output, binding, service);
     },
     close() {

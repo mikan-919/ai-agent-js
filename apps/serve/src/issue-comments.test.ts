@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
@@ -45,7 +45,7 @@ test("accepts an owned Issue-comment request and persists the outbox operation b
     operationId: "operation-1",
     requestId: "request-1",
     status: "pending",
-    baselineCommentIds: [],
+    githubActorLogin: "oriel-bot",
   });
 
   result.resolve({ id: 1234 });
@@ -63,7 +63,8 @@ test("uses WAL and applies the SQL migration before persisting the outbox", asyn
     firstOutbox.enqueue({
       ...request,
       operationId: "operation-1",
-      baselineCommentIds: [],
+      githubActorLogin: "oriel-bot",
+      bodyDigest: null,
       status: "pending",
       githubCommentId: null,
     });
@@ -86,6 +87,94 @@ test("uses WAL and applies the SQL migration before persisting the outbox", asyn
   }
 });
 
+test("upgrades an existing outbox database to actor and body-digest reconciliation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "oriel-issue-comment-"));
+  const databasePath = join(directory, "serve.sqlite");
+  const oldMigrationsFolder = join(directory, "old-migrations");
+
+  try {
+    await mkdir(join(oldMigrationsFolder, "meta"), { recursive: true });
+    await writeFile(
+      join(oldMigrationsFolder, "0000_issue_comment_outbox.sql"),
+      `CREATE TABLE issue_comment_outbox (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        request_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        job_lease_id TEXT NOT NULL,
+        repository_owner TEXT NOT NULL,
+        repository_name TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        baseline_comment_ids_json TEXT,
+        status TEXT NOT NULL,
+        github_comment_id INTEGER,
+        UNIQUE(job_id, request_id)
+      );\n`,
+    );
+    await writeFile(
+      join(oldMigrationsFolder, "meta", "_journal.json"),
+      JSON.stringify({
+        version: "7",
+        dialect: "sqlite",
+        entries: [
+          {
+            idx: 0,
+            version: "7",
+            when: 1786618800000,
+            tag: "0000_issue_comment_outbox",
+            breakpoints: true,
+          },
+        ],
+      }),
+    );
+    const oldDatabase = openServeLocalState(databasePath, oldMigrationsFolder);
+    oldDatabase.close();
+
+    const database = openServeLocalState(databasePath);
+    const columns = database
+      .query("PRAGMA table_info(issue_comment_outbox)")
+      .all() as Array<{ name: string }>;
+
+    expect(columns.map((column) => column.name)).toContain(
+      "github_actor_login",
+    );
+    expect(columns.map((column) => column.name)).toContain("body_digest");
+    expect(columns.map((column) => column.name)).not.toContain(
+      "baseline_comment_ids_json",
+    );
+    database.close();
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("finds each outbox operation by its own operation ID", () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+
+  outbox.enqueue({
+    ...request,
+    operationId: "operation-1",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: "digest-1",
+    status: "pending",
+    githubCommentId: null,
+  });
+  outbox.enqueue({
+    ...request,
+    requestId: "request-2",
+    operationId: "operation-2",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: "digest-2",
+    status: "pending",
+    githubCommentId: null,
+  });
+
+  expect(outbox.find("operation-1")?.requestId).toBe("request-1");
+  expect(outbox.find("operation-2")?.requestId).toBe("request-2");
+  database.close();
+});
+
 test("refuses an Issue-comment request when current Job ownership is absent", async () => {
   const database = openServeLocalState(":memory:");
   const outbox = createIssueCommentOutbox(database);
@@ -102,6 +191,85 @@ test("refuses an Issue-comment request when current Job ownership is absent", as
     reason: "ownership_not_current",
   });
   expect(outbox.find("operation-1")).toBeNull();
+  database.close();
+});
+
+test("does not resume a persisted operation when it no longer owns that Job", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  outbox.enqueue({
+    ...request,
+    operationId: "operation-1",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: "digest-1",
+    status: "pending",
+    githubCommentId: null,
+  });
+  let GitHubReadAttempted = false;
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: { hasCurrentJobOwnership: () => false },
+    publisher: publisher({
+      listIssueComments: async () => {
+        GitHubReadAttempted = true;
+        return [];
+      },
+    }),
+  });
+
+  await service.resumePending();
+
+  expect(GitHubReadAttempted).toBe(false);
+  expect(outbox.find("operation-1")?.status).toBe("pending");
+  database.close();
+});
+
+test("resumes only the pending operation bound to this explicit Issue conversation", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  outbox.enqueue({
+    ...request,
+    operationId: "operation-a",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: null,
+    status: "pending",
+    githubCommentId: null,
+  });
+  outbox.enqueue({
+    ...request,
+    requestId: "request-b",
+    jobId: "issue-conversation-2",
+    jobLeaseId: "lease-2",
+    operationId: "operation-b",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: null,
+    status: "pending",
+    githubCommentId: null,
+  });
+  const resumedOperationIds: string[] = [];
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: { hasCurrentJobOwnership: () => true },
+    publisher: publisher({
+      createIssueComment: async ({ body }) => {
+        resumedOperationIds.push(
+          body.includes("operation-b") ? "operation-b" : "operation-a",
+        );
+        return { id: 1234 };
+      },
+    }),
+  });
+
+  service.resumePending({
+    jobId: "issue-conversation-2",
+    jobLeaseId: "lease-2",
+    repository: request.repository,
+    issueNumber: 28,
+  });
+
+  await service.waitForOutcome("operation-b");
+  expect(resumedOperationIds).toEqual(["operation-b"]);
+  expect(outbox.find("operation-a")?.status).toBe("pending");
   database.close();
 });
 
@@ -255,13 +423,62 @@ test("requires reconciliation instead of blindly retrying an unknown GitHub resu
   database.close();
 });
 
+test("reconciliation only selects this actor's exact expected body digest", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  const deletedCommentIds: number[] = [];
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: { hasCurrentJobOwnership: () => true },
+    publisher: publisher({
+      createIssueComment: async () => {
+        throw new Error("connection lost");
+      },
+      listIssueComments: async () => [
+        {
+          id: 1234,
+          body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+          authorLogin: "oriel-bot",
+        },
+        {
+          id: 1233,
+          body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+          authorLogin: "a-human",
+        },
+        {
+          id: 1235,
+          body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->\n",
+          authorLogin: "oriel-bot",
+        },
+      ],
+      deleteIssueComment: async ({ id }) => {
+        deletedCommentIds.push(id);
+      },
+    }),
+    newOperationId: () => "operation-1",
+  });
+
+  await service.accept(request);
+
+  expect(await service.waitForOutcome("operation-1")).toEqual({
+    type: "issue_comment.completed",
+    requestId: "request-1",
+    operationId: "operation-1",
+    githubCommentId: 1234,
+  });
+  expect(deletedCommentIds).toEqual([]);
+  expect(outbox.find("operation-1")?.bodyDigest).toMatch(/^[0-9a-f]{64}$/);
+  database.close();
+});
+
 test("reconciles a persisted pending operation after restart without creating a second comment", async () => {
   const database = openServeLocalState(":memory:");
   const outbox = createIssueCommentOutbox(database);
   outbox.enqueue({
     ...request,
     operationId: "operation-1",
-    baselineCommentIds: [],
+    githubActorLogin: null,
+    bodyDigest: null,
     status: "pending",
     githubCommentId: null,
   });
@@ -278,6 +495,7 @@ test("reconciles a persisted pending operation after restart without creating a 
         {
           id: 1234,
           body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+          authorLogin: "oriel-bot",
         },
       ],
     }),
@@ -361,6 +579,7 @@ function publisher(
 ): GitHubIssueCommentPublisher {
   return {
     createIssueComment: async () => ({ id: 1234 }),
+    getActorLogin: async () => "oriel-bot",
     listIssueComments: async () => [],
     deleteIssueComment: async () => {},
     ...overrides,

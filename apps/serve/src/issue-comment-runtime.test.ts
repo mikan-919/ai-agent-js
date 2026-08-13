@@ -20,6 +20,9 @@ test("runtime startup resumes persisted Issue-comment work and exposes it only t
           listComments: "list-comments" as never,
           deleteComment: async () => {},
         },
+        users: {
+          getAuthenticated: async () => ({ data: { login: "oriel-bot" } }),
+        },
       },
       paginate: async () => [],
     } as unknown as Octokit,
