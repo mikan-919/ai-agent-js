@@ -13,6 +13,8 @@ import { Database } from "bun:sqlite";
 import type { Octokit } from "@octokit/rest";
 
 export interface JobOwnershipVerifier {
+  /** 所有権を失った時にworkerを止めるための停止合図。 */
+  readonly stopSignal?: AbortSignal;
   hasCurrentJobOwnership(input: {
     jobId: string;
     jobLeaseId: string;
@@ -200,6 +202,15 @@ export function createIssueCommentOutbox(database: Database) {
 
       return row === null ? null : fromRow(row);
     },
+    adopt(operationId: string, jobLeaseId: string) {
+      database
+        .query(
+          `UPDATE issue_comment_outbox
+          SET job_lease_id = ?
+          WHERE operation_id = ?`,
+        )
+        .run(jobLeaseId, operationId);
+    },
     setActorLogin(operationId: string, actorLogin: string) {
       database
         .query(
@@ -370,7 +381,7 @@ export function createIssueCommentService({
     }
 
     if (operation.status === "reconciliation_required") {
-      await reconcile(operation, false);
+      await reconcile(operation, false, true);
       return;
     }
 
@@ -399,23 +410,21 @@ export function createIssueCommentService({
       await reconcile(
         deliverableOperation,
         error instanceof GitHubIssueCommentRejectedError,
+        true,
       );
     }
   }
 
+  /**
+   * 結果不明の操作は盲目的に再送しない。外部状態を読み直し、同じ論理返信があれば
+   * 一件へ圧縮して完了とし、無ければ一度だけ再送してからもう一度読み直す。
+   */
   async function reconcile(
     operation: IssueCommentOutboxOperation,
     definitelyRejected: boolean,
+    allowResend: boolean,
   ): Promise<void> {
     const comments = await publisher.listIssueComments(operation);
-    await reconcileComments(operation, comments, definitelyRejected);
-  }
-
-  async function reconcileComments(
-    operation: IssueCommentOutboxOperation,
-    comments: GitHubIssueComment[],
-    definitelyRejected: boolean,
-  ): Promise<void> {
     const matches = comments
       .filter(
         (comment) =>
@@ -427,9 +436,15 @@ export function createIssueCommentService({
     if (matches.length === 0) {
       if (definitelyRejected) {
         finishRejected(operation, "github_rejected");
-      } else {
-        requireReconciliation(operation);
+        return;
       }
+
+      if (allowResend) {
+        await resend(operation);
+        return;
+      }
+
+      requireReconciliation(operation);
       return;
     }
 
@@ -454,6 +469,31 @@ export function createIssueCommentService({
 
     outbox.complete(operation.operationId, canonical.id);
     notify(completed(outbox.find(operation.operationId)!));
+  }
+
+  async function resend(operation: IssueCommentOutboxOperation): Promise<void> {
+    if (!(await hasCurrentOwnership(operation))) {
+      finishRejected(operation, "ownership_not_current");
+      return;
+    }
+
+    try {
+      await publisher.createIssueComment({
+        repository: operation.repository,
+        issueNumber: operation.issueNumber,
+        body: commentBody(operation),
+      });
+    } catch (error) {
+      await reconcile(
+        operation,
+        error instanceof GitHubIssueCommentRejectedError,
+        false,
+      );
+      return;
+    }
+
+    // 遅れて反映された最初の送信と重複しうるため、再送後も読み直して圧縮する。
+    await reconcile(operation, false, false);
   }
 
   function waitForOutcome(operationId: string): Promise<IssueCommentEvent> {
@@ -495,24 +535,33 @@ export function createIssueCommentService({
       "jobId" | "jobLeaseId" | "repository" | "issueNumber"
     >,
   ) {
+    const resumptions: Array<Promise<void>> = [];
+
     for (const operation of outbox.pending()) {
       if (binding !== undefined && !sameBinding(operation, binding)) {
         continue;
       }
 
-      void resume(operation).catch(() => {
-        requireReconciliation(operation);
-      });
+      // 再接続では新しい取得IDで同じ論理操作を引き継ぎ、現在状態を確認し直す。
+      if (binding !== undefined) {
+        outbox.adopt(operation.operationId, binding.jobLeaseId);
+      }
+
+      const resumableOperation =
+        outbox.find(operation.operationId) ?? operation;
+
+      resumptions.push(
+        resume(resumableOperation).catch(() => {
+          requireReconciliation(resumableOperation);
+        }),
+      );
     }
+
+    return Promise.all(resumptions).then(() => undefined);
   }
 
   async function resume(operation: IssueCommentOutboxOperation): Promise<void> {
     if (!(await hasCurrentOwnership(operation))) {
-      return;
-    }
-
-    if (operation.status === "reconciliation_required") {
-      await reconcile(operation, false);
       return;
     }
 
@@ -525,19 +574,7 @@ export function createIssueCommentService({
         outbox.find(resumableOperation.operationId) ?? resumableOperation;
     }
 
-    const comments = await publisher.listIssueComments(resumableOperation);
-    const markerExists = comments.some(
-      (comment) =>
-        comment.authorLogin === resumableOperation.githubActorLogin &&
-        digest(comment.body) === expectedBodyDigest(resumableOperation),
-    );
-
-    if (markerExists) {
-      await reconcileComments(resumableOperation, comments, false);
-      return;
-    }
-
-    await dispatch(resumableOperation.operationId);
+    await reconcile(resumableOperation, false, true);
   }
 
   return { accept, dispatch, resumePending, waitForOutcome };
@@ -570,7 +607,6 @@ function sameRequest(
   request: IssueCommentRequest,
 ) {
   return (
-    operation.jobLeaseId === request.jobLeaseId &&
     operation.repository.owner === request.repository.owner &&
     operation.repository.name === request.repository.name &&
     operation.issueNumber === request.issueNumber &&
@@ -587,7 +623,6 @@ function sameBinding(
 ) {
   return (
     operation.jobId === binding.jobId &&
-    operation.jobLeaseId === binding.jobLeaseId &&
     operation.repository.owner === binding.repository.owner &&
     operation.repository.name === binding.repository.name &&
     operation.issueNumber === binding.issueNumber

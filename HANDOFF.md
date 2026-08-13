@@ -2,5 +2,6 @@
 
 ## 次のセッションへの申し送り
 
-- [#28](https://github.com/mikan-919/oriel/issues/28)の自動試験のvertical sliceは、contract、現在のJob所有権、SQLite outbox、GitHubコメント、完了eventを通す。実投稿には、既存credentialで書き込める検証専用repositoryとIssueを指定して確認する。
-- 実投稿を確認した後は、依存先の[#29](https://github.com/mikan-919/oriel/issues/29)で所有権喪失と結果不明の投稿を再調停する。
+- [#29](https://github.com/mikan-919/oriel/issues/29)のJob所有権接続は`apps/serve/src/job-ownership.ts`にin-processの調停として置いてある。リレーのDurable Objectを作る時に調停側だけをそのまま移し、`serve`側は`ConnectionOwnershipRelay`をWebSocket実装へ差し替える。
+- heartbeatのclient側停止期限とserver側失効期限は引数のままにしてある。固定版runtimeでの測定と検証専用環境の実動作から決めるまで既定値を入れない。
+- 結果不明の投稿は「読み直し→無ければ一度だけ再送→再度読み直して重複圧縮」で収束する。Issue本文、Linear状態、Git送信、Pull Request作成の収束規則はADR 0005にあるが未実装。
