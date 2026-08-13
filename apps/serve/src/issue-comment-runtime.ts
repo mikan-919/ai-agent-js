@@ -37,8 +37,14 @@ export function startIssueCommentRuntime({
       output: WritableStream<Uint8Array>,
       binding: IssueConversationBinding,
     ) {
-      service.resumePending(binding);
-      return serveOwnedHarnessIssueCommentIpc(input, output, binding, service);
+      void service.resumePending(binding);
+      return serveOwnedHarnessIssueCommentIpc(
+        input,
+        output,
+        binding,
+        service,
+        ownershipVerifier.stopSignal,
+      );
     },
     close() {
       database.close();

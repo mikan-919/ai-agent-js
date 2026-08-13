@@ -21,11 +21,12 @@ export async function serveOwnedHarnessIssueCommentIpc(
   output: WritableStream<Uint8Array>,
   binding: IssueConversationBinding,
   service: IssueCommentService,
+  stopSignal?: AbortSignal,
 ) {
   const writer = output.getWriter();
 
   try {
-    for await (const message of readNdjson(input)) {
+    for await (const message of readNdjson(input, stopSignal)) {
       const request = parseRequest(message);
 
       if (request === null) {
@@ -58,17 +59,32 @@ export async function serveOwnedHarnessIssueCommentIpc(
   }
 }
 
-async function* readNdjson(input: ReadableStream<Uint8Array>) {
+async function* readNdjson(
+  input: ReadableStream<Uint8Array>,
+  stopSignal?: AbortSignal,
+) {
   const reader = input.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // 所有権を失ったら、harnessからの新しい要求を受け取る経路自体を閉じる。
+  const stop = () => void reader.cancel().catch(() => {});
+  const stopped = () => stopSignal?.aborted ?? false;
+  stopSignal?.addEventListener("abort", stop, { once: true });
 
   try {
+    if (stopped()) {
+      return;
+    }
+
     while (true) {
       const { done, value } = await reader.read();
 
       if (done) {
         break;
+      }
+
+      if (stopped()) {
+        return;
       }
 
       buffer += decoder.decode(value, { stream: true });
@@ -88,6 +104,7 @@ async function* readNdjson(input: ReadableStream<Uint8Array>) {
       yield parseLine(finalLine);
     }
   } finally {
+    stopSignal?.removeEventListener("abort", stop);
     reader.releaseLock();
   }
 }

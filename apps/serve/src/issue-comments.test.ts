@@ -574,6 +574,147 @@ test("uses the trusted serve GitHub client for the selected Issue", async () => 
   });
 });
 
+test("resends after re-reading external state that shows no comment for an unknown result", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  const publishedBodies: string[] = [];
+  let listCalls = 0;
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: { hasCurrentJobOwnership: () => true },
+    publisher: publisher({
+      createIssueComment: async ({ body }) => {
+        publishedBodies.push(body);
+
+        if (publishedBodies.length === 1) {
+          throw new Error("connection lost");
+        }
+
+        return { id: 1234 };
+      },
+      listIssueComments: async () => {
+        listCalls += 1;
+
+        return listCalls === 1
+          ? []
+          : [
+              {
+                id: 1234,
+                body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+                authorLogin: "oriel-bot",
+              },
+            ];
+      },
+    }),
+    newOperationId: () => "operation-1",
+  });
+
+  await service.accept(request);
+
+  expect(await service.waitForOutcome("operation-1")).toEqual({
+    type: "issue_comment.completed",
+    requestId: "request-1",
+    operationId: "operation-1",
+    githubCommentId: 1234,
+  });
+  expect(publishedBodies).toHaveLength(2);
+  database.close();
+});
+
+test("keeps a single logical reply when the same comment was posted twice", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  const deletedCommentIds: number[] = [];
+  const duplicated = {
+    body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+    authorLogin: "oriel-bot",
+  };
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: { hasCurrentJobOwnership: () => true },
+    publisher: publisher({
+      createIssueComment: async () => {
+        throw new Error("connection lost");
+      },
+      listIssueComments: async () => [
+        { id: 1235, ...duplicated },
+        { id: 1234, ...duplicated },
+        { id: 1236, ...duplicated },
+      ],
+      deleteIssueComment: async ({ id }) => {
+        deletedCommentIds.push(id);
+      },
+    }),
+    newOperationId: () => "operation-1",
+  });
+
+  await service.accept(request);
+
+  expect(await service.waitForOutcome("operation-1")).toEqual({
+    type: "issue_comment.completed",
+    requestId: "request-1",
+    operationId: "operation-1",
+    githubCommentId: 1234,
+  });
+  expect(deletedCommentIds).toEqual([1235, 1236]);
+  database.close();
+});
+
+test("re-checks external state under the new acquisition ID after reconnecting", async () => {
+  const database = openServeLocalState(":memory:");
+  const outbox = createIssueCommentOutbox(database);
+  outbox.enqueue({
+    ...request,
+    operationId: "operation-1",
+    githubActorLogin: "oriel-bot",
+    bodyDigest: null,
+    status: "reconciliation_required",
+    githubCommentId: null,
+  });
+  const confirmedJobLeaseIds: string[] = [];
+  let createCalls = 0;
+  const service = createIssueCommentService({
+    outbox,
+    ownershipVerifier: {
+      hasCurrentJobOwnership: ({ jobLeaseId }) => {
+        confirmedJobLeaseIds.push(jobLeaseId);
+        return jobLeaseId === "lease-2";
+      },
+    },
+    publisher: publisher({
+      createIssueComment: async () => {
+        createCalls += 1;
+        return { id: 1234 };
+      },
+      listIssueComments: async () => [
+        {
+          id: 1234,
+          body: "Agent reply\n\n<!-- oriel-operation:operation-1 -->",
+          authorLogin: "oriel-bot",
+        },
+      ],
+    }),
+  });
+
+  await service.resumePending({
+    jobId: "issue-conversation-1",
+    jobLeaseId: "lease-2",
+    repository: request.repository,
+    issueNumber: 28,
+  });
+
+  expect(await service.waitForOutcome("operation-1")).toEqual({
+    type: "issue_comment.completed",
+    requestId: "request-1",
+    operationId: "operation-1",
+    githubCommentId: 1234,
+  });
+  expect(confirmedJobLeaseIds).toEqual(["lease-2"]);
+  expect(createCalls).toBe(0);
+  expect(outbox.find("operation-1")?.jobLeaseId).toBe("lease-2");
+  database.close();
+});
+
 function publisher(
   overrides: Partial<GitHubIssueCommentPublisher> = {},
 ): GitHubIssueCommentPublisher {
