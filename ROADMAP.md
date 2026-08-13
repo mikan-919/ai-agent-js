@@ -95,7 +95,7 @@ packages/identity
 ### Workflowの発見とJobの取得
 
 - GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。
-- 対応するLinear issueが一つだけでTodoの場合に、WorkflowからJobの実行候補を導出する。
+- 対応するLinear issueが一つだけでTodoの場合に、[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)のhistory gateを通ったWorkflowだけからJobの実行候補を導出する。
 - すべてのJobはJob leaseを取得し、コードを変更するJobだけがcanonical branch lockも取得する。必要な所有権を取得できなければ実行しない。
 - activeなcanonical branchとPull RequestはWorkflowごとに一つだけとする。
 
@@ -103,7 +103,8 @@ packages/identity
 
 - GitHub、Linear、Pull Requestのcurrent stateからWorkflow phaseを導出し、local Job stateをその複製にしない。
 - Job execution state、Job lease、canonical branch lock、外部操作前のownership checkは[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)を正本とする。
-- WHATまたはHOWが承認後に変わったら実行を止め、leaseを解放し、LinearをTriageへ戻す。PRが未mergeでcloseされた場合は自動再試行せず、Linearの再承認を待つ。PR merge後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
+- LinearのTriageからTodoへの承認を実装Job候補へ導き、approval fingerprintをversion binding、current Todo episodeの`IssueHistory.id`をJob/leaseのapproval episode key、canonical branchをfingerprint由来の名前として扱う方針は[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)を正本とする。本文やhistory snapshotを複製しない。
+- state、attachment、WHAT/HOW、approval episode key、fingerprint、またはbranch seal中のbaseが変われば旧Jobを停止する。fresh Triage→Todoはnew approval episode keyでnew Jobを作る。fingerprintが同じなら、先行worker/ownership/active PRを解消し、既存branch tipが安全なcheckpoint/known writeだと証明できる場合だけ同じbranchをadoptする。fingerprintが変わるWHAT/HOW改訂ならnew canonical branchを作る。PRがunmergedでcloseされた後も同じ規則でfresh再承認を扱う。branch takeover/reconciliationの詳細は未解決である。Triageへ戻すwriteのoperation protocolは再承認を代替しない。PR merge後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
 
 ### checkpointと履歴
 
@@ -160,7 +161,8 @@ packages/identity
 ## 実装前に決めること
 
 - Job lease refの形式、期限、heartbeat、引き継ぎ手順
-- WHAT／HOW変更検知に使う版の記録方法
+- GitHub/Linearのnative historyが、Todo承認からbranch sealまでのstate、attachment、WHAT/HOWとcross-provider順序を証明できるかのrepositoryごとのcapability/contract gate。一回のtestを普遍化せず、証明不能ならautomatic admissionを無効にして再承認を要求する（[調査](./docs/research/approval-history-capabilities.md)）。
+- 同fingerprintのfresh approvalが既存canonical branchをadoptできる安全なcheckpoint/known-write証明と、operation-specific branch takeover/reconciliation protocol。
 - draft PRを作る時点とcheckpoint頻度を調整するAgent prompt
 - relay、serve、harness、worktree間のtool APIの詳細
 - 障害、再接続、二重実行、途中再開を含むreconciliation手順
@@ -170,7 +172,7 @@ packages/identity
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
 2. Jobの状態遷移、lease、branch lockの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)）。
-3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。
+3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。承認指紋とbranch sealの方針はAccepted（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)）だが、automatic admissionを可能にするhistory capability/admission gateは未証明である。対話、PR、外部writeの時系列も未解決。
 4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。
 5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。
 6. capability schemaと実行環境選択を定義する。
