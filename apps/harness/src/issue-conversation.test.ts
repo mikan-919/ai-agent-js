@@ -1,38 +1,47 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 
 import {
-  createIssueCommentApp,
-  createIssueCommentOutbox,
-} from "../../serve/src/issue-comments";
-import {
-  createServeIssueCommentOperationClient,
+  createNdjsonIssueCommentOperationClient,
   postIssueConversationReply,
 } from "./issue-conversation";
 
-test("an explicitly launched Issue conversation forwards an Agent reply and receives both events", async () => {
-  const app = createIssueCommentApp({
-    outbox: createIssueCommentOutbox(new Database(":memory:")),
-    ownershipVerifier: {
-      hasCurrentJobOwnership: () => true,
+test("an explicitly launched Issue conversation exchanges request and completion events over NDJSON IPC", async () => {
+  const written: unknown[] = [];
+  const received = [
+    {
+      type: "issue_comment.accepted",
+      requestId: "request-1",
+      operationId: "operation-1",
     },
-    publisher: {
-      createIssueComment: async () => ({ id: 1234 }),
+    {
+      type: "issue_comment.completed",
+      requestId: "request-1",
+      operationId: "operation-1",
+      githubCommentId: 1234,
     },
-    newOperationId: () => "operation-1",
+  ];
+  const operationClient = createNdjsonIssueCommentOperationClient({
+    write: (message) => {
+      written.push(message);
+    },
+    read: async () => {
+      const event = received.shift();
+
+      if (event === undefined) {
+        throw new Error("No event was available from serve");
+      }
+
+      return event;
+    },
   });
   const events: unknown[] = [];
-  const operationClient = createServeIssueCommentOperationClient({
-    fetch: (input, init) => app.request(input, init),
-    origin: "http://127.0.0.1:9999",
-  });
 
   await postIssueConversationReply(
     {
       requestId: "request-1",
       jobId: "issue-conversation-1",
       jobLeaseId: "lease-1",
-      repository: "mikan-919/oriel",
+      repository: { owner: "mikan-919", name: "oriel" },
       issueNumber: 28,
       body: "Agent reply",
     },
@@ -40,6 +49,17 @@ test("an explicitly launched Issue conversation forwards an Agent reply and rece
     (event) => events.push(event),
   );
 
+  expect(written).toEqual([
+    {
+      type: "issue_comment.request",
+      requestId: "request-1",
+      jobId: "issue-conversation-1",
+      jobLeaseId: "lease-1",
+      repository: { owner: "mikan-919", name: "oriel" },
+      issueNumber: 28,
+      body: "Agent reply",
+    },
+  ]);
   expect(events).toEqual([
     {
       type: "issue_comment.accepted",

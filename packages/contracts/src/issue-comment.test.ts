@@ -8,7 +8,7 @@ test("accepts the narrow Issue-comment request from a harness", () => {
     requestId: "request-1",
     jobId: "issue-conversation-1",
     jobLeaseId: "lease-1",
-    repository: "mikan-919/oriel",
+    repository: { owner: "mikan-919", name: "oriel" },
     issueNumber: 28,
     body: "Agent reply",
   } satisfies IssueCommentRequest;
@@ -22,7 +22,7 @@ test("rejects credentials and unknown fields from a harness request", () => {
     requestId: "request-1",
     jobId: "issue-conversation-1",
     jobLeaseId: "lease-1",
-    repository: "mikan-919/oriel",
+    repository: { owner: "mikan-919", name: "oriel" },
     issueNumber: 28,
     body: "Agent reply",
     githubToken: "must-not-cross-the-boundary",

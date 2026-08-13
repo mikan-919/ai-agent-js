@@ -1,71 +1,90 @@
 import {
+  type GitHubRepository,
   type IssueCommentAcceptedEvent,
   type IssueCommentCompletedEvent,
+  type IssueCommentEvent,
   type IssueCommentRequest,
-  parseIssueCommentAcceptedEvent,
-  parseIssueCommentCompletedEvent,
+  parseIssueCommentEvent,
 } from "@mikan-919/oriel-contracts";
+
+export interface NdjsonIssueCommentTransport {
+  write(message: IssueCommentRequest): void | Promise<void>;
+  read(): Promise<unknown>;
+}
 
 export interface IssueCommentOperationClient {
   requestIssueComment(
     request: IssueCommentRequest,
   ): Promise<IssueCommentAcceptedEvent>;
   waitForIssueCommentCompletion(
-    operationId: string,
+    accepted: IssueCommentAcceptedEvent,
   ): Promise<IssueCommentCompletedEvent>;
 }
 
-interface ServeIssueCommentOperationClientDependencies {
-  fetch: (input: string, init?: RequestInit) => Response | Promise<Response>;
-  origin: string;
-}
-
-export function createServeIssueCommentOperationClient({
-  fetch,
-  origin,
-}: ServeIssueCommentOperationClientDependencies): IssueCommentOperationClient {
+export function createNdjsonIssueCommentOperationClient(
+  transport: NdjsonIssueCommentTransport,
+): IssueCommentOperationClient {
   return {
     async requestIssueComment(request) {
-      const response = await fetch(
-        new URL("/v1/harness/issue-comments", origin).toString(),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
+      await transport.write(request);
+      const event = await nextEvent(transport);
 
-      if (response.status !== 202) {
+      if (event.type === "issue_comment.rejected") {
         throw new Error(
-          `Issue-comment operation was rejected: ${response.status}`,
+          `Issue-comment operation was rejected: ${event.reason}`,
         );
       }
 
-      const event: unknown = await response.json();
-      return parseIssueCommentAcceptedEvent(event);
+      if (
+        event.type !== "issue_comment.accepted" ||
+        event.requestId !== request.requestId
+      ) {
+        throw new Error(
+          "Issue-comment operation did not acknowledge its request",
+        );
+      }
+
+      return event;
     },
-    async waitForIssueCommentCompletion(operationId) {
-      const response = await fetch(
-        new URL(`/v1/harness/operations/${operationId}`, origin).toString(),
-      );
+    async waitForIssueCommentCompletion(accepted) {
+      const event = await nextEvent(transport);
 
-      if (response.status !== 200) {
+      if (event.type === "issue_comment.rejected") {
         throw new Error(
-          `Issue-comment operation did not complete: ${response.status}`,
+          `Issue-comment operation was rejected: ${event.reason}`,
         );
       }
 
-      const event: unknown = await response.json();
-      return parseIssueCommentCompletedEvent(event);
+      if (event.type === "issue_comment.reconciliation_required") {
+        throw new Error("Issue-comment operation requires reconciliation");
+      }
+
+      if (
+        event.type !== "issue_comment.completed" ||
+        event.requestId !== accepted.requestId ||
+        event.operationId !== accepted.operationId
+      ) {
+        throw new Error(
+          "Issue-comment completion did not match the accepted operation",
+        );
+      }
+
+      return event;
     },
   };
+}
+
+async function nextEvent(
+  transport: NdjsonIssueCommentTransport,
+): Promise<IssueCommentEvent> {
+  return parseIssueCommentEvent(await transport.read());
 }
 
 export interface IssueConversationReply {
   requestId: string;
   jobId: string;
   jobLeaseId: string;
-  repository: string;
+  repository: GitHubRepository;
   issueNumber: number;
   body: string;
 }
@@ -83,18 +102,7 @@ export async function postIssueConversationReply(
   });
   onEvent(accepted);
 
-  const completed = await operationClient.waitForIssueCommentCompletion(
-    accepted.operationId,
-  );
-
-  if (
-    completed.requestId !== reply.requestId ||
-    completed.operationId !== accepted.operationId
-  ) {
-    throw new Error(
-      "Issue-comment completion did not match the accepted operation",
-    );
-  }
-
+  const completed =
+    await operationClient.waitForIssueCommentCompletion(accepted);
   onEvent(completed);
 }
