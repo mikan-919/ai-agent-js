@@ -18,9 +18,9 @@
 
 ## Job identityと重複排除
 
-Job identityは、repository identity、Workflow identity、Job kind、stableな外部trigger/input key、および承認に基づき実行するJobでは[ADR 0003](./0003-approval-admission-and-reconciliation.md)の**approval fingerprint**を決定的に組み合わせる。この構造はleaseのkeyにも使う。fingerprintは承認時に封印したWHAT/HOWのversion bindingであり、WHAT/HOWの正本ではない。実装Jobのstable trigger/input keyは、current Linear Todo episodeを表すnative immutableな`IssueHistory.id`（**approval episode key**）である。これはLinear正本eventへのopaque pointerであり、本文、revision、history snapshotのcopyではない。approval episode keyはJob identityとlease keyに永続的に含まれ、Job identityの一部としてexternal operation requestへ伝播してよい。fingerprint、canonical branch名、または別のcontent/revision fieldへは入れない。timestampとapproval episode key以外のhistory IDはidentityやrequestへ入れない。重複、順不同、または別`serve`で受信した同じ外部通知は、同じJob identityとleaseへ対応付けなければならない。
+Job identityは、repository identity、Workflow identity、Job kind、stableな外部trigger/input key、および承認に基づき実行するJobでは[ADR 0003](./0003-approval-admission-and-reconciliation.md)の**approval fingerprint**を決定的に組み合わせる。この構造はleaseのkeyにも使う。fingerprintはTodo後に二度一致した現在のWHAT/HOWを封印するversion bindingであり、WHAT/HOWの正本ではない。実装JobではWorkflow identityとapproval fingerprintの組をstableなinput keyとして扱う。同じ内容へのfresh Triage→Todoは同じ論理Jobへ対応し、新しい実行attemptはlease generationで区別する。history IDとtimestampはidentityやrequestへ入れない。重複、順不同、または別`serve`で受信した同じ外部通知は、同じJob identityとleaseへ対応付けなければならない。
 
-nonterminalなJobへ明示的にcorrelateされたfollow-upは、そのJobを再開する。新しいapproval episode keyまたはapproval fingerprintは、新しいJobを作る。approval fingerprintのencoding、approval episode keyのstable trigger/input mapping、branch sealはADR 0003がこの範囲を置き換える。それ以外の構成要素のwire表現とproviderごとのtrigger/input keyの対応付けは、event/reconciliation ADRで決める。
+nonterminalなJobへ明示的にcorrelateされたfollow-upは、そのJobを再開する。新しいapproval fingerprintは新しいJobを作る。approval fingerprintのencoding、現在値の二重確認、branch sealはADR 0003がこの範囲を置き換える。それ以外の構成要素のwire表現とproviderごとのtrigger/input keyの対応付けは、event/reconciliation ADRで決める。
 
 ## 外部phaseとlocal実行状態
 
@@ -49,7 +49,7 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 | `claiming` | `claim_result_unknown` | `interrupted` | 取得結果を再調停するまで外部操作をしない。 |
 | `claiming` | `required_lock_unavailable` | `pending` | code-changing JobはJob leaseを確認してreleaseしてから、workerを開始せずに戻る。 |
 | `claiming` | `lock_or_release_result_unknown` | `interrupted` | lockの取得またはこの段階のlease releaseの結果を再調停するまで、workerを開始しない。 |
-| `running` | `stop_requested`、approval fingerprint/approval episode key不一致、またはorigin Todo episodeからのhistory gate不合格 | `stopping` | 新しい外部操作を止め、workerを終了して所有権を返却または失効待ちにする。 |
+| `running` | `stop_requested`、current state・attachment・approval fingerprintの不一致 | `stopping` | 新しい外部操作を止め、workerを終了して所有権を返却または失効待ちにする。観測した承認対象の不一致ではADR 0003に従ってTriageへ戻す。 |
 | `running` | `worker_lost`、leaseまたは必要なlockの喪失、takeover観測、または外部操作の結果不明 | `interrupted` | そのworkerの外部操作を止め、再調停を要求する。 |
 | `stopping` | `completion_reconciled` | `completed` | branch lock、Job leaseの順で返却済み、または保持していないことを確認する。 |
 | `stopping` | `cancellation_reconciled` | `cancelled` | branch lock、Job leaseの順で返却済み、または保持していないことを確認する。 |
@@ -62,11 +62,11 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 
 ## Job lease
 
-すべてのJobは、実行中にJob leaseを一つだけ持つ。lease recordは少なくともJob identity、`serve` owner identity、expiry、取得ごとに新しいlease generationからなるfencing tokenを持つ。recordを置くremote Git refの形式、ADR 0003で定めるapproval fingerprintとapproval episode key以外のJob identity構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、TTLとheartbeat間隔はここでは決めない。
+すべてのJobは、実行中にJob leaseを一つだけ持つ。lease recordは少なくともJob identity、`serve` owner identity、expiry、取得ごとに新しいlease generationからなるfencing tokenを持つ。recordを置くremote Git refの形式、ADR 0003で定めるapproval fingerprint以外のJob identity構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、TTLとheartbeat間隔はここでは決めない。
 
 取得・更新・引き継ぎは次の順序にする。
 
-1. `serve`はGitHub、Linear、Gitから現在のWorkflow phase、対象、approval fingerprint、approval episode keyを再構成する。実行不能ならleaseを取得しない。approval fingerprintを伴うcanonical branchの初回作成または既存branch adoptionは、さらに厳密な順序を[ADR 0003](./0003-approval-admission-and-reconciliation.md)に従う。
+1. `serve`はGitHub、Linear、Gitから現在のWorkflow phase、対象、approval fingerprintを再構成する。実行不能ならleaseを取得しない。approval fingerprintを伴うcanonical branchの初回作成または既存branch adoptionは、さらに厳密な順序を[ADR 0003](./0003-approval-admission-and-reconciliation.md)に従う。
 2. `pending`または`interrupted`のJobは、未所有または失効済みのleaseだけを条件付きに取得し、新しいlease generationを記録する。成功を読み返してcurrent generationを確認するまで`claiming`のままとする。コード変更Jobは同じ`claiming`中にbranch lockを取得し、active canonical branch/Pull Request tupleを再確認する。両方を確認するまでworkerを開始しない。
 3. ownerはcurrent lease generationと、必要な場合はcurrent branch-lock generationを比較条件にrenewする。renewalの失敗、期限切れ、別generationの観測、またはrenewal結果不明は直ちに`interrupted`とし、workerを止める。
 4. takeoverは、leaseが失効済みであることを再確認した別`serve`だけが新generationで取得する操作である。旧workerの切断だけではtakeoverしない。
@@ -76,7 +76,7 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 
 ## Branch lock
 
-branch lockはrepositoryとcanonical branchをkeyにする。Workflow全体やIssue/Linear対話Jobをlockしない。コードを変更する実装JobとPR対応Jobだけが、`claiming`中にcurrent Job leaseを確認してからcanonical branch lockを条件付きに取得し、取得後にWorkflowのactive canonical branch/Pull Request tupleがなお一致することを確認する。approval episode keyを伴うJobでは、ADR 0003のprospective branch lock、初回CAS createまたは既存branch adoption、seal後の再読までworkerを開始しない。lock取得に失敗した場合はコード変更もworker開始もしない。Job leaseを確認してreleaseできた場合だけ`pending`へ戻り、lockまたはreleaseの結果が不明なら`interrupted`へ移る。
+branch lockはrepositoryとcanonical branchをkeyにする。Workflow全体やIssue/Linear対話Jobをlockしない。コードを変更する実装JobとPR対応Jobだけが、`claiming`中にcurrent Job leaseを確認してからcanonical branch lockを条件付きに取得し、取得後にWorkflowのactive canonical branch/Pull Request tupleがなお一致することを確認する。approval fingerprintを伴うJobでは、ADR 0003のprospective branch lock、初回CAS createまたは既存branch adoption、seal後の再読までworkerを開始しない。lock取得に失敗した場合はコード変更もworker開始もしない。Job leaseを確認してreleaseできた場合だけ`pending`へ戻り、lockまたはreleaseの結果が不明なら`interrupted`へ移る。
 
 lock recordは少なくともcanonical branch、Job identity、Job lease generation、取得ごとに新しいbranch-lock generation、expiryを持つ。heartbeatとreleaseはcurrent lease generationとcurrent branch-lock generationの両方を比較条件にする。コードを変更するJobがleaseまたはlockを失った場合は`interrupted`へ移り、workerを止め、push、branch操作、Pull Request作成・更新を開始しない。release順序はbranch lock、Job leaseとする。
 
@@ -86,11 +86,11 @@ branch lockのtakeoverまたはreplacementは、current Job lease ownerだけが
 
 ## 外部操作のfencingとreconciliation
 
-`serve`だけが外部操作を実行する。外部操作requestはJob identity、operation種別、target、lease generation、必要ならbranch-lock generation、approval fingerprint、idempotency keyを含む。Job identityに含まれるapproval episode key以外の承認history IDやtimestampをrequestのfieldへ含めない。idempotency keyは`serve`がdispatch前に永続的なoperation recordへ割り当て、同じ論理操作の再送で変えない。各操作の直前に、`serve`は次を全て確認する。
+`serve`だけが外部操作を実行する。外部操作requestはJob identity、operation種別、target、lease generation、必要ならbranch-lock generation、approval fingerprint、idempotency keyを含む。承認history IDやtimestampをrequestのfieldへ含めない。idempotency keyは`serve`がdispatch前に永続的なoperation recordへ割り当て、同じ論理操作の再送で変えない。各操作の直前に、`serve`は次を全て確認する。
 
 1. Jobが`running`で、requestのowner identityとcurrent lease generationが現在のJob leaseに一致する。
 2. 現在のWorkflow phaseから導出したJob identity、Job種別、許可された操作、対象GitHub IssueとLinear issueがrequestと一致する。
-3. ADR 0003のreconciliationが、Job identity内のapproval episode keyで指すorigin Todo episodeからこのwrite直前までのhistory gateを再評価して合格し、現在導出するapproval fingerprintもrequestと一致する。provider-native historyからそのepisode keyを一意に再構成できない場合は不合格とする。
+3. ADR 0003のreconciliationが現在のstate、attachment、対象Issue IDsを再確認し、現在導出するapproval fingerprintもrequestと一致する。
 4. idempotency keyがこのJobと論理操作に対応し、completeまたは結果不明として記録済みでない。
 5. branchまたはPull Requestを変更する操作では、requestのcurrent branch-lock generation、canonical branch、active Pull Request tupleが現在のlockとWorkflowに一致する。
 
@@ -102,11 +102,11 @@ lease generationとbranch-lock generationは、より新しいownerを観測し�
 
 - webhook、poll、retryはJob開始の許可ではない。同じ通知を何度受けても、同一Jobのcurrent leaseを持つ`serve`に監督されていないworkerは実行も外部writeもできない。
 - `serve`またはworkerのcrashはleaseの明示releaseを必要としない。heartbeat停止後、別`serve`はexpiryとcurrent external stateを確認してからtakeoverできる。
-- 外部phase、approval fingerprint、approval episode key、branch/PR tupleが変わった場合、旧workerは停止し、旧Jobを継続してwriteしない。人間による新しいTriage→Todo承認は新approval episode keyの新Jobを作り、fingerprint変化を伴う場合だけ新canonical branchを作る。
+- 外部phase、attachment、approval fingerprint、branch/PR tupleの不一致を観測した場合、旧workerは停止し、旧Jobを継続してwriteしない。承認対象の不一致では`serve`がTriageへ戻す。人間によるfresh Triage→Todoでfingerprintが変わった場合は新Jobと新canonical branchを作り、同じ場合は新しいlease generationで同じ論理Jobを再開する。
 - active canonical branchとPull RequestはWorkflowごとに高々一つであり、同じbranchを変更する二つのcode-changing Jobは同時にcurrent branch lockを持てない。
 
 ## 保留事項
 
-- remote lease refの形式、Job identityのうちapproval fingerprintとapproval episode key以外の構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、lease TTL、heartbeat間隔、takeover猶予
+- remote lease refの形式、Job identityのうちapproval fingerprint以外の構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、lease TTL、heartbeat間隔、takeover猶予
 - GitHub、Linear、Gitの各操作に対するconditional update、idempotency key、結果不明時のreconciliation手順
 - concurrency、retry、checkpoint、timeout、resource limitの運用値

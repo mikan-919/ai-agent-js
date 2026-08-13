@@ -26,7 +26,7 @@
 3. **実装**: 承認されたWHAT/HOWのrevisionを実装し、Pull Requestを作る。
 4. **PR対応**: 人間のreviewまたはrequired checkの失敗へ対応する。
 
-Issue対話は、人間がHOWへ進むよう明示した場合だけ、対応Linear issueをTriageで作成する。GitHub Issueをattachmentで結び、WHATを初期contextとして渡す。HOWの検討と本文更新はLinear対話が担当する。TriageからTodoへの遷移は、その時点のWHATとHOWのrevisionに対する実行承認であり、実装Jobを起動可能にする。
+Issue対話は、人間がHOWへ進むよう明示した場合だけ、対応Linear issueをTriageで作成する。GitHub Issueをattachmentで結び、WHATを初期contextとして渡す。HOWの検討と本文更新はLinear対話が担当する。TriageからTodoへの遷移は実行承認であり、実装Jobを起動可能にする。実際に束縛するWHAT/HOWは、Todo後に[ADR 0003](./0003-approval-admission-and-reconciliation.md)の現在値確認で二度一致したversionとする。
 
 Issue対話とLinear対話は、Appへの明示的なmention、command、またはWeb UIからの入力で開始する。ハーネスが作ったPull Request上の人間によるreview、inline comment、PR commentは、追加のmentionなしでPR対応Jobを開始する。required checkの失敗もPR対応Jobの入力とする。同じcheckへの修正が連続して失敗した場合は、設定された上限で自動対応を止め、人間へ報告する。
 
@@ -104,7 +104,7 @@ v1のrelayは一つのhosting先を対象とする。multi-cloud対応とself-ho
 - Pull Request: 実装結果とmerge承認
 - local transcript: workerのmessage、providerが公開するreasoning event、tool call、tool result、responseからなる実行履歴
 
-commentは対話であり、承認済み仕様そのものではない。対話によってWHATまたはHOWが変わる場合、workerは対応する本文を更新する。承認はTriageからTodoへ移った時点のWHAT/HOW revisionの組に対して行われ、その後の本文変更で失効する。
+commentは対話であり、承認済み仕様そのものではない。対話によってWHATまたはHOWが変わる場合、workerは対応する本文を更新する。承認後に束縛するversionと失効条件はADR 0003を正本とし、現在値の不一致を観測した場合に失効する。
 
 Web UIはlocal worker sessionを閲覧・操作するinterfaceである。local対話をGitHubやLinearのcommentへ自動転載しない。確定したWHATとHOWはそれぞれの本文へ反映する。GitHubまたはLinearで始まった対話には、その場所で返答する。
 
