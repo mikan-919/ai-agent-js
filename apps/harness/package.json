@@ -1,0 +1,8 @@
+{
+  "name": "@mikan-919/oriel-harness",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mikan-919/oriel-contracts": "workspace:*"
+  }
+}
