@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1786618800000,
+      "tag": "0000_issue_comment_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786618801000,
+      "tag": "0001_issue_comment_actor_and_digest",
+      "breakpoints": true
+    }
+  ]
+}
