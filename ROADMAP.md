@@ -12,13 +12,13 @@ Linear issue (HOW / Triage→Todo approval)
         │ webhook
         ▼
 public relay
-        │ notification / short-lived token
+        │ 通知 / 短命token / 接続所有権
         ▼
 repository-scoped local serve instances
-        │ Job lease + canonical branch lock (code-changing Job only)
+        │ Job接続所有権 + ブランチ排他
         ▼
 local Agent / worktree
-        │ checkpoint / push / PR
+        │ チェックポイント / 送信; 検証完了後にプルリクエスト
         ▼
 GitHub Pull Request (DO / merge approval)
 ```
@@ -76,6 +76,7 @@ packages/identity
 - GitHub App秘密鍵を保持し、repositoryと権限を絞った短命installation tokenを発行する。
 - Linear OAuth＋PKCEのcallbackをローカル`serve`へ中継する。
 - 接続中`serve`への状態変更通知とtranscript検索要求を中継する。
+- Job単位の所有権と、コード変更Jobのcanonicalブランチ単位の排他を、専用WebSocket接続の存続として調停する。接続中の取得IDと対象キーはHibernation APIの接続付随情報から再構成し、Durable Objectsストレージへ所有権記録や履歴を保存しない。
 - Job DB、scheduler、コード、transcript、Agent sessionは保存しない。
 - 初期は独自アカウントを持たず、GitHub App installationを利用単位とする。
 - 永続化するのはdevice tokenのhashと表示用metadata、repository認可、routingに必要なIDだけとする。D1、KV、R2はv1で使わない。
@@ -96,20 +97,21 @@ packages/identity
 
 - GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。
 - 対応するLinear issueが一つだけでTodoの場合に、[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)の現在値確認を通ったWorkflowだけからJobの実行候補を導出する。
-- すべてのJobはJob leaseを取得し、コードを変更するJobだけがcanonical branch lockも取得する。必要な所有権を取得できなければ実行しない。
+- すべてのJobは公開リレーへの専用WebSocketでJob所有権を取得し、コードを変更するJobだけがcanonicalブランチの接続排他も取得する。必要な接続が失われた場合はworkerと外部操作を停止する。
 - activeなcanonical branchとPull RequestはWorkflowごとに一つだけとする。
 
 ### 外部phaseとJob execution
 
 - GitHub、Linear、Pull Requestのcurrent stateからWorkflow phaseを導出し、local Job stateをその複製にしない。
-- Job execution state、Job lease、canonical branch lock、外部操作前のownership checkは[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)を正本とする。
+- Job実行状態と外部操作前の所有権確認は[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、接続所有権とブランチ引き継ぎは[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)を正本とする。
 - LinearのTriageからTodoへの承認を実装Job候補へ導き、所有権取得の前後で二度一致した現在のWHAT/HOWからapproval fingerprintを計算し、canonical branchをfingerprint由来の名前として扱う方針は[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)を正本とする。本文やhistory snapshotを複製せず、native historyの完全性は実行条件にしない。
-- state、attachment、WHAT/HOW、fingerprint、またはbranch seal中のbaseの不一致を観測すれば旧Jobを停止する。承認対象の不一致では、current leaseと対象Workflowを確認した`serve`がTodoをTriageへ戻す。fresh Triage→Todoでfingerprintが同じなら、先行worker/ownership/active PRを解消し、既存branch tipが安全なcheckpoint/known writeだと証明できる場合だけ同じ論理Jobとbranchをadoptする。fingerprintが変わるWHAT/HOW改訂ならnew Jobとnew canonical branchを作る。branch takeoverと差し戻しwriteのoperation-specific reconciliationは未解決である。PR merge後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
+- state、attachment、WHAT/HOW、承認指紋、またはブランチ封印中の取り込み先不一致を観測すれば旧Jobを停止する。承認対象の不一致では、現在の所有権と対象Workflowを確認した`serve`がTodoをTriageへ戻す。fresh Triage→Todoで承認指紋が同じなら、先行workerと接続所有権が消えた後、既存ブランチの現在の先端を未検証の作業途中成果として同じ論理Jobが引き継ぐ。過去の既知の書き込み証明は要求せず、構造検査後にビルドとテストをやり直し、失敗は新workerが修復する。取り込み先ブランチの前進は承認を失効させず、同じJobが最新状態を統合して再検証する。承認指紋が変わるWHAT/HOW改訂なら新しいJobとcanonicalブランチを作る。プルリクエスト取り込み後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
 
 ### checkpointと履歴
 
 - Agentは安定点でcheckpoint commitとHANDOFF.mdをpushする。
-- PRをreadyにする前にHANDOFF.mdを削除する。
+- 実装中はプルリクエストを作らない。実装と検証が完了し、HANDOFF.mdを削除した後にレビュー可能なプルリクエストを作る。
+- Gitにはソースコード、通常の作業ブランチ、チェックポイントだけを置き、所有権や操作履歴の専用Git参照、タグ、ブランチ、コミットメタデータを置かない。
 - transcriptはsandboxと分離してローカルに保存し、自動削除しない。
 - local、current Job、repositoryの範囲で、接続中`serve`間の検索を可能にする。
 
@@ -160,18 +162,17 @@ packages/identity
 
 ## 実装前に決めること
 
-- Job lease refの形式、期限、heartbeat、引き継ぎ手順
-- 同fingerprintのfresh approvalが既存canonical branchをadoptできる安全なcheckpoint/known-write証明と、operation-specific branch takeover/reconciliation protocol。
-- draft PRを作る時点とcheckpoint頻度を調整するAgent prompt
+- 接続所有権の認証、取得手順、接続断検知、再接続手順
+- チェックポイント頻度と、実装完了からプルリクエスト作成までを調整するAgent指示
 - relay、serve、harness、worktree間のtool APIの詳細
-- 障害、再接続、二重実行、途中再開を含むreconciliation手順
+- Todo以後のLinear状態更新と、Gitへの送信、プルリクエスト作成、その他の外部書き込みごとの結果不明時の再調停手順
 - 最小構成で端から端まで成立させる最初のtracer bullet
 
 ## 設計を固める順序
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
-2. Jobの状態遷移、lease、branch lockの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)）。
-3. GitHub・Linear・relay・serve間のイベントとreconciliationを時系列で定義する。現在値の二重確認、承認指紋、branch seal、観測した不一致でTriageへ戻す手順はAccepted（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)）だが、対話、PR、その他の外部writeの個別protocolは未解決。
+2. Jobの状態遷移、接続所有権、ブランチ排他、同じ承認指紋のブランチ引き継ぎの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）。
+3. GitHub・Linear・リレー・`serve`間のイベントと再調停を時系列で定義する。現在値の二重確認、承認指紋、ブランチ封印、観測した不一致でTriageへ戻す手順、既存ブランチ引き継ぎは決定済み（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）だが、対話、プルリクエスト、その他の外部書き込みの個別手順は未解決。
 4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。
 5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。
 6. capability schemaと実行環境選択を定義する。

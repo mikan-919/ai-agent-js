@@ -1,6 +1,6 @@
 # ADR 0002: Jobの所有権と実行状態
 
-- 状態: Accepted
+- 状態: Accepted — Job leaseとbranch lockの保存・取得・引き継ぎは[ADR 0004](./0004-connection-ownership-and-branch-resumption.md)の接続所有権が置き換える。
 - 日付: 2026-08-12
 
 ## 背景
@@ -18,7 +18,7 @@
 
 ## Job identityと重複排除
 
-Job identityは、repository identity、Workflow identity、Job kind、stableな外部trigger/input key、および承認に基づき実行するJobでは[ADR 0003](./0003-approval-admission-and-reconciliation.md)の**approval fingerprint**を決定的に組み合わせる。この構造はleaseのkeyにも使う。fingerprintはTodo後に二度一致した現在のWHAT/HOWを封印するversion bindingであり、WHAT/HOWの正本ではない。実装JobではWorkflow identityとapproval fingerprintの組をstableなinput keyとして扱う。同じ内容へのfresh Triage→Todoは同じ論理Jobへ対応し、新しい実行attemptはlease generationで区別する。history IDとtimestampはidentityやrequestへ入れない。重複、順不同、または別`serve`で受信した同じ外部通知は、同じJob identityとleaseへ対応付けなければならない。
+Job識別子は、リポジトリ識別子、Workflow識別子、Job種別、安定した外部入力キー、および承認に基づき実行するJobでは[ADR 0003](./0003-approval-admission-and-reconciliation.md)の**承認指紋**を決定的に組み合わせる。この構造は接続所有権のキーにも使う。承認指紋はTodo後に二度一致した現在のWHAT/HOWを封印する版識別子であり、WHAT/HOWの正本ではない。実装JobではWorkflow識別子と承認指紋の組を安定した入力キーとして扱う。同じ内容へのfresh Triage→Todoは同じ論理Jobへ対応し、新しい実行試行は新しい取得IDで区別する。履歴IDと時刻は識別子や要求へ入れない。重複、順不同、または別`serve`で受信した同じ外部通知は、同じJob識別子と接続所有権へ対応付けなければならない。
 
 nonterminalなJobへ明示的にcorrelateされたfollow-upは、そのJobを再開する。新しいapproval fingerprintは新しいJobを作る。approval fingerprintのencoding、現在値の二重確認、branch sealはADR 0003がこの範囲を置き換える。それ以外の構成要素のwire表現とproviderごとのtrigger/input keyの対応付けは、event/reconciliation ADRで決める。
 
@@ -32,9 +32,9 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 | --- | --- | --- |
 | `pending` | 実行候補として作られたが、leaseを得ていない。 | `claiming`, `cancelled` |
 | `claiming` | 現在の外部phaseを再確認し、Job leaseと必要なbranch lockの取得結果を確定している。 | `running`, `pending`, `interrupted` |
-| `running` | supervising `serve`がcurrent Job leaseと、コード変更Jobではcurrent branch lockを持ち、workerが許可された作業を実行できる。 | `stopping`, `interrupted` |
+| `running` | 監督する`serve`が現在のJob所有権接続と、コード変更Jobでは現在のブランチ排他接続を持ち、workerが許可された作業を実行できる。 | `stopping`, `interrupted` |
 | `stopping` | 制御された完了または取消のためにworkerを止め、所有権を返却している。新しい外部操作は開始しない。 | `completed`, `cancelled`, `interrupted` |
-| `interrupted` | worker crash、leaseまたは必要なlockの喪失、renewal結果不明、takeover、または外部操作の結果不明で、再調停が必要である。 | `claiming`, `completed`, `cancelled` |
+| `interrupted` | workerの異常終了、所有権接続または必要な排他接続の喪失、接続確認不能、引き継ぎ、または外部操作の結果不明で、再調停が必要である。 | `claiming`, `completed`, `cancelled` |
 | `completed` | Jobの目的を完了し、worker、lease、必要なbranch lockを持たない終端状態。 | — |
 | `cancelled` | Jobを継続しないと決め、worker、lease、必要なbranch lockを持たない終端状態。 | — |
 
@@ -44,7 +44,7 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 | --- | --- | --- | --- |
 | `pending` | `claim_started` | `claiming` | 現在の外部phase、対象、approval fingerprintを読んでからlease取得を試みる。 |
 | `pending` | `cancellation_requested` | `cancelled` | workerもleaseも開始しない。 |
-| `claiming` | `claim_confirmed` | `running` | 対話Jobはcurrent lease generation、コード変更Jobはcurrent lease generationとcurrent branch-lock generation、およびactive branch/PR tupleを読み返して確認し、その後にworkerを開始する。 |
+| `claiming` | `claim_confirmed` | `running` | 対話Jobは現在のJob取得ID、コード変更JobはJob取得IDとブランチ取得ID、および有効なブランチ/プルリクエストの組を読み返して確認し、その後にworkerを開始する。 |
 | `claiming` | `lease_unavailable` | `pending` | 未失効の他ownerを確認し、workerを開始しない。 |
 | `claiming` | `claim_result_unknown` | `interrupted` | 取得結果を再調停するまで外部操作をしない。 |
 | `claiming` | `required_lock_unavailable` | `pending` | code-changing JobはJob leaseを確認してreleaseしてから、workerを開始せずに戻る。 |
@@ -58,55 +58,55 @@ localに保存するJob execution stateは次だけとする。これはlocal ru
 | `interrupted` | `completion_reconciled` | `completed` | 現在の外部状態がJobの成功を証明し、current Job leaseと必要なbranch lockを保持していないことを確認する。 |
 | `interrupted` | `cancellation_reconciled` | `cancelled` | workerを持たず、既知の所有権を返却または失効待ちにする。 |
 
-`interrupted`のreplacement workerは新しいJobを作らない。`serve`が外部の現在状態を再調停してから同じJobのleaseを再取得し、そのworkerを開始する。local DBを失った場合も、外部からstableなJob identityを再構成できる場合に限り、外部状態とremote leaseから同じ判断を再構成する。
+`interrupted`の引き継ぎ先workerは新しいJobを作らない。`serve`が外部の現在状態を再調停してから同じJobの接続所有権を取得し、そのworkerを開始する。ローカルDBを失った場合も、外部から安定したJob識別子を再構成できる場合に限り、GitHub、Linear、Gitの現在状態とリレーの生きた接続から同じ判断を再構成する。
 
 ## Job lease
 
-すべてのJobは、実行中にJob leaseを一つだけ持つ。lease recordは少なくともJob identity、`serve` owner identity、expiry、取得ごとに新しいlease generationからなるfencing tokenを持つ。recordを置くremote Git refの形式、ADR 0003で定めるapproval fingerprint以外のJob identity構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、TTLとheartbeat間隔はここでは決めない。
+すべてのJobは、実行中にJob leaseを一つだけ持つ。leaseは永続記録ではなく、[ADR 0004](./0004-connection-ownership-and-branch-resumption.md)のJob所有権WebSocketとして表す。接続中のJob識別子、`serve`所有者識別子、取得IDが現在のleaseであり、接続が失われた時点でleaseも失われる。Gitにlease用のGit参照を作らず、Durable Objectsストレージへlease記録や履歴を保存しない。
 
 取得・更新・引き継ぎは次の順序にする。
 
 1. `serve`はGitHub、Linear、Gitから現在のWorkflow phase、対象、approval fingerprintを再構成する。実行不能ならleaseを取得しない。approval fingerprintを伴うcanonical branchの初回作成または既存branch adoptionは、さらに厳密な順序を[ADR 0003](./0003-approval-admission-and-reconciliation.md)に従う。
-2. `pending`または`interrupted`のJobは、未所有または失効済みのleaseだけを条件付きに取得し、新しいlease generationを記録する。成功を読み返してcurrent generationを確認するまで`claiming`のままとする。コード変更Jobは同じ`claiming`中にbranch lockを取得し、active canonical branch/Pull Request tupleを再確認する。両方を確認するまでworkerを開始しない。
-3. ownerはcurrent lease generationと、必要な場合はcurrent branch-lock generationを比較条件にrenewする。renewalの失敗、期限切れ、別generationの観測、またはrenewal結果不明は直ちに`interrupted`とし、workerを止める。
-4. takeoverは、leaseが失効済みであることを再確認した別`serve`だけが新generationで取得する操作である。旧workerの切断だけではtakeoverしない。
-5. 完了または取消時は新しい外部操作を止め、保持するbranch lockを先に、次にcurrent lease generationを比較条件にJob leaseをreleaseする。いずれのreleaseも不能ならworkerは終了し、lease/lockのexpiryまたは後続のreconciliationへ委ねる。
+2. `pending`または`interrupted`のJobは、同じJob識別子の所有権接続が存在しない場合だけ専用WebSocketを取得する。リレーが割り当てた取得IDを接続越しに読み返すまで`claiming`のままとする。コード変更Jobは同じ`claiming`中にブランチ排他接続を取得し、有効なcanonicalブランチ/プルリクエストの組を再確認する。両方を確認するまでworkerを開始しない。
+3. 所有者は外部操作の直前に現在の取得IDを接続越しに確認する。確認不能、接続断、別の取得IDの観測は直ちに`interrupted`とし、workerを止める。
+4. 引き継ぎは、リレーが旧所有権接続の消失を確認した後だけ、別`serve`が新しい接続と取得IDを得る操作である。接続の状態が不明な間は引き継がない。
+5. 完了または取消時は新しい外部操作を止め、ブランチ排他接続、Job所有権接続の順に閉じる。解放結果を確認できなければworkerを終了し、リレーが接続消失を確認するまで後続workerを開始しない。
 
 対話JobはJob leaseだけを必要とする。実装JobとPR対応Jobは、Job leaseに加えてbranch lockを必要とする。
 
 ## Branch lock
 
-branch lockはrepositoryとcanonical branchをkeyにする。Workflow全体やIssue/Linear対話Jobをlockしない。コードを変更する実装JobとPR対応Jobだけが、`claiming`中にcurrent Job leaseを確認してからcanonical branch lockを条件付きに取得し、取得後にWorkflowのactive canonical branch/Pull Request tupleがなお一致することを確認する。approval fingerprintを伴うJobでは、ADR 0003のprospective branch lock、初回CAS createまたは既存branch adoption、seal後の再読までworkerを開始しない。lock取得に失敗した場合はコード変更もworker開始もしない。Job leaseを確認してreleaseできた場合だけ`pending`へ戻り、lockまたはreleaseの結果が不明なら`interrupted`へ移る。
+branch lockはリポジトリとcanonicalブランチをキーにする接続排他である。Workflow全体やIssue/Linear対話Jobを排他しない。コードを変更する実装JobとPR対応Jobだけが、`claiming`中に現在のJob所有権接続を確認してからcanonicalブランチの専用WebSocketを取得し、取得後にWorkflowの有効なcanonicalブランチ/プルリクエストの組がなお一致することを確認する。承認指紋を伴うJobでは、ADR 0003の初回比較条件付き作成または[ADR 0004](./0004-connection-ownership-and-branch-resumption.md)の既存ブランチ引き継ぎ、封印後の再読までworkerを開始しない。
 
-lock recordは少なくともcanonical branch、Job identity、Job lease generation、取得ごとに新しいbranch-lock generation、expiryを持つ。heartbeatとreleaseはcurrent lease generationとcurrent branch-lock generationの両方を比較条件にする。コードを変更するJobがleaseまたはlockを失った場合は`interrupted`へ移り、workerを止め、push、branch操作、Pull Request作成・更新を開始しない。release順序はbranch lock、Job leaseとする。
+ブランチ排他接続にはcanonicalブランチ、Job識別子、Job取得ID、ブランチ取得IDを付随させる。コードを変更するJobがJob所有権接続またはブランチ排他接続を失った場合は`interrupted`へ移り、workerを止め、Gitへの送信、ブランチ操作、プルリクエスト作成・更新を開始しない。解放順序はブランチ排他接続、Job所有権接続とする。
 
-branch lockのtakeoverまたはreplacementは、current Job lease ownerだけが行える。ownerはlockが不在、またはexpiry済みであることを確認した場合だけCASで取得し、新しいbranch-lock generationを記録する。取得後はcanonical branch、Job identity、current lease generation、current branch-lock generationを読み返して確認する。workerのdisconnectだけではlockのtakeoverまたはreplacementを許可しない。同じcurrent Job lease ownerがreplacement workerを開始する場合も、既存lockのcurrent generationを読み返して確認する。lock取得または読み返しの結果が不明なら`interrupted`へ移り、workerを開始しない。
+branch lockの引き継ぎまたは置換は、現在のJob所有権接続を持つ`serve`だけが行える。リレーが同じブランチキーの旧排他接続が存在しないことを確認した場合だけ新しい接続を受理する。取得後はcanonicalブランチ、Job識別子、Job取得ID、ブランチ取得IDを接続越しに読み返して確認する。取得または読み返しの結果が不明なら`interrupted`へ移り、workerを開始しない。
 
-所有権の取得順序はJob lease、branch lock、active canonical branch/Pull Request tupleの再確認とする。tupleは取得後の妥当性確認であり、返却する所有権ではない。完了または取消時に返却する順序はbranch lock、Job leaseとする。
+所有権の取得順序はJob所有権接続、ブランチ排他接続、有効なcanonicalブランチ/プルリクエストの組の再確認とする。この組は取得後の妥当性確認であり、返却する所有権ではない。完了または取消時に返却する順序はブランチ排他接続、Job所有権接続とする。
 
 ## 外部操作のfencingとreconciliation
 
-`serve`だけが外部操作を実行する。外部操作requestはJob identity、operation種別、target、lease generation、必要ならbranch-lock generation、approval fingerprint、idempotency keyを含む。承認history IDやtimestampをrequestのfieldへ含めない。idempotency keyは`serve`がdispatch前に永続的なoperation recordへ割り当て、同じ論理操作の再送で変えない。各操作の直前に、`serve`は次を全て確認する。
+`serve`だけが外部操作を実行する。外部操作要求はJob識別子、操作種別、対象、Job取得ID、必要ならブランチ取得ID、承認指紋、冪等性キーを含む。承認履歴IDや時刻を要求のfieldへ含めない。冪等性キーは`serve`が送信前にローカルSQLiteの操作記録へ割り当て、同じ論理操作の再送で変えない。各操作の直前に、`serve`は次を全て確認する。
 
-1. Jobが`running`で、requestのowner identityとcurrent lease generationが現在のJob leaseに一致する。
+1. Jobが`running`で、要求の所有者識別子とJob取得IDが現在のJob所有権接続に一致し、リレーから確認応答を受ける。
 2. 現在のWorkflow phaseから導出したJob identity、Job種別、許可された操作、対象GitHub IssueとLinear issueがrequestと一致する。
 3. ADR 0003のreconciliationが現在のstate、attachment、対象Issue IDsを再確認し、現在導出するapproval fingerprintもrequestと一致する。
 4. idempotency keyがこのJobと論理操作に対応し、completeまたは結果不明として記録済みでない。
-5. branchまたはPull Requestを変更する操作では、requestのcurrent branch-lock generation、canonical branch、active Pull Request tupleが現在のlockとWorkflowに一致する。
+5. ブランチまたはプルリクエストを変更する操作では、要求のブランチ取得ID、canonicalブランチ、有効なプルリクエストの組が現在の接続排他とWorkflowに一致し、リレーから確認応答を受ける。
 
-lease generationとbranch-lock generationは、より新しいownerを観測した`serve`が古いworkerの新規requestを拒否するためのfencing tokenである。しかしGitHub、Linear、remote Gitの外部APIは、このハーネスのlease fencingをatomicな書込み前提条件として強制しない。preflight後にleaseを失う、または既に送信したwriteがtakeover後に成功するraceを、generationだけで防ぐことはできない。
+Job取得IDとブランチ取得IDは、リレーが現在接続と一致しない古いworkerの確認要求を拒否するための隔離値である。しかしGitHub、Linear、遠隔Gitの外部APIは、この確認を原子的な書き込み前提条件として強制しない。事前確認後に接続を失う、または既に送信した書き込みが引き継ぎ後に成功する競合を取得IDだけで防ぐことはできない。
 
 そのため、`serve`はpreflight直後に操作を送信し、operationごとに条件付き更新、providerが受け取るidempotency key、または観測可能な結果によるreconciliationを用いる。timeout、crash、所有権喪失により結果が不明なwriteは`interrupted`としてfail closedにし、盲目的に再試行しない。次のworkerはGitHub、Linear、Gitの現在状態を読んで既に反映済みかを判定し、操作固有の安全な続行方法が定義されるまで停止する。Todo→Triage差し戻しはADR 0003、その他のexternal operationは今後の個別protocolを正本とする。
 
 ## crashと重複通知の不変条件
 
-- webhook、poll、retryはJob開始の許可ではない。同じ通知を何度受けても、同一Jobのcurrent leaseを持つ`serve`に監督されていないworkerは実行も外部writeもできない。
-- `serve`またはworkerのcrashはleaseの明示releaseを必要としない。heartbeat停止後、別`serve`はexpiryとcurrent external stateを確認してからtakeoverできる。
-- 外部phase、attachment、approval fingerprint、branch/PR tupleの不一致を観測した場合、旧workerは停止し、旧Jobを継続してwriteしない。承認対象の不一致では`serve`がTriageへ戻す。人間によるfresh Triage→Todoでfingerprintが変わった場合は新Jobと新canonical branchを作り、同じ場合は新しいlease generationで同じ論理Jobを再開する。
-- active canonical branchとPull RequestはWorkflowごとに高々一つであり、同じbranchを変更する二つのcode-changing Jobは同時にcurrent branch lockを持てない。
+- Webhook、定期確認、再試行はJob開始の許可ではない。同じ通知を何度受けても、同一Jobの現在の所有権接続を持つ`serve`に監督されていないworkerは実行も外部書き込みもできない。
+- `serve`またはworkerの異常終了は所有権の明示解放を必要としない。別`serve`はリレーが旧接続の消失を確認し、現在の外部状態を再調停してから引き継げる。
+- 外部phase、attachment、承認指紋、ブランチ/プルリクエストの組の不一致を観測した場合、旧workerは停止し、旧Jobを継続して書き込まない。承認対象の不一致では`serve`がTriageへ戻す。人間によるfresh Triage→Todoで承認指紋が変わった場合は新Jobと新canonicalブランチを作り、同じ場合は新しい取得IDで同じ論理Jobを再開する。
+- 有効なcanonicalブランチとプルリクエストはWorkflowごとに高々一つであり、同じブランチを変更する二つのコード変更Jobは同時に現在のブランチ排他接続を持てない。
 
 ## 保留事項
 
-- remote lease refの形式、Job identityのうちapproval fingerprint以外の構成要素のencoding、providerごとの他のstable trigger/input keyの対応付け、lease TTL、heartbeat間隔、takeover猶予
+- Job識別子のうち承認指紋以外の構成要素の符号化、提供元ごとの他の安定した入力キーの対応付け、接続認証、切断検知、再接続手順
 - Todo→Triage差し戻し以外のGitHub、Linear、Git操作に対するconditional update、idempotency key、結果不明時のreconciliation手順
 - concurrency、retry、checkpoint、timeout、resource limitの運用値

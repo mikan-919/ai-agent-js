@@ -47,15 +47,17 @@ v1のworktree backendは同じOS userでcommandを実行するため、host file
 
 GitHub IssueはWHAT、LinearはHOWと実行承認、Pull RequestはDOと最終承認を持つ。同じ判断内容をローカルDBや会話履歴へ正本として複製しない。
 
+Gitにはソースコード、通常の作業ブランチ、チェックポイントだけを置く。所有権、排他、操作履歴を保存する専用ブランチ、タグ、Git参照、コミットメタデータは作らない。
+
 共有ROADMAP文書をJobの入力にはしない。各人が何を作りたいかはGitHub Issueとして表し、方向と優先順位はGitHub IssueとLinearのviewとして見る。
 
 ### 4. 外部イベントは通知であり、現在状態が正本である
 
-GitHub・Linear webhookはローカル`serve`を早く起こすための通知である。通知を失っても、`serve`はGitHub・Linear・Gitの現在状態を読み直して同じ判断を再構成できなければならない。公開relayはJob DBやAgent sessionを正本として持たない。
+GitHub・Linear Webhookはローカル`serve`を早く起こすための通知である。通知を失っても、`serve`はGitHub・Linear・Gitの現在状態を読み直して同じ判断を再構成できなければならない。公開リレーはJobデータベースやAgentセッションを正本として持たない。分散実行の所有権だけは、公開リレーへの生きた接続が存在する間の一時的な調停状態として扱い、永続的な所有権記録や履歴にはしない。
 
 ### 5. 分散実行では所有権を外部操作の直前に確認する
 
-JobはJob単位の期限付きleaseを取得した一つの`serve`だけが実行する。コードを変更するJobは、さらにcanonical branch単位のlockを取得する。push、PR操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は有効なleaseをまだ所有していることを確認し、branchまたはPRを変更する場合はlockも確認する。外部APIに対する操作はこの確認と原子的にはできないため、所有権を失った古い実行は停止し、結果不明の操作を自動再実行しない。
+JobはJob単位の接続所有権を取得した一つの`serve`だけが実行する。コードを変更するJobは、さらにcanonicalブランチ単位の接続排他を取得する。接続の切断、確認不能、または所有権喪失ではworkerと新しい外部操作を停止する。Gitへの送信、プルリクエスト操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は公開リレーとの接続を通じて現在の所有権を確認し、ブランチまたはプルリクエストを変更する場合は接続排他も確認する。外部サービスへの操作はこの確認と原子的にはできないため、所有権を失った古い実行は停止し、結果不明の操作を自動再実行しない。
 
 ## プロジェクト文脈
 
@@ -67,7 +69,7 @@ CONCEPT.mdがないrepositoryでは、AGENTS.mdなど通常のコーディング
 
 ローカル`serve`はrepository単位で起動し、Agent、sandbox、transcript、GitHubの短命token、Linear tokenを保持する。Web UIも同じ`serve`がlocalhostで提供する。
 
-公開relayはGitHub App・Linear webhookの公開口、OAuth callback、短命GitHub tokenの発行、接続中`serve`への通知と検索要求の中継だけを担う。コード、Job DB、Agent session、transcriptは保存しない。
+公開リレーはGitHub App・Linear Webhookの公開口、OAuthコールバック、短命GitHub tokenの発行、接続中`serve`への通知と検索要求の中継、および接続中だけ有効なJob所有権とブランチ排他の調停を担う。コード、Jobデータベース、Agentセッション、実行履歴、所有権履歴は保存しない。
 
 初期のrelayは独自アカウントを要求せず、GitHub App installationとGitHubログインを利用単位とする。
 
@@ -81,4 +83,4 @@ Agentは必要に応じて、自分の`serve`と、relayへ接続中の同一rep
 
 Agentは安定した区切りでcheckpoint commitをpushする。checkpointには、その地点から別の実行環境が再開するためのHANDOFF.mdを含める。HANDOFF.mdは追記ログではなく、現在地、確定した判断、未解決点、次の一手だけを持つ。
 
-HANDOFF.mdはPRをreadyにする前に削除し、最終差分には含めない。途中のcommit履歴に残ることは許容する。
+実装中はプルリクエストを作らない。実装と検証が完了した後、HANDOFF.mdを削除してからレビュー可能なプルリクエストを作り、最終差分には含めない。途中のコミット履歴に残ることは許容する。

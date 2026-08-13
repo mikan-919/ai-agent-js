@@ -1,6 +1,6 @@
 # ADR 0001: 分散Workflowとworkerの実行モデル
 
-- 状態: Accepted
+- 状態: Accepted — 所有権の表現、引き継ぎ、プルリクエスト作成時機は[ADR 0004](./0004-connection-ownership-and-branch-resumption.md)が置き換える。
 - 日付: 2026-08-11
 
 ## 背景
@@ -41,7 +41,7 @@ repository単位の各`serve`は複数のJobを実行できる。各Jobは`serve
 - 前回workerのtranscriptを持つ`serve`へ接続できる場合、そのsessionを復活できる。
 - transcriptを利用できない場合、別の`serve`が同じJobに新しいworkerを作り、GitHub、Linear、Git、Pull Requestからcontextを再構成する。
 
-relayはWebSocketによって`serve`の接続状態を把握する。切断は再割り当ての契機になるが、それだけで新しい実行を許可しない。新workerはJob leaseを取得する必要があり、切断したworkerはleaseを更新できず、外部操作時の検査に失敗しなければならない。
+リレーはWebSocketによって`serve`の接続状態を把握する。Job所有権とブランチ排他は[ADR 0004](./0004-connection-ownership-and-branch-resumption.md)の専用WebSocket接続そのもので表し、切断したworkerは新しい外部操作を行えない。
 
 所有権の単位はWorkflow全体ではなく個々のJobとする。同じWorkflowの異なる種類のJobは並行できる。コード変更はさらにbranch lockで直列化する。外部へ書き込む直前に、`serve`はJob lease、必要なbranch lock、承認revision、操作対象、許可された操作を検査する。
 
@@ -78,7 +78,7 @@ AgentはLinearをTriageからTodoへ移せず、Pull Requestをmergeできない
 
 公開relayはGitHub AppとLinearのwebhook、local `serve`とのWebSocket、権限を絞ったGitHub installation tokenの発行、OAuth callback、通知とtranscript requestの中継を担当する。
 
-relayは実行workerを選ばず、コード、transcript、Agent session、Job、Workflow stateを保存しない。各`serve`がGitHub、Linear、Gitを読み直し、remote Git ref上のlease取得を試みる。
+リレーは実行workerを選ぶ実行割当機能にはならず、接続中の`serve`によるJob所有権とブランチ排他の取得だけを原子的に調停する。コード、実行履歴、Agentセッション、Job、Workflow状態、所有権履歴は保存しない。各`serve`がGitHub、Linear、Gitを読み直し、リレーへの専用接続で所有権を取得する。
 
 relayが永続保存できるのは、再接続と認可に必要なdevice registryだけとする。
 
@@ -124,7 +124,7 @@ model providerとcredentialは`serve`のlocal設定とする。repositoryは自�
 
 ### Pull Requestとcheckpoint
 
-実装Jobは最初のcheckpointをpushした時点でDraft Pull Requestを作る。実装と検証が完了し、checkpoint専用のHANDOFFを最終差分から削除した時点でreadyにする。
+実装中はプルリクエストを作らない。実装と検証が完了し、チェックポイント専用のHANDOFFを最終差分から削除した後にレビュー可能なプルリクエストを作る。
 
 checkpointはcanonical branchへpushしたcommitである。別workerが外部状態から再開できるようHANDOFFを含めてよい。HANDOFFは途中のcommit履歴に残ってよいが、最終Pull Requestの差分には含めない。
 
@@ -132,7 +132,7 @@ checkpointはcanonical branchへpushしたcommitである。別workerが外部�
 
 - local `serve`とtranscriptを失っても、Workflowを外部状態から再構成できる。
 - 元の`serve`へ接続できればworkerの文脈を継続できるが、正しさはその継続へ依存しない。
-- relayはschedulerやWorkflow DBにならず、routingとcredential境界に留まる。
+- リレーは実行割当機能やWorkflowデータベースにならず、経路制御、認証情報境界、生きた接続の排他調停に留まる。
 - Job単位のleaseにより同じWorkflowの対話と実装を並行でき、branch lockでコード変更を保護できる。
 - 詳細なAgent実行履歴をrelayへuploadせず、Web UIから確認できる。
 - 実行設定がないrepositoryではコード実行を始められず、worktreeによる自立実行にはrepositoryの明示的な許可が必要になる。
@@ -143,8 +143,8 @@ checkpointはcanonical branchへpushしたcommitである。別workerが外部�
 
 このADRでは次を決めない。
 
-- remote Git refの形式、lease期間、heartbeat、引き継ぎ手順
 - 承認済みWHAT/HOW revisionの記録・比較方法
+- 接続断検知と再接続の通信手順
 - concurrency、CI retry、checkpoint、timeout、resource limitなどの運用値
 
 これらはAPI調査、prototype、運用上の証拠を踏まえて決め、このADRの境界を維持する。

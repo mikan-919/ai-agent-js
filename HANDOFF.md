@@ -2,10 +2,8 @@
 
 ## 次のセッションへの申し送り
 
-- [ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)で、Todo承認後・worker開始前のapproval fingerprint、canonical branchのCAS seal、既存branch/resume、fingerprintを使うoperation fencingをAcceptedにした。fingerprintはversion bindingであり、本文の正本ではない。
-- fresh Triage→Todoでfingerprintが同じなら同じ論理Jobを新しいlease generationで再開し、同じbranchをadoptするには安全なcheckpoint/known-write証明を要求する。そのtakeover/reconciliation詳細は[ROADMAP.md](./ROADMAP.md)で未解決としている。
-- native historyの完全性はautomatic admissionの条件にしない。Todo後の現在値を所有権取得の前後で二度読み、state、attachment、WHAT/HOW、fingerprint、baseが一致すればworkerを開始する。二回のread間で変更後に元へ戻った事実は検出しない。
-- 観測した承認対象の不一致ではworkerと外部操作を停止し、current leaseと対象Workflowを確認した`serve`がTodoをTriageへ戻す。relayは通知とroutingに限定する。
-- Todo→Triage差し戻しは、current lease ownerだけがworker停止後・lease保持中に実行し、直前と直後にLinear stateを読む。Todoだけを更新し、Triageは成功、他stateは上書きせず終了する。Todoのままなら自動再送せず、current leaseが残る間だけWeb UIから人間が再試行できる。理由commentは投稿しない。
-- 次は、同fingerprintの既存branch adoptionに必要な安全なcheckpoint/known-write証明とtakeover/reconciliationを定義する。専用fixtureを使う現在値の二重read、Todo→Triage差し戻し、GitHub App installation tokenによるatomic `updateRefs`のcontract testも実装前に必要である。
-- PR/Git push、lease ref、device/OAuth、Todo以後のstate更新、その他の外部writeごとのreconciliationは未解決である。
+- [ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)で、Job所有権とブランチ排他を公開リレーへの専用WebSocket接続の存続として表す。所有権記録や履歴をGitまたはDurable Objectsストレージへ保存しない。
+- 同じ承認指紋の既存canonicalブランチは、過去の既知の書き込み証明を要求せず、現在の先端を未検証の作業途中成果として引き継ぐ。構造検査後にビルドとテストをやり直し、失敗は引き継ぎ先workerが修復する。
+- 接続断または予期しないブランチ先端変更ではworkerと外部操作を止め、現在状態と接続所有権を再調停する。取り込み先ブランチの前進は承認を失効させず、同じJobが最新状態を統合して再検証する。
+- 実装中はプルリクエストを作らない。実装と検証が完了し、HANDOFFを削除した後にレビュー可能なプルリクエストを作る。
+- 次は、接続所有権の認証・取得・切断・再接続の契約、Todo以後のLinear状態更新、Gitへの送信、プルリクエスト作成、その他の外部書き込みの結果不明時の再調停を定義する。現在値の二重読み取り、Todo→Triage差し戻し、原子的な`updateRefs`、同時取得、休止後の所有権復元、接続断、遅延書き込みをテスト専用環境で検証する。
