@@ -2,8 +2,7 @@
 
 ## 次のセッションへの申し送り
 
-- [ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)で、Job所有権とブランチ排他を公開リレーへの専用WebSocket接続の存続として表す。所有権記録や履歴をGitまたはDurable Objectsストレージへ保存しない。
-- 同じ承認指紋の既存canonicalブランチは、過去の既知の書き込み証明を要求せず、現在の先端を未検証の作業途中成果として引き継ぐ。構造検査後にビルドとテストをやり直し、失敗は引き継ぎ先workerが修復する。
-- 接続断または予期しないブランチ先端変更ではworkerと外部操作を止め、現在状態と接続所有権を再調停する。取り込み先ブランチの前進は承認を失効させず、同じJobが最新状態を統合して再検証する。
-- 実装中はプルリクエストを作らない。実装と検証が完了し、HANDOFFを削除した後にレビュー可能なプルリクエストを作る。
-- 次は、接続所有権の認証・取得・切断・再接続の契約、Todo以後のLinear状態更新、Gitへの送信、プルリクエスト作成、その他の外部書き込みの結果不明時の再調停を定義する。現在値の二重読み取り、Todo→Triage差し戻し、原子的な`updateRefs`、同時取得、休止後の所有権復元、接続断、遅延書き込みをテスト専用環境で検証する。
+- [ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)で、device bearer tokenによる接続認証、heartbeatによるstale接続の失効、自動再接続、用途別の外部操作、結果不明時の機械的な収束、Linear状態反映、Git送信、Pull Request重複圧縮、checkpoint方針を確定した。
+- 結果不明の操作は盲目的に再送しないが、比較条件、現在値、操作ID、重複圧縮で同じ意図へ収束できる場合は`serve`が再読、再送、余分な成果の削除まで行う。意味的競合だけをAgentまたは人間へ戻す。
+- 外部操作はharnessへ汎用APIを公開せず、Workflow phaseと対象を固定した用途別操作にする。`serve`は操作をSQLiteへ保存して操作IDを返し、完了結果を後続eventで通知する。
+- 次は、承認済み設計をGitHub Issueへ実装単位で分解し、`packages/contracts`、所有権接続、外部操作outboxを通る最初のtracer bulletを選ぶ。message field、heartbeat時間値、資源上限は実装時の測定と検証専用環境での実動作確認から決める。

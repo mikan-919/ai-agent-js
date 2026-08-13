@@ -72,7 +72,7 @@ Linear identifierは変換せず、`^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A
    canonical ref:   beforeOid = zeroOid,         afterOid = expectedBaseOid
    ```
 
-   最初のno-op updateはbase refがそのOIDから変わっていないことだけを比較し、二番目はcanonical refが存在しないときだけbase OIDで作る。`updateRefs`は全updatesをatomicに処理し、一つでも拒否されればどちらのrefも変更されない。実装前contract testで、このGitHub App installation/tokenがno-op compareを受け付けることを確認しなければならない。未対応、権限不足、または結果不明なら、`createRef`、逐次更新、または別の弱いcreate APIへfallbackせずfail closedする。
+   最初のno-op updateはbase refがそのOIDから変わっていないことだけを比較し、二番目はcanonical refが存在しないときだけbase OIDで作る。`updateRefs`は全updatesをatomicに処理し、一つでも拒否されればどちらのrefも変更されない。実装前に検証専用repositoryで、このGitHub App installation/tokenがno-op compareを受け付けることを確認しなければならない。未対応、権限不足、または結果不明なら、`createRef`、逐次更新、または別の弱いcreate APIへfallbackせずfail closedする。
 7. initial createの`updateRefs`がtimeout、接続切断、または曖昧な応答なら成功として再送しない。target base refとcanonical refをread-backし、両方がexpected OIDでありcanonical ref名もexpected branch名に正確に一致することを確認してからだけ次へ進む。refが既に存在すると確定した場合は、下記のexisting same-fingerprint branch adoption flowだけへ進める。他の不一致、読取不能、または結果不明では`interrupted`へ移りworkerを開始しない。
 8. 初回作成または同じ承認指紋の既存ブランチ引き継ぎの後、`serve`はGitHubとLinearをもう一度再読する。state、attachmentの組、WHAT/HOW、承認指紋、取り込み先Git参照、ブランチ名、現在のJob/ブランチ取得IDと下記のWorkflow全体の置換隔離が一致するときだけworkerを開始する。初回作成では取り込み先OIDも一致しなければならない。既存ブランチでは取り込み先OIDの前進を許容し、worker開始後に最新の取り込み先を統合して再検証する。
 
@@ -128,7 +128,7 @@ running中またはresume前にstate、attachment tuple、またはapproval fing
 
 承認指紋を伴う外部操作要求は、[ADR 0002](./0002-job-ownership-and-execution-state.md)で定めるJob識別子、対象、Job取得ID、必要なブランチ取得ID、冪等性キーに加え、その承認指紋を含む。外部操作の直前に`serve`は現在state、attachmentの組、対象Issue ID、現在の承認指紋、canonicalブランチ/プルリクエストの組、現在の取得IDを再調停し、リレーの確認応答を受け、全てが要求と一致するときだけ書き込む。一致判定が不合格・不明なら書き込みを拒否して旧workerを停止し、上記の手順でTriageへ戻す。
 
-履歴IDと時刻を要求へ入れてはならない。提供元APIは接続所有権の確認を原子的な書き込み前提条件として受け付けないため、通信待ち時間超過、異常終了、所有権喪失、または書き込み結果不明では盲目的に再試行せず、ADR 0002に従い`interrupted`として操作ごとの再調停まで停止する。
+履歴IDと時刻を要求へ入れてはならない。提供元APIは接続所有権の確認を原子的な書き込み前提条件として受け付けないため、通信待ち時間超過、異常終了、所有権喪失、または書き込み結果不明では盲目的に再試行しない。操作固有の収束手順は[ADR 0005](./0005-connection-liveness-and-external-write-reconciliation.md)に従う。
 
 ## 帰結
 
@@ -146,4 +146,4 @@ running中またはresume前にstate、attachment tuple、またはapproval fing
 
 ## 実装前の検証
 
-automatic admissionを実装または有効化する前に、対象repositoryとLinear workspaceで、現在値の取得、二重read、fingerprint一致、Todo→Triage差し戻し、GitHub App installation tokenによるatomic `updateRefs`をcontract testする。native historyの完全性は合格条件に含めない。
+automatic admissionを実装または有効化する前に、検証専用repositoryとLinear workspaceで、現在値の取得、二重read、fingerprint一致、Todo→Triage差し戻し、GitHub App installation tokenによるatomic `updateRefs`の実動作を確認する。native historyの完全性は合格条件に含めない。

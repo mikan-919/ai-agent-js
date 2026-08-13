@@ -96,7 +96,7 @@ branch lockの引き継ぎまたは置換は、現在のJob所有権接続を持
 
 Job取得IDとブランチ取得IDは、リレーが現在接続と一致しない古いworkerの確認要求を拒否するための隔離値である。しかしGitHub、Linear、遠隔Gitの外部APIは、この確認を原子的な書き込み前提条件として強制しない。事前確認後に接続を失う、または既に送信した書き込みが引き継ぎ後に成功する競合を取得IDだけで防ぐことはできない。
 
-そのため、`serve`はpreflight直後に操作を送信し、operationごとに条件付き更新、providerが受け取るidempotency key、または観測可能な結果によるreconciliationを用いる。timeout、crash、所有権喪失により結果が不明なwriteは`interrupted`としてfail closedにし、盲目的に再試行しない。次のworkerはGitHub、Linear、Gitの現在状態を読んで既に反映済みかを判定し、操作固有の安全な続行方法が定義されるまで停止する。Todo→Triage差し戻しはADR 0003、その他のexternal operationは今後の個別protocolを正本とする。
+そのため、`serve`はpreflight直後に操作を送信し、operationごとに条件付き更新、providerが受け取るidempotency key、または観測可能な結果によるreconciliationを用いる。timeout、crash、所有権喪失により結果が不明なwriteは盲目的に再試行しない。[ADR 0005](./0005-connection-liveness-and-external-write-reconciliation.md)の操作固有の収束手順がある場合は、現在値の再読、比較条件付きの再送、重複圧縮を`serve`が自動実行する。Todo→Triage差し戻しはADR 0003、その他のexternal operationはADR 0005を正本とする。
 
 ## crashと重複通知の不変条件
 
@@ -107,6 +107,5 @@ Job取得IDとブランチ取得IDは、リレーが現在接続と一致しな�
 
 ## 保留事項
 
-- Job識別子のうち承認指紋以外の構成要素の符号化、提供元ごとの他の安定した入力キーの対応付け、接続認証、切断検知、再接続手順
-- Todo→Triage差し戻し以外のGitHub、Linear、Git操作に対するconditional update、idempotency key、結果不明時のreconciliation手順
-- concurrency、retry、checkpoint、timeout、resource limitの運用値
+- Job識別子のうち承認指紋以外の構成要素の符号化と、提供元ごとの他の安定した入力キーの対応付け
+- concurrency、retry、heartbeat、timeout、resource limitの運用値

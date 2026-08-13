@@ -27,7 +27,7 @@ native historyは診断と監査表示の補助情報として利用できるが
 ### GitHub Git ref
 
 - GitHub GraphQLの`updateRefs`は複数のref updateをatomicに実行する。`beforeOid`は現在OIDの比較条件であり、40桁のzero OIDはref不存在の比較に使える。[GitHub GraphQL Git reference](https://docs.github.com/en/graphql/reference/git)
-- ADR 0003のbranch sealは、target base refの`beforeOid = afterOid = expectedBaseOid`というno-op compareと、canonical refの`beforeOid = zeroOid`、`afterOid = expectedBaseOid`を同一の`updateRefs`へ渡す。このno-op compareをGitHubがApp installation/tokenで受け付けるかは、実装前にcontract testする必要がある。未対応または結果不明なら、逐次ref createや別APIへfallbackせずautomatic admissionをfail closedする。
+- ADR 0003のbranch sealは、target base refの`beforeOid = afterOid = expectedBaseOid`というno-op compareと、canonical refの`beforeOid = zeroOid`、`afterOid = expectedBaseOid`を同一の`updateRefs`へ渡す。このno-op compareをGitHubがApp installation/tokenで受け付けるかは、実装前に検証専用repositoryで実動作を確認する必要がある。未対応または結果不明なら、逐次ref createや別APIへfallbackせずautomatic admissionをfail closedする。
 
 ### Linear Issue
 
@@ -72,7 +72,7 @@ native historyは診断と監査表示の補助情報として利用できるが
 | GitHub App installation tokenでatomic `updateRefs` no-op compareを実行できる | GraphQL schemaに`UpdateRefsInput`が存在することは確認できたが、現在の`gh` credentialはuser OAuth tokenである。repository installation endpointもApp JWTを要求して401となり、対象installation tokenによるmutationは検証できなかった | GraphQL introspectionで`UpdateRefsInput`を取得し、current credentialでrepository installation endpointをreadする | 2026-08-13、GitHub CLI user OAuth credential | UNPROVEN |
 | branch create前後の再読で同じ証明を維持できる | 前提となるapproval episode、対応attachment、App installation tokenがないためbranch createを実行しなかった | 前4 criterionのstatusを確認する。いずれかがUNPROVENならmutationを開始しない | 同上 | UNPROVEN |
 
-この観測は完全履歴gateを採用できない根拠になったが、現在のADR 0003ではautomatic admissionを無効化する条件ではない。実装前には専用GitHub/Linear Issueとattachmentを使って現在値の二重readを検証し、対象repositoryのGitHub App installation tokenでatomic `updateRefs`をcontract testする。検証用branchは専用namespaceに限定し、結果不明時に再送しない。
+この観測は完全履歴gateを採用できない根拠になったが、現在のADR 0003ではautomatic admissionを無効化する条件ではない。実装前には専用GitHub/Linear Issueとattachmentを使って現在値の二重readを検証し、対象repositoryのGitHub App installation tokenでatomic `updateRefs`の実動作を確認する。検証用branchは専用namespaceに限定し、結果不明時に再送しない。
 
 ## 設計への帰結
 

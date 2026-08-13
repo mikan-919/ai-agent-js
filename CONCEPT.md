@@ -39,7 +39,7 @@ WHAT、HOW、承認状態、Workflowレベルでチームに見える実行状�
 
 AgentはTriage上でHOWを提案・修正できるが、TriageからTodoへ移せない。Agentはbranch、commit、PRを提案できるが、PRをmergeできない。
 
-承認後の機械的な状態反映として、実行ハーネスはTodoからIn Progress、PR merge後のDone、およびWHAT/HOW変更時のTriageへの差し戻しを行ってよい。
+承認後の機械的な状態反映として、実行ハーネスはTodoからIn Progress、レビュー可能なPull Request作成後のレビュー用状態、Pull Request merge後のDone、およびWHAT/HOW変更時のTriageへの差し戻しを行ってよい。Linear teamに一意なレビュー用状態がなければ、Pull Request mergeまでIn Progressを維持する。
 
 v1のworktree backendは同じOS userでcommandを実行するため、host filesystem、process、credential storeからの強い隔離を保証しない。悪意あるrepository codeからsame-userのsecretを保護するsecurity sandboxではなく、製品がcredentialを明示的に委譲せず、外部操作interfaceをJobと対象へ限定する境界である。自立Jobはrepositoryのtarget branchが明示的に許可した場合だけ実行する。
 
@@ -57,7 +57,9 @@ GitHub・Linear Webhookはローカル`serve`を早く起こすための通知�
 
 ### 5. 分散実行では所有権を外部操作の直前に確認する
 
-JobはJob単位の接続所有権を取得した一つの`serve`だけが実行する。コードを変更するJobは、さらにcanonicalブランチ単位の接続排他を取得する。接続の切断、確認不能、または所有権喪失ではworkerと新しい外部操作を停止する。Gitへの送信、プルリクエスト操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は公開リレーとの接続を通じて現在の所有権を確認し、ブランチまたはプルリクエストを変更する場合は接続排他も確認する。外部サービスへの操作はこの確認と原子的にはできないため、所有権を失った古い実行は停止し、結果不明の操作を自動再実行しない。
+JobはJob単位の接続所有権を取得した一つの`serve`だけが実行する。コードを変更するJobは、さらにcanonicalブランチ単位の接続排他を取得する。接続の切断、確認不能、または所有権喪失ではworkerと新しい外部操作を停止する。Gitへの送信、プルリクエスト操作、Issueコメント、Linear更新などの外部操作の直前に、`serve`は公開リレーとの接続を通じて現在の所有権を確認し、ブランチまたはプルリクエストを変更する場合は接続排他も確認する。
+
+外部サービスへの操作は所有権確認と原子的にはできないため、payloadだけを盲目的に再送しない。ただし、現在値の比較、安定した操作ID、提供元の比較条件、または重複圧縮によって同じ意図へ収束できる操作は、`serve`が再読、再送、余分な成果の削除まで自動実行する。人間へ戻すのは、現在状態から意味的な意図を一意に決められない場合だけとする。
 
 ## プロジェクト文脈
 
@@ -81,6 +83,6 @@ Agentは必要に応じて、自分の`serve`と、relayへ接続中の同一rep
 
 ## checkpointと引き継ぎ
 
-Agentは安定した区切りでcheckpoint commitをpushする。checkpointには、その地点から別の実行環境が再開するためのHANDOFF.mdを含める。HANDOFF.mdは追記ログではなく、現在地、確定した判断、未解決点、次の一手だけを持つ。
+Agentは別のworkerが再開できる意味的な区切り、計画停止前、所有権解放前にcheckpoint commitをpushする。検証済みの区切りを優先するが、計画停止時に検証を通せない場合は、失敗中の検証と未完了箇所を明記したWIP checkpointを残す。checkpointには、その地点から別の実行環境が再開するためのHANDOFF.mdを含める。HANDOFF.mdは追記ログではなく、現在地、確定した判断、未解決点、次の一手だけを持つ。
 
 実装中はプルリクエストを作らない。実装と検証が完了した後、HANDOFF.mdを削除してからレビュー可能なプルリクエストを作り、最終差分には含めない。途中のコミット履歴に残ることは許容する。

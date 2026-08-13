@@ -50,7 +50,7 @@ packages/identity
 - `serve`がJobごとの`harness`をchild processとして起動する。stdin/stdoutのNDJSONをIPCとし、stdinへmodel要求、中止、tool結果、stdoutへstreamとlifecycle event、stderrへ人間向けlogを流す。
 - IPC messageは`requestId`と`type`を持つ。切断したturnは`interrupted`として保存し、v1ではprocess再接続protocolを設けない。
 - 通常commandとsystem Gitはshell文字列を介さず、引数配列を渡す`Bun.spawn`で実行する。対話操作だけ`Bun.Terminal`を使う。
-- GitHubとLinearのremote操作は`serve`、status、diff、commit、worktree操作はharness側の薄いsystem Git adapterが担当する。tokenを引数、remote URL、環境変数としてharnessへ渡さない。
+- GitHubとLinearのremote操作は`serve`、status、diff、commit、worktree操作はharness側の薄いsystem Git adapterが担当する。canonicalブランチへの送信はtrusted `serve`が明示した送信前OIDを`--force-with-lease`へ渡してsystem Gitで行う。tokenは一回限りのcredential helperから渡し、引数、remote URL、環境変数、worktree、harnessへ置かない。
 
 ### Web UI
 
@@ -76,7 +76,7 @@ packages/identity
 - GitHub App秘密鍵を保持し、repositoryと権限を絞った短命installation tokenを発行する。
 - Linear OAuth＋PKCEのcallbackをローカル`serve`へ中継する。
 - 接続中`serve`への状態変更通知とtranscript検索要求を中継する。
-- Job単位の所有権と、コード変更Jobのcanonicalブランチ単位の排他を、専用WebSocket接続の存続として調停する。接続中の取得IDと対象キーはHibernation APIの接続付随情報から再構成し、Durable Objectsストレージへ所有権記録や履歴を保存しない。
+- Job単位の所有権と、コード変更Jobのcanonicalブランチ単位の排他を、有効な接続付随情報を持つ専用WebSocketとして調停する。取得IDと対象キーはHibernation APIの接続付随情報から再構成し、Durable Objectsストレージへ所有権記録や履歴を保存しない。application-level heartbeatの自動応答時刻をAlarmと新規取得時に監査し、stale接続は接続付随情報を失効させてからcloseする。
 - Job DB、scheduler、コード、transcript、Agent sessionは保存しない。
 - 初期は独自アカウントを持たず、GitHub App installationを利用単位とする。
 - 永続化するのはdevice tokenのhashと表示用metadata、repository認可、routingに必要なIDだけとする。D1、KV、R2はv1で使わない。
@@ -87,7 +87,7 @@ packages/identity
 - 初回にブラウザで人間が登録・承認する。
 - GitHub短命tokenとLinear OAuth tokenをOSのcredential storeへ保存する。
 - Web UIをlocalhostで提供する。
-- harnessの環境変数、引数、tool入力へcredentialを渡さず、外部操作を専用toolとして提供する。
+- harnessの環境変数、引数、tool入力へcredentialを渡さず、Workflow phaseと対象を固定した用途別の外部操作だけを提供する。要求はSQLiteへ永続化した操作IDを即時返し、完了、拒否、意味的競合を後続eventで通知する。
 - webhookを逃した場合はGitHub・Linearの現在状態を読み直す。
 - GitHub APIにはOctokit、Linear APIには`@linear/sdk`を使う。relay側のLinear OAuth交換は`fetch`、webhook署名検証はraw bodyとWeb Cryptoで実装する。
 - provider、GitHub、Linearのcredentialは`Bun.secrets`へ保存する。Linux/WSL2のSecret Serviceが利用できない場合はfail closedとし、平文file、SQLite、環境変数へfallbackしない。
@@ -103,13 +103,14 @@ packages/identity
 ### 外部phaseとJob execution
 
 - GitHub、Linear、Pull Requestのcurrent stateからWorkflow phaseを導出し、local Job stateをその複製にしない。
-- Job実行状態と外部操作前の所有権確認は[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、接続所有権とブランチ引き継ぎは[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)を正本とする。
+- Job実行状態と外部操作前の所有権確認は[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、接続所有権とブランチ引き継ぎは[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)、接続認証、生存確認、再接続、外部書き込みの収束は[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)を正本とする。
 - LinearのTriageからTodoへの承認を実装Job候補へ導き、所有権取得の前後で二度一致した現在のWHAT/HOWからapproval fingerprintを計算し、canonical branchをfingerprint由来の名前として扱う方針は[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)を正本とする。本文やhistory snapshotを複製せず、native historyの完全性は実行条件にしない。
-- state、attachment、WHAT/HOW、承認指紋、またはブランチ封印中の取り込み先不一致を観測すれば旧Jobを停止する。承認対象の不一致では、現在の所有権と対象Workflowを確認した`serve`がTodoをTriageへ戻す。fresh Triage→Todoで承認指紋が同じなら、先行workerと接続所有権が消えた後、既存ブランチの現在の先端を未検証の作業途中成果として同じ論理Jobが引き継ぐ。過去の既知の書き込み証明は要求せず、構造検査後にビルドとテストをやり直し、失敗は新workerが修復する。取り込み先ブランチの前進は承認を失効させず、同じJobが最新状態を統合して再検証する。承認指紋が変わるWHAT/HOW改訂なら新しいJobとcanonicalブランチを作る。プルリクエスト取り込み後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。
+- state、attachment、WHAT/HOW、承認指紋、またはブランチ封印中の取り込み先不一致を観測すれば旧Jobを停止する。承認対象の不一致では、現在の所有権と対象Workflowを確認した`serve`がTodoをTriageへ戻す。fresh Triage→Todoで承認指紋が同じなら、先行workerと接続所有権が消えた後、既存ブランチの現在の先端を未検証の作業途中成果として同じ論理Jobが引き継ぐ。過去の既知の書き込み証明は要求せず、構造検査後にビルドとテストをやり直し、失敗は新workerが修復する。取り込み先ブランチの前進は承認を失効させず、同じJobが最新状態を統合して再検証する。承認指紋が変わるWHAT/HOW改訂なら新しいJobとcanonicalブランチを作る。
+- worker起動直後にLinearをIn Progressへ移す。レビュー可能なPull Requestを作成した後、teamに一意なレビュー用状態があれば移し、なければIn Progressを維持する。Pull Request取り込み後はLinearをDoneへ更新し、復元可能でcleanなsandboxを削除する。結果不明の外部操作は、操作固有の現在値、比較条件、操作ID、重複圧縮によって`serve`が自動収束させる。
 
 ### checkpointと履歴
 
-- Agentは安定点でcheckpoint commitとHANDOFF.mdをpushする。
+- Agentは検証済みの意味的な区切り、計画停止前、所有権解放前にcheckpoint commitとHANDOFF.mdをpushする。検証済みの区切りを作れない計画停止では、失敗中の検証をHANDOFFへ明記したWIP checkpointをpushする。
 - 実装中はプルリクエストを作らない。実装と検証が完了し、HANDOFF.mdを削除した後にレビュー可能なプルリクエストを作る。
 - Gitにはソースコード、通常の作業ブランチ、チェックポイントだけを置き、所有権や操作履歴の専用Git参照、タグ、ブランチ、コミットメタデータを置かない。
 - transcriptはsandboxと分離してローカルに保存し、自動削除しない。
@@ -151,6 +152,7 @@ packages/identity
 - 試用は`bunx @mikan-919/oriel serve`、再現可能な実行はexact version付きの`bunx @mikan-919/oriel@<version> serve`とする。Node runtime、postinstall、global install、自動updateはv1で要求しない。
 - local packageのquality gateはESLint 9 flat config、typescript-eslint、`eslint-plugin-react-hooks`、`@tanstack/eslint-plugin-router`、Prettier、`prettier-plugin-tailwindcss`、`tsc --noEmit`とする。
 - `serve`、`harness`、contract、SQLiteは`bun:test`、relayとDurable ObjectsはVitestと`@cloudflare/vitest-pool-workers`、browser E2EはPlaywrightのChromiumで検証する。React Testing Libraryはcomponent境界で必要性が確認された時に追加し、coverage率は根拠なく設定しない。
+- 手元の自動試験と、本番から分離した検証専用のCloudflare環境、GitHub repository、Linear issueを使う実動作確認を分ける。外部サービス固有の休止、権限、比較更新、resource IDは初回実装、固定依存版の更新、release前に明示的に確認する。
 - GitHub Actionsで固定Bun版とfrozen lockfileを使い、lint、format check、typecheck、test、buildを行う。保護されたrelease tagではrelayをWranglerでdeployしてsmoke testした後、npm OIDC trusted publishingでCLIを公開する。
 - npm publishに必要な公式npm CLIだけはrelease jobのNode上で動かす。製品runtimeはBun-onlyを維持し、Changesetsや独自release automationを追加しない。
 
@@ -162,18 +164,16 @@ packages/identity
 
 ## 実装前に決めること
 
-- 接続所有権の認証、取得手順、接続断検知、再接続手順
-- チェックポイント頻度と、実装完了からプルリクエスト作成までを調整するAgent指示
-- relay、serve、harness、worktree間のtool APIの詳細
-- Todo以後のLinear状態更新と、Gitへの送信、プルリクエスト作成、その他の外部書き込みごとの結果不明時の再調停手順
-- 最小構成で端から端まで成立させる最初のtracer bullet
+- 承認済みの用途別外部操作を`packages/contracts`へ落とす具体的なmessage fieldとencoding
+- heartbeatと再試行の時間値、および資源上限を、固定版runtimeの測定と検証専用環境の実動作から決める
+- 決定事項をGitHub Issueへ分解し、最小構成で端から端まで成立させる最初のtracer bulletを承認する
 
 ## 設計を固める順序
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
 2. Jobの状態遷移、接続所有権、ブランチ排他、同じ承認指紋のブランチ引き継ぎの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）。
-3. GitHub・Linear・リレー・`serve`間のイベントと再調停を時系列で定義する。現在値の二重確認、承認指紋、ブランチ封印、観測した不一致でTriageへ戻す手順、既存ブランチ引き継ぎは決定済み（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）だが、対話、プルリクエスト、その他の外部書き込みの個別手順は未解決。
-4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。
-5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。
+3. GitHub・Linear・リレー・`serve`間のイベントと再調停を時系列で定義する。完了（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)、[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
+4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。device登録の詳細を除き、所有権接続と外部操作の境界は完了（[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
+5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。checkpointとworker引き継ぎは完了。transcript検索の詳細は実装項目へ分解する。
 6. capability schemaと実行環境選択を定義する。
 7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。
