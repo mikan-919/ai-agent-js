@@ -142,6 +142,8 @@ packages/identity
 
 - device登録にはrepository scopeのCSPRNG bearer tokenを使う。relayはhashと表示用metadataだけを保存し、`serve`はtokenを`Bun.secrets`へ保存する。
 - 初回登録はlocalhost UIからGitHub login、App installationとrepository選択を行い、relayが返す一回限りの短命codeを`serve`がdevice tokenへ交換する。tokenをURLへ載せず、copy-and-pasteも要求しない。
+- 短命codeはPKCE S256とstateで登録を開始した`serve`へ結び付ける。`serve`がverifier、challenge、stateを作り、relayは交換時にverifierを要求する。localhostへ戻るURLへはcodeとstateだけを載せ、交換は原子的に一度だけ成功させる。失敗した交換もcodeを消費する。
+- deviceを失効できるのは、そのrepositoryを含むinstallationを現在管理できるGitHub user、および自分自身を失効させるdeviceだけとする。repositoryのwrite権限や登録者本人であることだけでは認めない。`serve`はtokenの保存に失敗した場合、発行済deviceを失効させて登録を完了しない。
 - tokenはdevice単位で失効できるようにする。v1ではrotation protocolを設けず、削除後の再登録で交換する。
 - `serve`は`127.0.0.1`のOS割当portだけで待ち受ける。起動ごとのsession cookieを`HttpOnly; SameSite=Strict; Path=/`で設定し、永続化しない。
 - `Host`と`Origin`を完全一致で検証し、状態変更APIにはCSRF token付きcustom headerを要求する。GETは状態を変更せず、CORSとiframe埋め込みを許可しない。WebSocketにも同じOrigin、session、CSRF検査を適用する。
@@ -173,7 +175,7 @@ packages/identity
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
 2. Jobの状態遷移、接続所有権、ブランチ排他、同じ承認指紋のブランチ引き継ぎの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）。
 3. GitHub・Linear・リレー・`serve`間のイベントと再調停を時系列で定義する。完了（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)、[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
-4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。device登録の詳細を除き、所有権接続と外部操作の境界は完了（[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
+4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。完了（device登録は上記「device登録とlocalhost境界」、所有権接続と外部操作の境界は[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
 5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。checkpointとworker引き継ぎは完了。transcript検索の詳細は実装項目へ分解する。
 6. capability schemaと実行環境選択を定義する。
 7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。

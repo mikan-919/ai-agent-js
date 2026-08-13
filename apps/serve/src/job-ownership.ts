@@ -13,6 +13,8 @@ export interface ConnectionOwnershipRelay {
   acquireJobOwnership(input: {
     jobId: string;
     deviceId: string;
+    /** リレー側が接続を失効させた後に閉じる合図。 */
+    onClosed?: () => void;
   }): JobOwnershipAcquisition | Promise<JobOwnershipAcquisition>;
   heartbeat(jobLeaseId: string): boolean | Promise<boolean>;
   confirmJobOwnership(input: {
@@ -30,6 +32,7 @@ interface JobOwnershipConnectionRecord {
   jobId: string;
   deviceId: string;
   lastHeartbeatAt: number;
+  onClosed?: () => void;
 }
 
 export interface ConnectionOwnershipArbiterOptions {
@@ -61,7 +64,9 @@ export function createConnectionOwnershipArbiter({
         connection.lastHeartbeatAt < deadline ||
         revokedDevices.has(connection.deviceId)
       ) {
+        // 接続付随情報を失効させてから閉じる。閉じた後の確認は取得ID不一致になる。
         connections.delete(jobLeaseId);
+        connection.onClosed?.();
       }
     }
   }
@@ -72,7 +77,7 @@ export function createConnectionOwnershipArbiter({
   }
 
   return {
-    acquireJobOwnership({ jobId, deviceId }) {
+    acquireJobOwnership({ jobId, deviceId, onClosed }) {
       expireStaleConnections();
 
       if (revokedDevices.has(deviceId)) {
@@ -90,6 +95,7 @@ export function createConnectionOwnershipArbiter({
         jobId,
         deviceId,
         lastHeartbeatAt: now(),
+        onClosed,
       });
 
       return { status: "acquired", jobLeaseId };
