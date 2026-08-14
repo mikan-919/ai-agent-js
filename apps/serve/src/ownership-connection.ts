@@ -1,4 +1,6 @@
 import {
+  ownershipHeartbeatRequest,
+  ownershipHeartbeatResponse,
   parseOwnershipServerMessage,
   type OwnershipClientMessage,
 } from "@mikan-919/oriel-contracts";
@@ -10,9 +12,13 @@ export interface RelayOwnershipConnectionOptions {
   /** device bearer tokenはWebSocket upgradeのAuthorization headerだけへ載せる。 */
   deviceToken: string;
   jobId: string;
-  /** client側停止期限。server側失効期限より短い値を運用で与える。 */
-  confirmTimeoutMs: number;
+  /**
+   * client側停止期限。運用値は測定から決めるため既定値を持たず、
+   * relayが伝えるserver側失効期限より短い場合だけ所有権を持つ。
+   */
+  heartbeatStopMs: number;
   openWebSocket?: (url: string, deviceToken: string) => WebSocket;
+  now?: () => number;
 }
 
 function defaultOpenWebSocket(url: string, deviceToken: string): WebSocket {
@@ -39,10 +45,13 @@ export function createRelayOwnershipConnection({
   relayOrigin,
   deviceToken,
   jobId,
-  confirmTimeoutMs,
+  heartbeatStopMs,
   openWebSocket = defaultOpenWebSocket,
+  now = Date.now,
 }: RelayOwnershipConnectionOptions): RelayOwnershipConnection {
   const stopped = new AbortController();
+  const heartbeats = new Set<ReturnType<typeof setInterval>>();
+  let lastHeartbeatAt = 0;
   const sockets: WebSocket[] = [];
   let jobSocket: WebSocket | null = null;
   let jobLeaseId: string | null = null;
@@ -70,6 +79,32 @@ export function createRelayOwnershipConnection({
 
     sockets.length = 0;
     jobSocket = null;
+
+    for (const heartbeat of heartbeats) {
+      clearInterval(heartbeat);
+    }
+
+    heartbeats.clear();
+  }
+
+  /**
+   * application-level heartbeat。応答を停止期限内に受け取れない場合は、
+   * relayの切断通知を待たずworkerと新しい外部操作を止める。
+   */
+  function startHeartbeat(socket: WebSocket, intervalMs: number) {
+    lastHeartbeatAt = now();
+
+    const heartbeat = setInterval(() => {
+      if (now() - lastHeartbeatAt > heartbeatStopMs) {
+        stop();
+        return;
+      }
+
+      socket.send(ownershipHeartbeatRequest);
+    }, intervalMs);
+
+    heartbeat.unref?.();
+    heartbeats.add(heartbeat);
   }
 
   function open(
@@ -104,6 +139,11 @@ export function createRelayOwnershipConnection({
       socket.addEventListener("message", (event) => {
         let message;
 
+        if (String(event.data) === ownershipHeartbeatResponse) {
+          lastHeartbeatAt = now();
+          return;
+        }
+
         try {
           message = parseOwnershipServerMessage(
             JSON.parse(String(event.data)) as unknown,
@@ -113,7 +153,15 @@ export function createRelayOwnershipConnection({
         }
 
         if (message.type === "ownership.acquired") {
+          // client側停止期限がserver側失効期限以上なら、所有権を持たない。
+          if (heartbeatStopMs >= message.heartbeatExpiryMs) {
+            settle(null);
+            stop();
+            return;
+          }
+
           sockets.push(socket);
+          startHeartbeat(socket, message.heartbeatIntervalMs);
           settle({ socket, leaseId: message.leaseId });
           return;
         }
@@ -127,7 +175,10 @@ export function createRelayOwnershipConnection({
         // 失効通知と拒否では所有権を持たない。
         settle(null);
 
-        if (message.type === "ownership.revoked") {
+        if (
+          message.type === "ownership.revoked" ||
+          message.type === "ownership.expired"
+        ) {
           stop();
         }
       });
@@ -198,7 +249,7 @@ export function createRelayOwnershipConnection({
             stop();
             resolve(false);
           }
-        }, confirmTimeoutMs).unref?.();
+        }, heartbeatStopMs).unref?.();
       });
 
       send(socket, {

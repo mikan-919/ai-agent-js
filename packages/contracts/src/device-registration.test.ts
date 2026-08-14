@@ -81,12 +81,17 @@ test("management exchanges carry the finished result instead of a reusable sessi
 });
 
 test("ownership messages only carry relay issued acquisition IDs", () => {
-  expect(
-    parseOwnershipServerMessage({
-      type: "ownership.acquired",
-      leaseId: "lease-1",
-    }),
-  ).toEqual({ type: "ownership.acquired", leaseId: "lease-1" });
+  const acquired = {
+    type: "ownership.acquired" as const,
+    leaseId: "lease-1",
+    heartbeatIntervalMs: 1_000,
+    heartbeatExpiryMs: 5_000,
+  };
+
+  expect(parseOwnershipServerMessage(acquired)).toEqual(acquired);
+  expect(parseOwnershipServerMessage({ type: "ownership.expired" })).toEqual({
+    type: "ownership.expired",
+  });
   expect(parseOwnershipServerMessage({ type: "ownership.revoked" })).toEqual({
     type: "ownership.revoked",
   });

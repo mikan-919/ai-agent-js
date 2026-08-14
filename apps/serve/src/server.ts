@@ -26,6 +26,12 @@ const csrfHeaderName = `x-${identity.codeName}-csrf`;
 export interface ServeHttpServerOptions {
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
+  /** 明示的に起動するIssue対話。relay所有権を取れた場合だけworkerが動く。 */
+  startIssueConversation?: (input: {
+    jobId: string;
+    issueNumber: number;
+    canonicalBranch?: string;
+  }) => Promise<{ status: string; reason?: string }>;
 }
 
 /** 起動ごとのsession値とCSRF token。永続化しない。 */
@@ -152,6 +158,7 @@ function shellHtml(csrfToken: string): string {
 
 export function startServeHttpServer({
   createDeviceRegistration,
+  startIssueConversation,
 }: ServeHttpServerOptions = {}) {
   const { sessionId, csrfToken } = newSessionSecrets();
   let expectedAuthority = "";
@@ -268,6 +275,36 @@ export function startServeHttpServer({
     callbackUrl.searchParams.set("state", body.state);
 
     return context.json(await deviceRegistration!.complete(callbackUrl));
+  });
+
+  app.post("/api/issue-conversations", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      jobId?: unknown;
+      issueNumber?: unknown;
+      canonicalBranch?: unknown;
+    } | null;
+    const issueNumber = Number(body?.issueNumber);
+
+    if (
+      startIssueConversation === undefined ||
+      typeof body?.jobId !== "string" ||
+      body.jobId === "" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0
+    ) {
+      return context.text("Bad Request", 400);
+    }
+
+    const started = await startIssueConversation({
+      jobId: body.jobId,
+      issueNumber,
+      canonicalBranch:
+        typeof body.canonicalBranch === "string"
+          ? body.canonicalBranch
+          : undefined,
+    });
+
+    return context.json(started, started.status === "started" ? 200 : 409);
   });
 
   app.get("/api/device-cancellations", (context) =>

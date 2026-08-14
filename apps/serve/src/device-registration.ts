@@ -18,16 +18,27 @@ import type { RelayDeviceClient } from "./relay-client";
 /** device tokenの保存先。Secret Serviceを使えない場合はfail closedにする。 */
 export interface DeviceTokenStore {
   set(input: { repositoryId: number; deviceToken: string }): Promise<void>;
+  get(repositoryId: number): Promise<string | null>;
 }
 
 export function bunSecretsDeviceTokenStore(): DeviceTokenStore {
+  const name = (repositoryId: number) => `device-token:${repositoryId}`;
+
   return {
     async set({ repositoryId, deviceToken }) {
       await Bun.secrets.set({
         service: identity.codeName,
-        name: `device-token:${repositoryId}`,
+        name: name(repositoryId),
         value: deviceToken,
       });
+    },
+    async get(repositoryId) {
+      return (
+        (await Bun.secrets.get({
+          service: identity.codeName,
+          name: name(repositoryId),
+        })) ?? null
+      );
     },
   };
 }

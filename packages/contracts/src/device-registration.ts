@@ -127,10 +127,22 @@ export type DeviceCancellationRequest = v.InferOutput<
   typeof deviceCancellationRequestSchema
 >;
 
-/** 所有権接続の受理と失効。取得IDはrelayだけが発行する。 */
+/**
+ * 所有権接続のapplication-level heartbeat。Hibernationの自動応答で返すため、
+ * JSONではなく固定文字列とする。
+ */
+export const ownershipHeartbeatRequest = "ownership.ping";
+export const ownershipHeartbeatResponse = "ownership.pong";
+
+/**
+ * 所有権接続の受理と失効。取得IDはrelayだけが発行する。
+ * server側の失効期限を伝え、`serve`が自分の停止期限を短く保てるようにする。
+ */
 export const ownershipAcquiredEventSchema = v.strictObject({
   type: v.literal("ownership.acquired"),
   leaseId: nonEmptyString,
+  heartbeatIntervalMs: positiveInteger,
+  heartbeatExpiryMs: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
 
 export const ownershipRejectedEventSchema = v.strictObject({
@@ -141,6 +153,11 @@ export const ownershipRejectedEventSchema = v.strictObject({
     "ownership_not_current",
     "invalid_request",
   ]),
+});
+
+/** 生存確認が期限内に成立しなかった接続の失効。 */
+export const ownershipExpiredEventSchema = v.strictObject({
+  type: v.literal("ownership.expired"),
 });
 
 export const ownershipRevokedEventSchema = v.strictObject({
@@ -163,6 +180,7 @@ export const ownershipServerMessageSchema = v.variant("type", [
   ownershipAcquiredEventSchema,
   ownershipRejectedEventSchema,
   ownershipRevokedEventSchema,
+  ownershipExpiredEventSchema,
   ownershipConfirmedEventSchema,
 ]);
 

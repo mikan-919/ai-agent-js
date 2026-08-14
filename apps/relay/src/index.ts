@@ -16,6 +16,9 @@ export interface RelayEnv {
   /** 運用値はdeploy設定から与える。欠けている場合はfail closedにする。 */
   DEVICE_CODE_EXPIRY_MS: string;
   DEVICE_CANCELLATION_EXPIRY_MS: string;
+  OWNERSHIP_HEARTBEAT_INTERVAL_MS: string;
+  OWNERSHIP_HEARTBEAT_EXPIRY_MS: string;
+  OWNERSHIP_AUDIT_INTERVAL_MS: string;
 }
 
 function requiredMilliseconds(value: string, name: string): number {
@@ -46,6 +49,18 @@ export default {
       cancellationExpiryMs: requiredMilliseconds(
         env.DEVICE_CANCELLATION_EXPIRY_MS,
         "DEVICE_CANCELLATION_EXPIRY_MS",
+      ),
+      ownershipHeartbeatIntervalMs: requiredMilliseconds(
+        env.OWNERSHIP_HEARTBEAT_INTERVAL_MS,
+        "OWNERSHIP_HEARTBEAT_INTERVAL_MS",
+      ),
+      ownershipHeartbeatExpiryMs: requiredMilliseconds(
+        env.OWNERSHIP_HEARTBEAT_EXPIRY_MS,
+        "OWNERSHIP_HEARTBEAT_EXPIRY_MS",
+      ),
+      ownershipAuditIntervalMs: requiredMilliseconds(
+        env.OWNERSHIP_AUDIT_INTERVAL_MS,
+        "OWNERSHIP_AUDIT_INTERVAL_MS",
       ),
     });
 

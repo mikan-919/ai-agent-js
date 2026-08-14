@@ -1,5 +1,14 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import {
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+
+import {
+  ownershipHeartbeatRequest,
+  ownershipHeartbeatResponse,
+} from "@mikan-919/oriel-contracts";
 
 import { sha256Base64Url, sha256Hex } from "./crypto";
 import type { DeviceRegistryObject } from "./device-registry-object";
@@ -20,6 +29,8 @@ const signingKey = "relay-signing-key";
 
 let currentTime = 1_700_000_000_000;
 let administrable = true;
+// 生存確認の運用値はtestが与える。既定値は持たない。
+let heartbeatExpiryMs = 60_000;
 
 const github: RelayGitHubClient = {
   authorizeUrl: ({ state, redirectUri: callback }) =>
@@ -48,6 +59,9 @@ function relay(overrides: Partial<RelayGitHubClient> = {}) {
     relayOrigin: "https://relay.test",
     codeExpiryMs: 60_000,
     cancellationExpiryMs: 120_000,
+    ownershipHeartbeatIntervalMs: 1_000,
+    ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
+    ownershipAuditIntervalMs: 5_000,
     now: () => currentTime,
   });
 }
@@ -171,11 +185,19 @@ function openOwnership(
   );
 }
 
-/** 接続直後にrelayが送る受理か拒否を読む。 */
-function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
+/** 接続直後にrelayが送る受理か拒否、またはheartbeatの応答を読む。 */
+function nextMessage(
+  socket: WebSocket,
+): Promise<Record<string, unknown> | string> {
   return new Promise((resolve, reject) => {
     socket.addEventListener("message", (event) => {
-      resolve(JSON.parse(String(event.data)) as Record<string, unknown>);
+      const data = String(event.data);
+
+      resolve(
+        data.startsWith("{")
+          ? (JSON.parse(data) as Record<string, unknown>)
+          : data,
+      );
     });
     socket.addEventListener("close", () => {
       reject(new Error("closed before a message arrived"));
@@ -183,9 +205,14 @@ function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
+function leaseIdOf(message: Record<string, unknown> | string): string {
+  return typeof message === "string" ? "" : String(message.leaseId);
+}
+
 beforeEach(() => {
   currentTime = 1_700_000_000_000;
   administrable = true;
+  heartbeatExpiryMs = 60_000;
   nextRepositoryId += 1;
   repository = { id: nextRepositoryId, owner: "mikan-919", name: "oriel" };
 });
@@ -448,7 +475,11 @@ describe("ownership connections on the relay", () => {
     const acquired = await nextMessage(jobSocket);
 
     expect(job.status).toBe(101);
-    expect(acquired).toMatchObject({ type: "ownership.acquired" });
+    expect(acquired).toMatchObject({
+      type: "ownership.acquired",
+      heartbeatIntervalMs: 1_000,
+      heartbeatExpiryMs: 60_000,
+    });
 
     const second = await openOwnership(app, {
       deviceToken: registered.deviceToken,
@@ -467,7 +498,7 @@ describe("ownership connections on the relay", () => {
       deviceToken: registered.deviceToken,
       kind: "branch",
       key: `${repository.id}/oriel-job-1`,
-      parentLeaseId: String(acquired.leaseId),
+      parentLeaseId: leaseIdOf(acquired),
     });
 
     branch.webSocket!.accept();
@@ -529,7 +560,7 @@ describe("ownership connections on the relay", () => {
       deviceToken: registered.deviceToken,
       kind: "branch",
       key: `${repository.id}/oriel-job-1`,
-      parentLeaseId: String(acquired.leaseId),
+      parentLeaseId: leaseIdOf(acquired),
     });
 
     branch.webSocket!.accept();
@@ -568,5 +599,87 @@ describe("ownership connections on the relay", () => {
         })
       ).status,
     ).toBe(401);
+  });
+});
+
+describe("ownership liveness on the relay", () => {
+  it("answers the application heartbeat without leaving hibernation", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const job = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+    const socket = job.webSocket!;
+
+    socket.accept();
+    await nextMessage(socket);
+
+    const pong = nextMessage(socket);
+
+    socket.send(ownershipHeartbeatRequest);
+
+    // 自動応答なのでwebSocketMessageは呼ばれない。
+    expect(await pong).toBe(ownershipHeartbeatResponse);
+
+    const audited = await runInDurableObject(
+      registryStub(),
+      (_instance: DeviceRegistryObject, state: DurableObjectState) =>
+        state
+          .getWebSockets()
+          .map((ws) => state.getWebSocketAutoResponseTimestamp(ws) !== null),
+    );
+
+    expect(audited).toContain(true);
+  });
+
+  it("invalidates and closes a connection whose heartbeat expired, on the alarm and on a new acquisition", async () => {
+    heartbeatExpiryMs = 0;
+
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const stale = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+    const staleSocket = stale.webSocket!;
+
+    staleSocket.accept();
+    await nextMessage(staleSocket);
+
+    const expired = new Promise<{ code: number; message: unknown }>(
+      (resolve) => {
+        let message: unknown;
+
+        staleSocket.addEventListener("message", (event) => {
+          message = JSON.parse(String(event.data));
+        });
+        staleSocket.addEventListener("close", (event) => {
+          resolve({ code: event.code, message });
+        });
+      },
+    );
+
+    // Alarmで最終heartbeatを監査し、期限を過ぎた接続を失効させてから閉じる。
+    expect(await runDurableObjectAlarm(registryStub())).toBe(true);
+    expect(await expired).toEqual({
+      code: 4004,
+      message: { type: "ownership.expired" },
+    });
+
+    // 失効済み接続は所有権として数えないため、同じキーを取り直せる。
+    const replacement = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+
+    replacement.webSocket!.accept();
+
+    expect(await nextMessage(replacement.webSocket!)).toMatchObject({
+      type: "ownership.acquired",
+    });
   });
 });

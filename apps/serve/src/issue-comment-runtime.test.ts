@@ -85,7 +85,7 @@ test("revoking the device stops the worker, refuses new external operations, and
     relayOrigin: relay.origin,
     deviceToken: "7.11.device-token",
     jobId: "issue-conversation-1",
-    confirmTimeoutMs: 1_000,
+    heartbeatStopMs: 1_000,
   });
   const jobLeaseId = await ownershipVerifier.acquireJobOwnership();
 

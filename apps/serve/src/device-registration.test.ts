@@ -217,6 +217,7 @@ function setup(
         set: async (input) => {
           stored.push(input);
         },
+        get: async () => stored[0]?.deviceToken ?? null,
       } satisfies DeviceTokenStore),
     authorizeEndpoint,
     redirectUri,
@@ -374,6 +375,7 @@ test("a credential store failure cancels the issued device and fails closed", as
       set: async () => {
         throw new Error("Secret Service is unavailable");
       },
+      get: async () => null,
     },
   });
 
@@ -397,6 +399,7 @@ test("an unconfirmed cancellation survives a serve restart and converges on resu
     set: async () => {
       throw new Error("Secret Service is unavailable");
     },
+    get: async () => null,
   };
 
   try {

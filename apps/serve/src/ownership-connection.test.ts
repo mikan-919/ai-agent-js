@@ -11,12 +11,12 @@ const binding = {
   issueNumber: 28,
 };
 
-function connect(relayOrigin: string, token = deviceToken) {
+function connect(relayOrigin: string, token = deviceToken, stopMs = 1_000) {
   return createRelayOwnershipConnection({
     relayOrigin,
     deviceToken: token,
     jobId,
-    confirmTimeoutMs: 1_000,
+    heartbeatStopMs: stopMs,
   });
 }
 
@@ -107,6 +107,48 @@ test("an unauthenticated device gets no ownership", async () => {
 
   try {
     expect(await connection.acquireJobOwnership()).toBeNull();
+  } finally {
+    connection.release();
+    relay.stop();
+  }
+});
+
+test("the connection heartbeats and stops when the relay stops answering", async () => {
+  const relay = startFakeOwnershipRelay("7.11.device-token", {
+    heartbeatIntervalMs: 10,
+    heartbeatExpiryMs: 60_000,
+  });
+  const connection = connect(relay.origin, deviceToken, 50);
+
+  try {
+    expect(await connection.acquireJobOwnership()).toEqual(expect.any(String));
+
+    await Bun.sleep(60);
+
+    expect(relay.heartbeats()).toBeGreaterThan(0);
+    expect(connection.stopSignal.aborted).toBe(false);
+
+    relay.stopAnsweringHeartbeats();
+    await Bun.sleep(150);
+
+    // 応答を停止期限内に受け取れないので、切断通知を待たず止まる。
+    expect(connection.stopSignal.aborted).toBe(true);
+  } finally {
+    connection.release();
+    relay.stop();
+  }
+});
+
+test("a client stop deadline that is not shorter than the relay expiry takes no ownership", async () => {
+  const relay = startFakeOwnershipRelay("7.11.device-token", {
+    heartbeatIntervalMs: 10,
+    heartbeatExpiryMs: 1_000,
+  });
+  const connection = connect(relay.origin, deviceToken, 1_000);
+
+  try {
+    expect(await connection.acquireJobOwnership()).toBeNull();
+    expect(connection.stopSignal.aborted).toBe(true);
   } finally {
     connection.release();
     relay.stop();

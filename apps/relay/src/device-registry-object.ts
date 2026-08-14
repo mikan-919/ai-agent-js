@@ -1,4 +1,6 @@
 import {
+  ownershipHeartbeatRequest,
+  ownershipHeartbeatResponse,
   parseOwnershipClientMessage,
   type DeviceRecord,
   type OwnershipServerMessage,
@@ -52,8 +54,21 @@ interface OwnershipAttachment {
   key: string;
   leaseId: string;
   parentLeaseId: string | null;
+  acceptedAt: number;
   valid: boolean;
 }
+
+/**
+ * 生存確認の運用値。根拠のある値が決まるまで既定値を持たず、deploy設定から
+ * 毎回の接続要求で受け取る。
+ */
+interface OwnershipAuditConfig {
+  heartbeatIntervalMs: number;
+  heartbeatExpiryMs: number;
+  auditIntervalMs: number;
+}
+
+const auditConfigKey = "ownership-audit-config";
 
 interface DeviceRow extends Record<string, SqlStorageValue> {
   device_id: string;
@@ -63,6 +78,27 @@ interface DeviceRow extends Record<string, SqlStorageValue> {
   repository_name: string;
   registered_at: number;
   revoked_at: number | null;
+}
+
+function readAuditConfig(request: Request): OwnershipAuditConfig | null {
+  const heartbeatIntervalMs = Number(
+    request.headers.get("x-ownership-heartbeat-interval-ms"),
+  );
+  const heartbeatExpiryMs = Number(
+    request.headers.get("x-ownership-heartbeat-expiry-ms"),
+  );
+  const auditIntervalMs = Number(
+    request.headers.get("x-ownership-audit-interval-ms"),
+  );
+
+  return Number.isInteger(heartbeatIntervalMs) &&
+    heartbeatIntervalMs > 0 &&
+    Number.isInteger(heartbeatExpiryMs) &&
+    heartbeatExpiryMs >= 0 &&
+    Number.isInteger(auditIntervalMs) &&
+    auditIntervalMs > 0
+    ? { heartbeatIntervalMs, heartbeatExpiryMs, auditIntervalMs }
+    : null;
 }
 
 function toDeviceRecord(row: DeviceRow): DeviceRecord {
@@ -83,10 +119,22 @@ function toDeviceRecord(row: DeviceRow): DeviceRecord {
  * 短命codeはhashで保存し、`DELETE ... RETURNING`の単一文で一度だけ消費する。
  */
 export class DeviceRegistryObject extends DurableObject {
+  private auditConfig: OwnershipAuditConfig | null = null;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as never);
 
+    // heartbeatはHibernationを解かずに自動応答する。
+    ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(
+        ownershipHeartbeatRequest,
+        ownershipHeartbeatResponse,
+      ),
+    );
+
     ctx.blockConcurrencyWhile(async () => {
+      this.auditConfig =
+        (await ctx.storage.get<OwnershipAuditConfig>(auditConfigKey)) ?? null;
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS registration_codes (
           code_hash TEXT PRIMARY KEY,
@@ -332,20 +380,28 @@ export class DeviceRegistryObject extends DurableObject {
     const key = url.searchParams.get("key") ?? "";
     const parentLeaseId = url.searchParams.get("parent_lease_id");
     const device = this.authenticateDevice(deviceTokenHash);
+    const audit = readAuditConfig(request);
 
     if (
       request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
       key === "" ||
-      device === null
+      device === null ||
+      audit === null
     ) {
       return new Response("Unauthorized", { status: 401 });
     }
+
+    this.auditConfig = audit;
+    void this.ctx.storage.put(auditConfigKey, audit);
+    // 新しい取得の前に、期限を過ぎた接続を失効させてから数える。
+    this.expireStaleOwnership();
 
     const outcome = this.admitOwnership({
       deviceId: device.deviceId,
       kind,
       key,
       parentLeaseId,
+      audit,
     });
     const pair = new WebSocketPair();
 
@@ -357,9 +413,11 @@ export class DeviceRegistryObject extends DurableObject {
         key,
         leaseId: outcome.leaseId,
         parentLeaseId,
+        acceptedAt: Date.now(),
         valid: true,
       } satisfies OwnershipAttachment);
       pair[1].send(JSON.stringify(outcome));
+      void this.ctx.storage.setAlarm(Date.now() + audit.auditIntervalMs);
     } else {
       pair[1].accept();
       pair[1].send(JSON.stringify(outcome));
@@ -377,6 +435,7 @@ export class DeviceRegistryObject extends DurableObject {
     kind: "job" | "branch";
     key: string;
     parentLeaseId: string | null;
+    audit: OwnershipAuditConfig;
   }): OwnershipServerMessage {
     if (input.kind === "branch") {
       const parent = this.activeOwnership().find(
@@ -398,7 +457,57 @@ export class DeviceRegistryObject extends DurableObject {
 
     return taken
       ? { type: "ownership.rejected", reason: "already_owned" }
-      : { type: "ownership.acquired", leaseId: crypto.randomUUID() };
+      : {
+          type: "ownership.acquired",
+          leaseId: crypto.randomUUID(),
+          heartbeatIntervalMs: input.audit.heartbeatIntervalMs,
+          heartbeatExpiryMs: input.audit.heartbeatExpiryMs,
+        };
+  }
+
+  /** Alarmでも最終heartbeatを監査し、期限を過ぎた接続を失効させてから閉じる。 */
+  override async alarm(): Promise<void> {
+    this.expireStaleOwnership();
+
+    if (this.ctx.getWebSockets().length > 0 && this.auditConfig !== null) {
+      await this.ctx.storage.setAlarm(
+        Date.now() + this.auditConfig.auditIntervalMs,
+      );
+    }
+  }
+
+  private expireStaleOwnership(): void {
+    const audit = this.auditConfig;
+
+    if (audit === null) {
+      return;
+    }
+
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment =
+        ws.deserializeAttachment() as OwnershipAttachment | null;
+
+      if (attachment === null || !attachment.valid) {
+        continue;
+      }
+
+      const lastHeartbeat =
+        this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ??
+        attachment.acceptedAt;
+
+      if (Date.now() - lastHeartbeat <= audit.heartbeatExpiryMs) {
+        continue;
+      }
+
+      // 接続付随情報を失効状態にしてから閉じる。以後の確認は取得ID不一致になる。
+      ws.serializeAttachment({ ...attachment, valid: false });
+      ws.send(
+        JSON.stringify({
+          type: "ownership.expired",
+        } satisfies OwnershipServerMessage),
+      );
+      ws.close(4004, "heartbeat expired");
+    }
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {

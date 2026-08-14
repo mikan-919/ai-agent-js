@@ -25,6 +25,10 @@ export interface RelayOptions {
   /** 運用値は測定と検証専用環境から決めるため、relayは既定値を持たない。 */
   codeExpiryMs: number;
   cancellationExpiryMs: number;
+  /** 所有権接続の生存確認。server側失効期限はclient側停止期限より長くする。 */
+  ownershipHeartbeatIntervalMs: number;
+  ownershipHeartbeatExpiryMs: number;
+  ownershipAuditIntervalMs: number;
   now?: () => number;
 }
 
@@ -97,6 +101,9 @@ export function createRelayApp({
   relayOrigin,
   codeExpiryMs,
   cancellationExpiryMs,
+  ownershipHeartbeatIntervalMs,
+  ownershipHeartbeatExpiryMs,
+  ownershipAuditIntervalMs,
   now = Date.now,
 }: RelayOptions) {
   const app = new Hono();
@@ -429,6 +436,11 @@ export function createRelayApp({
         headers: {
           upgrade: "websocket",
           "x-device-token-hash": await sha256Hex(deviceToken),
+          "x-ownership-heartbeat-interval-ms": String(
+            ownershipHeartbeatIntervalMs,
+          ),
+          "x-ownership-heartbeat-expiry-ms": String(ownershipHeartbeatExpiryMs),
+          "x-ownership-audit-interval-ms": String(ownershipAuditIntervalMs),
         },
       }),
     );

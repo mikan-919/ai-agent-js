@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { parseOwnershipClientMessage } from "@mikan-919/oriel-contracts";
+import {
+  ownershipHeartbeatRequest,
+  ownershipHeartbeatResponse,
+  parseOwnershipClientMessage,
+} from "@mikan-919/oriel-contracts";
 
 interface OwnershipConnectionData {
   kind: "job" | "branch";
@@ -14,7 +18,12 @@ interface OwnershipConnectionData {
  * 所有権接続だけを持つrelayのfake。wire protocolは`packages/contracts`と共有し、
  * relay本体はworkerd上のvitestで検証する。
  */
-export function startFakeOwnershipRelay(deviceToken = "7.11.device-token") {
+export function startFakeOwnershipRelay(
+  deviceToken = "7.11.device-token",
+  liveness = { heartbeatIntervalMs: 20, heartbeatExpiryMs: 60_000 },
+) {
+  let heartbeats = 0;
+  let answersHeartbeats = true;
   const authorizationHeaders: string[] = [];
   const connections = new Map<
     { data: OwnershipConnectionData },
@@ -99,10 +108,22 @@ export function startFakeOwnershipRelay(deviceToken = "7.11.device-token") {
           JSON.stringify({
             type: "ownership.acquired",
             leaseId: data.leaseId,
+            heartbeatIntervalMs: liveness.heartbeatIntervalMs,
+            heartbeatExpiryMs: liveness.heartbeatExpiryMs,
           }),
         );
       },
       message(ws, message) {
+        if (String(message) === ownershipHeartbeatRequest) {
+          heartbeats += 1;
+
+          if (answersHeartbeats) {
+            ws.send(ownershipHeartbeatResponse);
+          }
+
+          return;
+        }
+
         const request = parseOwnershipClientMessage(
           JSON.parse(String(message)) as unknown,
         );
@@ -126,6 +147,11 @@ export function startFakeOwnershipRelay(deviceToken = "7.11.device-token") {
     origin: `http://127.0.0.1:${server.port}`,
     authorizationHeaders: () => authorizationHeaders,
     openConnections: () => connections.size,
+    heartbeats: () => heartbeats,
+    /** half-open接続として、応答だけを止める。 */
+    stopAnsweringHeartbeats: () => {
+      answersHeartbeats = false;
+    },
     /** 登録簿の失効と同じ順序で、接続を失効させてから閉じる。 */
     revokeDevice() {
       for (const [ws, data] of connections) {
