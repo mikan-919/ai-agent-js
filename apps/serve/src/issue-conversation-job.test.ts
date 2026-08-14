@@ -6,26 +6,47 @@ import { expect, test } from "bun:test";
 import type { Octokit } from "@octokit/rest";
 
 import type { DeviceTokenStore } from "./device-registration";
+import type { IssueConversationAdmission } from "./issue-conversation-admission";
 import { startIssueConversationJob } from "./issue-conversation-job";
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
 
 const deviceToken = "7.11.device-token";
 const repositoryId = 11;
 const repository = { owner: "mikan-919", name: "oriel" };
-const jobId = "issue-conversation-1";
+const harnessEntry = new URL("../../harness/src/main.ts", import.meta.url)
+  .pathname;
 
 function tokenStore(token: string | null): DeviceTokenStore {
+  return { set: async () => {}, get: async () => token };
+}
+
+/** 現在のGitHub Issueを読み直すadmissionのfake。 */
+function fakeAdmission(
+  fingerprint: () => string,
+  refusal?: "issue_not_found" | "issue_not_open" | "repository_mismatch",
+): IssueConversationAdmission {
   return {
-    set: async () => {},
-    get: async () => token,
+    admit: async ({ issueNumber }) =>
+      refusal === undefined
+        ? {
+            status: "admitted",
+            jobId: `issue-conversation:${repositoryId}:${issueNumber}:${fingerprint()}`,
+            approvalFingerprint: fingerprint(),
+          }
+        : { status: "refused", reason: refusal },
+    reconfirm: async ({ approvalFingerprint }) =>
+      approvalFingerprint === fingerprint(),
   };
 }
 
-function fakeOctokit(published: { count: number }) {
+function fakeOctokit(published: { bodies: string[] }) {
   return {
     rest: {
       issues: {
-        createComment: async () => ({ data: { id: (published.count += 1) } }),
+        createComment: async ({ body }: { body: string }) => {
+          published.bodies.push(body);
+          return { data: { id: published.bodies.length } };
+        },
         listComments: "list-comments" as never,
         deleteComment: async () => {},
       },
@@ -47,95 +68,58 @@ async function withWorkspace<T>(run: (databasePath: string) => Promise<T>) {
   }
 }
 
-test("an explicit Issue conversation takes relay ownership from the stored device token before a worker runs", async () => {
+function options(databasePath: string, relayOrigin: string) {
+  return {
+    relayOrigin,
+    tokenStore: tokenStore(deviceToken),
+    createOctokit: async () => fakeOctokit({ bodies: [] }),
+    createAdmission: () => fakeAdmission(() => "fingerprint-1"),
+    databasePath,
+    harnessEntry,
+    repositoryId,
+    repository,
+    issueNumber: 28,
+    body: "Agent reply",
+    heartbeatStopMs: 500,
+  };
+}
+
+test("an admitted conversation runs a real harness process, posts one comment, and stops on revocation", async () => {
   await withWorkspace(async (databasePath) => {
     const relay = startFakeOwnershipRelay(deviceToken);
-    const published = { count: 0 };
+    const published = { bodies: [] as string[] };
     const started = await startIssueConversationJob({
-      relayOrigin: relay.origin,
-      tokenStore: tokenStore(deviceToken),
-      databasePath,
-      octokit: fakeOctokit(published),
-      repositoryId,
-      repository,
-      jobId,
-      issueNumber: 28,
-      canonicalBranch: "oriel/job-1",
-      heartbeatStopMs: 500,
+      ...options(databasePath, relay.origin),
+      createOctokit: async () => fakeOctokit(published),
     });
 
     try {
       expect(started.status).toBe("started");
-      expect(relay.authorizationHeaders()).toEqual([
-        `Bearer ${deviceToken}`,
-        `Bearer ${deviceToken}`,
-      ]);
-      expect(relay.openConnections()).toBe(2);
 
       if (started.status !== "started") {
         return;
       }
 
-      const harnessToServe = new TransformStream<Uint8Array, Uint8Array>();
-      const serveToHarness = new TransformStream<Uint8Array, Uint8Array>();
-      const serving = started.runtime.serveHarnessIssueConversation(
-        harnessToServe.readable,
-        serveToHarness.writable,
-        started.binding,
-      );
-      const input = harnessToServe.writable.getWriter();
-      const output = serveToHarness.readable.getReader();
-
-      expect(started.runtime.jobStatus(jobId)).toBe("running");
-
-      await input.write(
-        new TextEncoder().encode(
-          `${JSON.stringify({
-            type: "issue_comment.request",
-            requestId: "request-1",
-            ...started.binding,
-            body: "Agent reply",
-          })}\n`,
-        ),
+      // clientはJobキーを指定できない。承認指紋から導く。
+      expect(started.jobId).toBe(
+        `issue-conversation:${repositoryId}:28:fingerprint-1`,
       );
 
-      expect(
-        JSON.parse(new TextDecoder().decode((await output.read()).value)),
-      ).toMatchObject({ type: "issue_comment.accepted" });
-      expect(
-        JSON.parse(new TextDecoder().decode((await output.read()).value)),
-      ).toMatchObject({ type: "issue_comment.completed" });
-      expect(published.count).toBe(1);
+      await started.finished;
 
-      // relayがdeviceを失効させ、Job所有権とブランチ排他の両方を閉じる。
+      expect(published.bodies).toHaveLength(1);
+      expect(published.bodies[0]).toContain("Agent reply");
+      // ADR 0005の配送識別子をHTML commentとして埋める。
+      expect(published.bodies[0]).toContain("oriel-operation:");
+      expect(started.jobStatus()).toBe("running");
+
+      // relayがdeviceを失効させ、所有権接続を閉じる。
       relay.revokeDevice();
-      await Bun.sleep(50);
+      await Bun.sleep(100);
 
       expect(relay.openConnections()).toBe(0);
-      expect(started.runtime.jobStatus(jobId)).toBe("interrupted");
-
-      const refusedWrite = await input
-        .write(
-          new TextEncoder().encode(
-            `${JSON.stringify({
-              type: "issue_comment.request",
-              requestId: "request-after-revocation",
-              ...started.binding,
-              body: "Agent reply after revocation",
-            })}\n`,
-          ),
-        )
-        .then(
-          () => "accepted",
-          () => "refused",
-        );
-
-      expect(refusedWrite).toBe("refused");
-      await input.close().catch(() => undefined);
-      await serving;
-      output.releaseLock();
-
-      expect(published.count).toBe(1);
+      expect(started.jobStatus()).toBe("interrupted");
+      expect(published.bodies).toHaveLength(1);
     } finally {
       if (started.status === "started") {
         started.close();
@@ -146,80 +130,137 @@ test("an explicit Issue conversation takes relay ownership from the stored devic
   });
 });
 
-test("no worker runs without a registered device or without relay ownership", async () => {
+test("revoking the device kills the running harness process before it can write again", async () => {
   await withWorkspace(async (databasePath) => {
     const relay = startFakeOwnershipRelay(deviceToken);
-    const options = {
-      relayOrigin: relay.origin,
-      databasePath,
-      octokit: fakeOctokit({ count: 0 }),
-      repositoryId,
-      repository,
-      jobId,
-      issueNumber: 28,
-      heartbeatStopMs: 500,
-    };
+    const published = { bodies: [] as string[] };
+    const started = await startIssueConversationJob({
+      ...options(databasePath, relay.origin),
+      createOctokit: async () => fakeOctokit(published),
+      // harnessが返答を書く前に失効させるため、応答できない本文を使う。
+      body: "Agent reply",
+    });
+
+    if (started.status !== "started") {
+      throw new Error("the conversation was refused");
+    }
+
+    try {
+      relay.revokeDevice();
+      await Bun.sleep(100);
+
+      expect(started.jobStatus()).toBe("interrupted");
+
+      // process停止と外部操作拒否の後は、待っても新しい書き込みが増えない。
+      await Bun.sleep(100);
+
+      expect(published.bodies.length).toBeLessThanOrEqual(1);
+      expect(relay.openConnections()).toBe(0);
+    } finally {
+      started.close();
+      relay.stop();
+    }
+  });
+});
+
+test("a conversation is refused before any process starts", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const base = options(databasePath, relay.origin);
 
     try {
       expect(
         await startIssueConversationJob({
-          ...options,
+          ...base,
           tokenStore: tokenStore(null),
         }),
       ).toEqual({ status: "refused", reason: "device_not_registered" });
 
-      const holder = await startIssueConversationJob({
-        ...options,
-        tokenStore: tokenStore(deviceToken),
-      });
-
-      expect(holder.status).toBe("started");
+      // 未認証のOctokitは使わず、外部書き込み経路をfail closedにする。
       expect(
         await startIssueConversationJob({
-          ...options,
-          tokenStore: tokenStore(deviceToken),
+          ...base,
+          createOctokit: async () => null,
         }),
-      ).toEqual({ status: "refused", reason: "job_ownership_not_acquired" });
+      ).toEqual({
+        status: "refused",
+        reason: "github_credentials_unavailable",
+      });
 
-      if (holder.status === "started") {
-        holder.close();
-      }
+      expect(
+        await startIssueConversationJob({
+          ...base,
+          createAdmission: () =>
+            fakeAdmission(() => "fingerprint-1", "issue_not_open"),
+        }),
+      ).toEqual({ status: "refused", reason: "issue_not_open" });
+
+      expect(
+        await startIssueConversationJob({
+          ...base,
+          createAdmission: () =>
+            fakeAdmission(() => "fingerprint-1", "repository_mismatch"),
+        }),
+      ).toEqual({ status: "refused", reason: "repository_mismatch" });
+
+      expect(relay.openConnections()).toBe(0);
     } finally {
       relay.stop();
     }
   });
 });
 
-test("a Job that changes code is refused when the canonical branch is already exclusive", async () => {
+test("a WHAT that changed between the two reads takes no worker and releases ownership", async () => {
   await withWorkspace(async (databasePath) => {
     const relay = startFakeOwnershipRelay(deviceToken);
-    const options = {
-      relayOrigin: relay.origin,
-      tokenStore: tokenStore(deviceToken),
-      databasePath,
-      octokit: fakeOctokit({ count: 0 }),
-      repositoryId,
-      repository,
-      issueNumber: 28,
-      canonicalBranch: "oriel/job-1",
-      heartbeatStopMs: 500,
-    };
-    const first = await startIssueConversationJob({ ...options, jobId });
-    const second = await startIssueConversationJob({
-      ...options,
-      jobId: "issue-conversation-2",
-    });
+    let fingerprint = "fingerprint-1";
+
+    try {
+      const refused = await startIssueConversationJob({
+        ...options(databasePath, relay.origin),
+        createAdmission: () => ({
+          admit: async () => {
+            const admitted = {
+              status: "admitted" as const,
+              jobId: "issue-conversation:11:28:fingerprint-1",
+              approvalFingerprint: fingerprint,
+            };
+
+            // 所有権取得のあいだにWHATが変わる。
+            fingerprint = "fingerprint-2";
+            return admitted;
+          },
+          reconfirm: async ({ approvalFingerprint }) =>
+            approvalFingerprint === fingerprint,
+        }),
+      });
+
+      expect(refused).toEqual({
+        status: "refused",
+        reason: "approval_changed",
+      });
+
+      await Bun.sleep(50);
+
+      expect(relay.openConnections()).toBe(0);
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("a second conversation for the same Job takes no ownership and starts no process", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const first = await startIssueConversationJob(
+      options(databasePath, relay.origin),
+    );
 
     try {
       expect(first.status).toBe("started");
-      expect(second).toEqual({
-        status: "refused",
-        reason: "branch_not_exclusive",
-      });
-      // ブランチ排他を取れなかったJobは、取ったJob所有権も解放する。
-      await Bun.sleep(50);
-
-      expect(relay.openConnections()).toBe(2);
+      expect(
+        await startIssueConversationJob(options(databasePath, relay.origin)),
+      ).toEqual({ status: "refused", reason: "job_ownership_not_acquired" });
     } finally {
       if (first.status === "started") {
         first.close();

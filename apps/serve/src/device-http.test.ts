@@ -30,9 +30,16 @@ function fakeFlow(overrides: Partial<DeviceRegistrationFlow> = {}) {
   return { flow, completed, started };
 }
 
-function startServer(flow: DeviceRegistrationFlow) {
+function startServer(
+  flow: DeviceRegistrationFlow,
+  startIssueConversation?: (input: {
+    issueNumber: number;
+    body: string;
+  }) => Promise<{ status: string; reason?: string }>,
+) {
   const server = startServeHttpServer({
     createDeviceRegistration: () => flow,
+    startIssueConversation,
   });
 
   return {
@@ -299,6 +306,76 @@ test("held cancellations are reported and can be resumed from the localhost UI",
     );
 
     expect(await resumed.json()).toEqual({ pending });
+  } finally {
+    server.close();
+  }
+});
+
+test("the Issue conversation entry takes no Job key or code changing input", async () => {
+  const requests: { issueNumber: number; body: string }[] = [];
+  const { flow } = fakeFlow();
+  const server = startServer(flow, async (input) => {
+    requests.push(input);
+    return { status: "started" };
+  });
+
+  try {
+    const shell = await openShell(server.origin);
+    const post = (body: unknown) =>
+      fetch(`${server.origin}/api/issue-conversations`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Origin: server.origin,
+          cookie: shell.session,
+          "x-oriel-csrf": shell.csrf,
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect((await post({ issueNumber: 28, body: "reply" })).status).toBe(200);
+    // clientはJobキーを指定できず、コードを変更するJobも起動できない。
+    expect(
+      (await post({ issueNumber: 28, body: "reply", canonicalBranch: "x" }))
+        .status,
+    ).toBe(400);
+    expect((await post({ issueNumber: 28 })).status).toBe(400);
+    expect((await post({ issueNumber: 0, body: "reply" })).status).toBe(400);
+    expect(requests).toEqual([{ issueNumber: 28, body: "reply" }]);
+
+    const refused = await post({ issueNumber: 29, body: "reply" });
+
+    expect(refused.status).toBe(200);
+  } finally {
+    server.close();
+  }
+});
+
+test("a refused conversation answers with a conflict and starts nothing", async () => {
+  const { flow } = fakeFlow();
+  const server = startServer(flow, async () => ({
+    status: "refused",
+    reason: "github_credentials_unavailable",
+  }));
+
+  try {
+    const shell = await openShell(server.origin);
+    const response = await fetch(`${server.origin}/api/issue-conversations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Origin: server.origin,
+        cookie: shell.session,
+        "x-oriel-csrf": shell.csrf,
+      },
+      body: JSON.stringify({ issueNumber: 28, body: "reply" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      status: "refused",
+      reason: "github_credentials_unavailable",
+    });
   } finally {
     server.close();
   }

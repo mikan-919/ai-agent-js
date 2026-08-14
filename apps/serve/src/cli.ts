@@ -9,8 +9,6 @@ import {
 import { startIssueConversationJob } from "./issue-conversation-job";
 import { openServeLocalState } from "./local-state";
 import { createPendingCancellationStore } from "./pending-cancellations";
-import { Octokit } from "@octokit/rest";
-
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
 
@@ -44,17 +42,20 @@ if (Bun.argv[2] === "serve") {
     heartbeatStopMs !== undefined;
   const httpServer = startServeHttpServer({
     startIssueConversation: conversationReady
-      ? ({ jobId, issueNumber, canonicalBranch }) =>
+      ? ({ issueNumber, body }) =>
           startIssueConversationJob({
             relayOrigin: environment,
             tokenStore,
+            // relayの短命installation token発行はまだ無い。認証済みclientを
+            // 用意できないため、外部書き込み経路はfail closedにする。
+            // 未認証のOctokitは使わない。
+            createOctokit: async () => null,
             databasePath: statePath,
-            octokit: new Octokit(),
+            harnessEntry: new URL("./harness.js", import.meta.url),
             repositoryId,
             repository: { owner: repositoryOwner, name: repositoryName },
-            jobId,
             issueNumber,
-            canonicalBranch,
+            body,
             heartbeatStopMs,
           })
       : undefined,

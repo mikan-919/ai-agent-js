@@ -3,56 +3,71 @@ import type { Octokit } from "@octokit/rest";
 
 import type { DeviceTokenStore } from "./device-registration";
 import { startIssueCommentRuntime } from "./issue-comment-runtime";
+import {
+  createGitHubIssueConversationAdmission,
+  type IssueConversationAdmission,
+} from "./issue-conversation-admission";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 
 export interface StartIssueConversationJobOptions {
   relayOrigin: URL | string;
   tokenStore: DeviceTokenStore;
+  /**
+   * 認証済みOctokitの解決。用意できない場合はnullを返し、外部書き込み経路を
+   * fail closedにする。未認証clientは使わない。
+   */
+  createOctokit: () => Promise<Octokit | null>;
+  createAdmission?: (octokit: Octokit) => IssueConversationAdmission;
   databasePath: string;
-  octokit: Octokit;
+  harnessEntry: URL | string;
   repositoryId: number;
   repository: GitHubRepository;
-  jobId: string;
   issueNumber: number;
-  /** コードを変更するJobだけがcanonicalブランチの接続排他も取得する。 */
-  canonicalBranch?: string;
+  /** 人間がlocalhost UIで書いた、この対話の返答本文。 */
+  body: string;
   heartbeatStopMs: number;
 }
 
 export type StartIssueConversationJobResult =
   | {
       status: "started";
-      runtime: ReturnType<typeof startIssueCommentRuntime>;
-      binding: {
-        jobId: string;
-        jobLeaseId: string;
-        repository: GitHubRepository;
-        issueNumber: number;
-      };
+      jobId: string;
+      /** harness processが終わるまで待つ。 */
+      finished: Promise<void>;
+      jobStatus(): string | null;
       close(): void;
     }
   | {
       status: "refused";
       reason:
         | "device_not_registered"
+        | "github_credentials_unavailable"
+        | "issue_not_found"
+        | "issue_not_open"
+        | "repository_mismatch"
         | "job_ownership_not_acquired"
-        | "branch_not_exclusive";
+        | "approval_changed";
     };
 
 /**
- * 明示的に起動したIssue対話の製品経路。device tokenを`Bun.secrets`から読み、
- * relayでJob所有権と必要なブランチ排他を取れた場合だけworkerを動かす。
+ * 明示的に起動したIssue対話の製品経路。ADR 0003の受け入れ判定を通し、
+ * device tokenでrelayのJob所有権を取り、credentialを持たないharness processを
+ * 起動してstdioのNDJSONを`serve`の外部操作へつなぐ。
+ *
+ * コードを変更するJobはこの入口では起動しない。canonicalブランチの排他と
+ * 封印は実装Jobの経路で扱う。
  */
 export async function startIssueConversationJob({
   relayOrigin,
   tokenStore,
+  createOctokit,
+  createAdmission = createGitHubIssueConversationAdmission,
   databasePath,
-  octokit,
+  harnessEntry,
   repositoryId,
   repository,
-  jobId,
   issueNumber,
-  canonicalBranch,
+  body,
   heartbeatStopMs,
 }: StartIssueConversationJobOptions): Promise<StartIssueConversationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
@@ -61,10 +76,27 @@ export async function startIssueConversationJob({
     return { status: "refused", reason: "device_not_registered" };
   }
 
+  const octokit = await createOctokit();
+
+  if (octokit === null) {
+    return { status: "refused", reason: "github_credentials_unavailable" };
+  }
+
+  const admission = createAdmission(octokit);
+  const admitted = await admission.admit({
+    repositoryId,
+    repository,
+    issueNumber,
+  });
+
+  if (admitted.status === "refused") {
+    return { status: "refused", reason: admitted.reason };
+  }
+
   const ownership = createRelayOwnershipConnection({
     relayOrigin,
     deviceToken,
-    jobId,
+    jobId: admitted.jobId,
     heartbeatStopMs,
   });
   const jobLeaseId = await ownership.acquireJobOwnership();
@@ -74,15 +106,16 @@ export async function startIssueConversationJob({
     return { status: "refused", reason: "job_ownership_not_acquired" };
   }
 
-  if (canonicalBranch !== undefined) {
-    const branchLeaseId = await ownership.acquireBranchExclusivity(
-      `${repositoryId}/${canonicalBranch}`,
-    );
-
-    if (branchLeaseId === null) {
-      ownership.release();
-      return { status: "refused", reason: "branch_not_exclusive" };
-    }
+  // 所有権を取得した後にもう一度読み、同じ現在値であることを確かめる。
+  if (
+    !(await admission.reconfirm({
+      repository,
+      issueNumber,
+      approvalFingerprint: admitted.approvalFingerprint,
+    }))
+  ) {
+    ownership.release();
+    return { status: "refused", reason: "approval_changed" };
   }
 
   const runtime = startIssueCommentRuntime({
@@ -90,12 +123,60 @@ export async function startIssueConversationJob({
     octokit,
     ownershipVerifier: ownership,
   });
+  const binding = {
+    jobId: admitted.jobId,
+    jobLeaseId,
+    repository,
+    issueNumber,
+  };
+  // harnessへはcredentialを渡さない。対象と取得IDだけを引数で渡す。
+  const harness = Bun.spawn(
+    [
+      process.execPath,
+      typeof harnessEntry === "string" ? harnessEntry : harnessEntry.pathname,
+      "--request",
+      `${admitted.jobId}:1`,
+      "--job",
+      admitted.jobId,
+      "--lease",
+      jobLeaseId,
+      "--repository",
+      `${repository.owner}/${repository.name}`,
+      "--issue",
+      String(issueNumber),
+      "--body",
+      body,
+    ],
+    { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: {} },
+  );
+  const stopHarness = () => harness.kill();
+
+  ownership.stopSignal.addEventListener("abort", stopHarness, { once: true });
+
+  const serving = runtime.serveHarnessIssueConversation(
+    harness.stdout,
+    new WritableStream<Uint8Array>({
+      write(chunk) {
+        harness.stdin.write(chunk);
+        harness.stdin.flush();
+      },
+      close() {
+        harness.stdin.end();
+      },
+    }),
+    binding,
+  );
 
   return {
     status: "started",
-    runtime,
-    binding: { jobId, jobLeaseId, repository, issueNumber },
+    jobId: admitted.jobId,
+    finished: serving.then(async () => {
+      await harness.exited;
+    }),
+    jobStatus: () => runtime.jobStatus(admitted.jobId),
     close() {
+      ownership.stopSignal.removeEventListener("abort", stopHarness);
+      harness.kill();
       ownership.release();
       runtime.close();
     },

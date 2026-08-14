@@ -28,9 +28,8 @@ export interface ServeHttpServerOptions {
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
   /** 明示的に起動するIssue対話。relay所有権を取れた場合だけworkerが動く。 */
   startIssueConversation?: (input: {
-    jobId: string;
     issueNumber: number;
-    canonicalBranch?: string;
+    body: string;
   }) => Promise<{ status: string; reason?: string }>;
 }
 
@@ -279,16 +278,19 @@ export function startServeHttpServer({
 
   app.post("/api/issue-conversations", async (context) => {
     const body = (await context.req.json().catch(() => null)) as {
-      jobId?: unknown;
       issueNumber?: unknown;
+      body?: unknown;
       canonicalBranch?: unknown;
     } | null;
     const issueNumber = Number(body?.issueNumber);
 
+    // JobキーはWHATの現在値から導く。clientはJobキーを指定できない。
+    // コードを変更するJobはこの入口では起動しない。
     if (
       startIssueConversation === undefined ||
-      typeof body?.jobId !== "string" ||
-      body.jobId === "" ||
+      body?.canonicalBranch !== undefined ||
+      typeof body?.body !== "string" ||
+      body.body === "" ||
       !Number.isInteger(issueNumber) ||
       issueNumber <= 0
     ) {
@@ -296,12 +298,8 @@ export function startServeHttpServer({
     }
 
     const started = await startIssueConversation({
-      jobId: body.jobId,
       issueNumber,
-      canonicalBranch:
-        typeof body.canonicalBranch === "string"
-          ? body.canonicalBranch
-          : undefined,
+      body: body.body,
     });
 
     return context.json(started, started.status === "started" ? 200 : 409);

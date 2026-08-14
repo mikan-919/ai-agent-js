@@ -11,10 +11,11 @@
     "oriel": "./dist/cli.js"
   },
   "files": [
-    "dist/cli.js"
+    "dist/cli.js",
+    "dist/harness.js"
   ],
   "scripts": {
-    "build": "bun build apps/serve/src/cli.ts --outfile dist/cli.js --target bun --banner '#!/usr/bin/env bun'",
+    "build": "bun build apps/serve/src/cli.ts --outfile dist/cli.js --target bun --banner '#!/usr/bin/env bun' && bun build apps/harness/src/main.ts --outfile dist/harness.js --target bun --banner '#!/usr/bin/env bun'",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "test": "bun run build && bun test apps/serve apps/harness packages && bun run test:relay",
