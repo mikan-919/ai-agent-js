@@ -80,6 +80,7 @@ packages/identity
 - Job DB、scheduler、コード、transcript、Agent sessionは保存しない。
 - 初期は独自アカウントを持たず、GitHub App installationを利用単位とする。
 - 永続化するのはdevice tokenのhashと表示用metadata、repository認可、routingに必要なIDだけとする。D1、KV、R2はv1で使わない。
+- 登録の往復で必要な短命状態は、この許可リストを増やす恒久データにはしない。OAuth往復のstateは署名付きの短命payloadとしてrelayへ保存せず、一回限りcodeと発行直後の取消証明はhashだけをDurable Objectへ置き、消費または期限切れで消す。これらはdeviceの表示metadataとしては扱わない。
 
 ### ローカル`serve`
 

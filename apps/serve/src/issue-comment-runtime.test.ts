@@ -5,10 +5,8 @@ import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
 
 import { startIssueCommentRuntime } from "./issue-comment-runtime";
-import {
-  createConnectionOwnershipArbiter,
-  createJobOwnershipConnection,
-} from "./job-ownership";
+import { createRelayOwnershipConnection } from "./ownership-connection";
+import { startFakeOwnershipRelay } from "./ownership-relay.fake";
 
 test("runtime startup resumes persisted Issue-comment work and exposes it only through a Job-bound harness channel", async () => {
   const directory = await mkdtemp(join(tmpdir(), "oriel-issue-runtime-"));
@@ -82,18 +80,16 @@ test("runtime startup resumes persisted Issue-comment work and exposes it only t
 test("revoking the device stops the worker, refuses new external operations, and moves the Job to interrupted", async () => {
   const directory = await mkdtemp(join(tmpdir(), "oriel-issue-revoked-"));
   const databasePath = join(directory, "serve.sqlite");
-  const arbiter = createConnectionOwnershipArbiter({
-    heartbeatExpiryMs: 30_000,
-    now: () => 0,
-  });
-  const ownershipVerifier = createJobOwnershipConnection({
-    relay: arbiter,
+  const relay = startFakeOwnershipRelay();
+  const ownershipVerifier = createRelayOwnershipConnection({
+    relayOrigin: relay.origin,
+    deviceToken: "7.11.device-token",
     jobId: "issue-conversation-1",
-    deviceId: "device-1",
-    heartbeatStopMs: 10_000,
-    now: () => 0,
+    confirmTimeoutMs: 1_000,
   });
-  const jobLeaseId = await ownershipVerifier.acquire();
+  const jobLeaseId = await ownershipVerifier.acquireJobOwnership();
+
+  await ownershipVerifier.acquireBranchExclusivity("11/oriel-job-1");
   const harnessToServe = new TransformStream<Uint8Array, Uint8Array>();
   const serveToHarness = new TransformStream<Uint8Array, Uint8Array>();
   let published = 0;
@@ -130,9 +126,12 @@ test("revoking the device stops the worker, refuses new external operations, and
   try {
     expect(runtime.jobStatus(binding.jobId)).toBe("running");
 
-    arbiter.revokeDevice("device-1");
+    // relayがdeviceを失効させ、所有権接続とブランチ排他を閉じる。
+    relay.revokeDevice();
+    await Bun.sleep(50);
 
     expect(ownershipVerifier.stopSignal.aborted).toBe(true);
+    expect(relay.openConnections()).toBe(0);
     expect(runtime.jobStatus(binding.jobId)).toBe("interrupted");
 
     // 失効後はharnessからの要求経路自体が閉じている。書き込みは受け付けない。
@@ -160,6 +159,8 @@ test("revoking the device stops the worker, refuses new external operations, and
     expect(published).toBe(0);
     expect(runtime.jobStatus(binding.jobId)).toBe("interrupted");
   } finally {
+    ownershipVerifier.release();
+    relay.stop();
     runtime.close();
     await rm(directory, { force: true, recursive: true });
   }

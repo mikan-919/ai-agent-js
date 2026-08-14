@@ -9,6 +9,9 @@ export interface RelayGitHubClient {
     redirectUri: string;
   }): Promise<string | null>;
   getViewer(userToken: string): Promise<{ id: number; login: string } | null>;
+  listInstallations(
+    userToken: string,
+  ): Promise<{ id: number; account: string }[]>;
   listInstallationRepositories(input: {
     userToken: string;
     installationId: number;
@@ -96,6 +99,16 @@ export function createGitHubClient({
       );
 
       return viewer === null ? null : { id: viewer.id, login: viewer.login };
+    },
+    async listInstallations(userToken) {
+      const body = await callApi<{
+        installations: { id: number; account: { login: string } | null }[];
+      }>(userToken, "/user/installations");
+
+      return (body?.installations ?? []).map((installation) => ({
+        id: installation.id,
+        account: installation.account?.login ?? "",
+      }));
     },
     async listInstallationRepositories({ userToken, installationId }) {
       const body = await callApi<{

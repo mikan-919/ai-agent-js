@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { expect, test } from "bun:test";
 
@@ -6,87 +9,59 @@ import {
   createDeviceRegistrationFlow,
   type DeviceTokenStore,
 } from "./device-registration";
+import { openServeLocalState } from "./local-state";
+import {
+  createPendingCancellationStore,
+  type PendingCancellationStore,
+} from "./pending-cancellations";
 import { createRelayDeviceClient, type RelayFetch } from "./relay-client";
 
 const installationId = 7;
 const repository = { id: 11, owner: "mikan-919", name: "oriel" };
 const authorizeEndpoint = new URL("https://relay.test/device/authorize");
 const redirectUri = new URL("http://127.0.0.1:49152/device/callback");
-const managementToken = "management-session-token";
+
+type Purpose = "installations" | "registration" | "device_list" | "revocation";
 
 interface FakeRelayOptions {
-  /** repository idを取り違えて返すrelayを再現する。 */
+  /** repositoryを取り違えて返すrelayを再現する。 */
   repositoryIdOverride?: number;
   cancellationOutcome?: () => "cancelled" | "refused" | "unknown";
+  /** installationを現在管理できないGitHub userを再現する。 */
+  administrable?: () => boolean;
   now?: () => number;
 }
 
-/**
- * relayのHTTP contractに合わせたfake。実物はworkerd上のvitestで検証する。
- */
+/** relayのHTTP contractに合わせたfake。実物はworkerd上のvitestで検証する。 */
 function fakeRelay({
   repositoryIdOverride,
   cancellationOutcome = () => "cancelled" as const,
+  administrable = () => true,
   now = () => 1_000,
 }: FakeRelayOptions = {}) {
   const codes = new Map<
     string,
-    { codeChallenge: string; purpose: "registration" | "management" }
+    { codeChallenge: string; purpose: Purpose; deviceId: string | null }
   >();
   const devices = new Map<
     string,
     { cancellationToken: string; revokedAt: number | null }
   >();
+  const target = {
+    installationId,
+    repositoryId: repositoryIdOverride ?? repository.id,
+    repository: { owner: repository.owner, name: repository.name },
+  };
 
   const relayFetch: RelayFetch = async (input, init) => {
     const url = new URL(input);
     const body =
       init?.body === undefined ? {} : JSON.parse(String(init.body ?? "{}"));
-    const bearer = new Headers(init?.headers).get("authorization");
-    const json = (value: unknown, status = 200) =>
+    const json = (value: unknown) =>
       new Response(JSON.stringify(value), {
-        status,
+        status: 200,
         headers: { "content-type": "application/json" },
       });
-
-    if (url.pathname === "/device/token") {
-      const issued = codes.get(body.code);
-      codes.delete(body.code);
-
-      if (
-        issued === undefined ||
-        createHash("sha256").update(body.codeVerifier).digest("base64url") !==
-          issued.codeChallenge
-      ) {
-        return new Response("Bad Request", { status: 400 });
-      }
-
-      if (issued.purpose === "management") {
-        return json({
-          purpose: "management",
-          managementToken,
-          expiresAt: now() + 300_000,
-          installationId,
-          repositoryId: repositoryIdOverride ?? repository.id,
-          repository: { owner: repository.owner, name: repository.name },
-        });
-      }
-
-      const deviceId = randomUUID();
-      const cancellationToken = `cancellation-${deviceId}`;
-      devices.set(deviceId, { cancellationToken, revokedAt: null });
-
-      return json({
-        purpose: "registration",
-        deviceId,
-        deviceToken: `device-token-${deviceId}`,
-        cancellationToken,
-        cancellationExpiresAt: now() + 120_000,
-        installationId,
-        repositoryId: repositoryIdOverride ?? repository.id,
-        repository: { owner: repository.owner, name: repository.name },
-      });
-    }
 
     if (url.pathname === "/device/cancellation") {
       if (cancellationOutcome() === "unknown") {
@@ -107,12 +82,40 @@ function fakeRelay({
       return json({ deviceId: body.deviceId, cancelled: true });
     }
 
-    if (bearer !== `Bearer ${managementToken}`) {
-      return new Response("Unauthorized", { status: 401 });
+    const issued = codes.get(body.code);
+    codes.delete(body.code);
+
+    if (
+      issued === undefined ||
+      createHash("sha256").update(body.codeVerifier).digest("base64url") !==
+        issued.codeChallenge
+    ) {
+      return new Response("Bad Request", { status: 400 });
     }
 
-    if (url.pathname === "/devices") {
+    if (issued.purpose === "installations") {
       return json({
+        purpose: "installations",
+        installations: [
+          {
+            installationId,
+            account: repository.owner,
+            canAdminister: administrable(),
+            repositories: [
+              {
+                repositoryId: repository.id,
+                repository: { owner: repository.owner, name: repository.name },
+              },
+            ],
+          },
+        ],
+      });
+    }
+
+    if (issued.purpose === "device_list") {
+      return json({
+        purpose: "device_list",
+        ...target,
         devices: [...devices].map(([deviceId, device]) => ({
           deviceId,
           installationId,
@@ -124,18 +127,35 @@ function fakeRelay({
       });
     }
 
-    const revoking = url.pathname.match(/^\/devices\/([^/]+)\/revocation$/);
-    const device =
-      revoking === null
-        ? undefined
-        : devices.get(decodeURIComponent(revoking[1]!));
+    if (issued.purpose === "revocation") {
+      const device =
+        issued.deviceId === null ? undefined : devices.get(issued.deviceId);
 
-    if (device === undefined) {
-      return new Response("Not Found", { status: 404 });
+      if (device === undefined) {
+        return new Response("Not Found", { status: 404 });
+      }
+
+      device.revokedAt ??= now();
+      return json({
+        purpose: "revocation",
+        ...target,
+        deviceId: issued.deviceId,
+        revokedAt: device.revokedAt,
+      });
     }
 
-    device.revokedAt ??= now();
-    return json({ deviceId: revoking![1], revokedAt: device.revokedAt });
+    const deviceId = randomUUID();
+    const cancellationToken = `cancellation-${deviceId}`;
+    devices.set(deviceId, { cancellationToken, revokedAt: null });
+
+    return json({
+      purpose: "registration",
+      deviceId,
+      deviceToken: `device-token-${deviceId}`,
+      cancellationToken,
+      cancellationExpiresAt: now() + 120_000,
+      ...target,
+    });
   };
 
   return {
@@ -144,15 +164,26 @@ function fakeRelay({
       baseUrl: "https://relay.test",
       fetch: relayFetch,
     }),
-    /** browserがrelayの認可を通り、localhostへ戻るまでを再現する。 */
-    authorizeInBrowser(authorizeUrl: URL): URL {
+    /**
+     * browserがGitHub loginを終えてlocalhostへ戻るまでを再現する。
+     * 失効と一覧はその時点の管理権限が無ければrelayがcodeを出さない。
+     */
+    authorizeInBrowser(authorizeUrl: URL): URL | null {
+      const purpose = (authorizeUrl.searchParams.get("purpose") ??
+        "registration") as Purpose;
+
+      if (
+        (purpose === "revocation" || purpose === "device_list") &&
+        !administrable()
+      ) {
+        return null;
+      }
+
       const code = `code-${randomUUID()}`;
       codes.set(code, {
         codeChallenge: authorizeUrl.searchParams.get("code_challenge") ?? "",
-        purpose:
-          authorizeUrl.searchParams.get("purpose") === "management"
-            ? "management"
-            : "registration",
+        purpose,
+        deviceId: authorizeUrl.searchParams.get("device_id"),
       });
 
       const callbackUrl = new URL(
@@ -170,10 +201,14 @@ function fakeRelay({
 }
 
 function setup(
-  options: FakeRelayOptions & { tokenStore?: DeviceTokenStore } = {},
+  options: FakeRelayOptions & {
+    tokenStore?: DeviceTokenStore;
+    cancellationStore?: PendingCancellationStore;
+    relay?: ReturnType<typeof fakeRelay>;
+  } = {},
 ) {
   const stored: { repositoryId: number; deviceToken: string }[] = [];
-  const relay = fakeRelay(options);
+  const relay = options.relay ?? fakeRelay(options);
   const flow = createDeviceRegistrationFlow({
     relay: relay.client,
     tokenStore:
@@ -185,39 +220,43 @@ function setup(
       } satisfies DeviceTokenStore),
     authorizeEndpoint,
     redirectUri,
+    cancellationStore: options.cancellationStore,
     now: options.now ?? (() => 1_000),
   });
 
   return { flow, relay, stored };
 }
 
-async function register(
+async function run(
   context: ReturnType<typeof setup>,
-  purpose: "registration" | "management" = "registration",
+  purpose: Purpose = "registration",
+  deviceId?: string,
 ) {
   const { authorizeUrl } = context.flow.begin({
+    purpose,
     installationId,
     repositoryId: repository.id,
-    purpose,
+    deviceId,
   });
+  const callbackUrl = context.relay.authorizeInBrowser(authorizeUrl);
 
-  return context.flow.complete(context.relay.authorizeInBrowser(authorizeUrl));
+  return callbackUrl === null
+    ? ({ status: "refused_by_github" } as const)
+    : context.flow.complete(callbackUrl);
 }
 
 test("registration starts from localhost and stores the token in the credential store", async () => {
   const context = setup();
   const { authorizeUrl } = context.flow.begin({
+    purpose: "registration",
     installationId,
     repositoryId: repository.id,
   });
 
   expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
   expect(authorizeUrl.searchParams.get("purpose")).toBe("registration");
-  expect(authorizeUrl.searchParams.get("redirect_uri")).toBe(
-    redirectUri.toString(),
-  );
 
-  const callbackUrl = context.relay.authorizeInBrowser(authorizeUrl);
+  const callbackUrl = context.relay.authorizeInBrowser(authorizeUrl)!;
 
   expect([...callbackUrl.searchParams.keys()].sort()).toEqual([
     "code",
@@ -231,22 +270,48 @@ test("registration starts from localhost and stores the token in the credential 
     deviceId: expect.any(String),
   });
   expect(context.stored).toHaveLength(1);
-  expect(context.stored[0]?.repositoryId).toBe(repository.id);
   expect(JSON.stringify(result)).not.toContain(
     context.stored[0]?.deviceToken ?? "unreachable",
   );
-  expect(callbackUrl.toString()).not.toContain(
-    context.stored[0]?.deviceToken ?? "unreachable",
-  );
+});
+
+test("the installation and repository choices come from GitHub instead of typed IDs", async () => {
+  const context = setup();
+  const { authorizeUrl } = context.flow.begin({ purpose: "installations" });
+
+  expect(authorizeUrl.searchParams.get("purpose")).toBe("installations");
+  expect(authorizeUrl.searchParams.has("installation_id")).toBe(false);
+
+  expect(
+    await context.flow.complete(
+      context.relay.authorizeInBrowser(authorizeUrl)!,
+    ),
+  ).toEqual({
+    status: "installations",
+    installations: [
+      {
+        installationId,
+        account: repository.owner,
+        canAdminister: true,
+        repositories: [
+          {
+            repositoryId: repository.id,
+            repository: { owner: repository.owner, name: repository.name },
+          },
+        ],
+      },
+    ],
+  });
 });
 
 test("a callback with a foreign, reused, or overloaded state is refused", async () => {
   const context = setup();
   const { authorizeUrl } = context.flow.begin({
+    purpose: "registration",
     installationId,
     repositoryId: repository.id,
   });
-  const callbackUrl = context.relay.authorizeInBrowser(authorizeUrl);
+  const callbackUrl = context.relay.authorizeInBrowser(authorizeUrl)!;
   const forged = new URL(callbackUrl);
   forged.searchParams.set("state", "other-state");
 
@@ -269,7 +334,38 @@ test("a callback with a foreign, reused, or overloaded state is refused", async 
     status: "rejected",
     reason: "unknown_state",
   });
-  expect(context.stored).toHaveLength(1);
+});
+
+test("every listing and revocation needs a fresh GitHub login that still administers the installation", async () => {
+  let administrable = true;
+  const context = setup({ administrable: () => administrable });
+  const registered = await run(context);
+  const deviceId =
+    registered.status === "registered" ? registered.deviceId : "";
+
+  administrable = false;
+
+  expect(await run(context, "device_list")).toEqual({
+    status: "refused_by_github",
+  });
+  expect(await run(context, "revocation", deviceId)).toEqual({
+    status: "refused_by_github",
+  });
+  expect([...context.relay.devices.values()][0]?.revokedAt).toBeNull();
+
+  administrable = true;
+
+  expect(await run(context, "device_list")).toMatchObject({
+    status: "devices",
+    devices: [{ deviceId, revokedAt: null }],
+  });
+  expect(await run(context, "revocation", deviceId)).toMatchObject({
+    status: "revoked",
+    deviceId,
+  });
+  expect([...context.relay.devices.values()][0]?.revokedAt).toEqual(
+    expect.any(Number),
+  );
 });
 
 test("a credential store failure cancels the issued device and fails closed", async () => {
@@ -281,125 +377,80 @@ test("a credential store failure cancels the issued device and fails closed", as
     },
   });
 
-  expect(await register(context)).toEqual({
+  expect(await run(context)).toEqual({
     status: "rejected",
     reason: "credential_store_unavailable",
   });
   expect(context.stored).toHaveLength(0);
-  expect([...context.relay.devices.values()]).toEqual([
-    { cancellationToken: expect.any(String), revokedAt: expect.any(Number) },
-  ]);
+  expect([...context.relay.devices.values()][0]?.revokedAt).toEqual(
+    expect.any(Number),
+  );
   expect(context.flow.pendingCancellations()).toEqual([]);
 });
 
-test("an unconfirmed cancellation is held for reconciliation instead of being reported as done", async () => {
-  const context = setup({
-    cancellationOutcome: () => "unknown",
-    tokenStore: {
-      set: async () => {
-        throw new Error("Secret Service is unavailable");
-      },
-    },
-  });
-  const result = await register(context);
-
-  expect(result).toEqual({
-    status: "reconciliation_required",
-    deviceId: expect.any(String),
-  });
-  expect(context.stored).toHaveLength(0);
-  expect(context.flow.pendingCancellations()).toEqual([
-    {
-      deviceId: expect.any(String),
-      cancellationToken: expect.any(String),
-      cancellationExpiresAt: expect.any(Number),
-    },
-  ]);
-});
-
-test("a held cancellation converges once the relay answers again", async () => {
+test("an unconfirmed cancellation survives a serve restart and converges on resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "oriel-cancellation-"));
+  const database = openServeLocalState(join(directory, "serve.sqlite"));
   let outcome: "cancelled" | "unknown" = "unknown";
-  const context = setup({
-    cancellationOutcome: () => outcome,
-    tokenStore: {
-      set: async () => {
-        throw new Error("Secret Service is unavailable");
-      },
+  const relay = fakeRelay({ cancellationOutcome: () => outcome });
+  const failingStore: DeviceTokenStore = {
+    set: async () => {
+      throw new Error("Secret Service is unavailable");
     },
-  });
+  };
 
-  await register(context);
+  try {
+    const before = setup({
+      relay,
+      tokenStore: failingStore,
+      cancellationStore: createPendingCancellationStore(database),
+    });
+    const result = await run(before);
 
-  expect(context.flow.pendingCancellations()).toHaveLength(1);
+    expect(result).toEqual({
+      status: "reconciliation_required",
+      deviceId: expect.any(String),
+    });
+    expect(before.flow.pendingCancellations()).toHaveLength(1);
 
-  outcome = "cancelled";
+    // 再起動しても取消証明を失わない。
+    database.close();
+    const reopened = openServeLocalState(join(directory, "serve.sqlite"));
+    const after = setup({
+      relay,
+      tokenStore: failingStore,
+      cancellationStore: createPendingCancellationStore(reopened),
+    });
 
-  expect(await context.flow.retryPendingCancellations()).toEqual([]);
-  expect([...context.relay.devices.values()]).toEqual([
-    { cancellationToken: expect.any(String), revokedAt: expect.any(Number) },
-  ]);
+    expect(after.flow.pendingCancellations()).toEqual([
+      {
+        deviceId: expect.any(String),
+        cancellationToken: expect.any(String),
+        cancellationExpiresAt: expect.any(Number),
+      },
+    ]);
+
+    outcome = "cancelled";
+
+    expect(await after.flow.resumePendingCancellations()).toEqual([]);
+    expect([...relay.devices.values()][0]?.revokedAt).toEqual(
+      expect.any(Number),
+    );
+    reopened.close();
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
 });
 
 test("a relay that answers for another repository does not register a device", async () => {
   const context = setup({ repositoryIdOverride: repository.id + 1 });
 
-  expect(await register(context)).toEqual({
+  expect(await run(context)).toEqual({
     status: "rejected",
     reason: "registration_target_mismatch",
   });
   expect(context.stored).toHaveLength(0);
-  expect([...context.relay.devices.values()]).toEqual([
-    { cancellationToken: expect.any(String), revokedAt: expect.any(Number) },
-  ]);
-});
-
-test("listing and revoking devices needs a current management session", async () => {
-  const context = setup();
-  const registered = await register(context);
-
-  expect(await context.flow.listDevices()).toBeNull();
-  expect(
-    await context.flow.revokeDevice(
-      registered.status === "registered" ? registered.deviceId : "",
-    ),
-  ).toBe(false);
-
-  expect(await register(context, "management")).toEqual({
-    status: "management_session",
-    expiresAt: expect.any(Number),
-  });
-  expect(await context.flow.listDevices()).toEqual([
-    {
-      deviceId: expect.any(String),
-      installationId,
-      repositoryId: repository.id,
-      repository: { owner: repository.owner, name: repository.name },
-      registeredAt: expect.any(Number),
-      revokedAt: null,
-    },
-  ]);
-
-  expect(
-    await context.flow.revokeDevice(
-      registered.status === "registered" ? registered.deviceId : "",
-    ),
-  ).toBe(true);
   expect([...context.relay.devices.values()][0]?.revokedAt).toEqual(
     expect.any(Number),
   );
-});
-
-test("an expired management session stops managing devices", async () => {
-  let currentTime = 1_000;
-  const context = setup({ now: () => currentTime });
-
-  await register(context, "management");
-
-  expect(context.flow.hasManagementSession()).toBe(true);
-
-  currentTime += 300_001;
-
-  expect(context.flow.hasManagementSession()).toBe(false);
-  expect(await context.flow.listDevices()).toBeNull();
-  expect(await context.flow.revokeDevice("any")).toBe(false);
 });

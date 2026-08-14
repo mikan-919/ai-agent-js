@@ -8,27 +8,26 @@ const repositoryId = 11;
 
 function fakeFlow(overrides: Partial<DeviceRegistrationFlow> = {}) {
   const completed: string[] = [];
-  const revoked: string[] = [];
+  const started: Record<string, unknown>[] = [];
   const flow = {
-    begin: ({ purpose = "registration" }) => ({
-      authorizeUrl: new URL(`https://relay.test/device/authorize?p=${purpose}`),
-    }),
+    begin: (input: Record<string, unknown>) => {
+      started.push(input);
+      return {
+        authorizeUrl: new URL(
+          `https://relay.test/device/authorize?p=${String(input.purpose)}`,
+        ),
+      };
+    },
     complete: async (callbackUrl: URL | string) => {
       completed.push(String(callbackUrl));
       return { status: "registered" as const, deviceId: "device-1" };
     },
     pendingCancellations: () => [],
-    retryPendingCancellations: async () => [],
-    hasManagementSession: () => true,
-    listDevices: async () => [],
-    revokeDevice: async (deviceId: string) => {
-      revoked.push(deviceId);
-      return true;
-    },
+    resumePendingCancellations: async () => [],
     ...overrides,
   } as unknown as DeviceRegistrationFlow;
 
-  return { flow, completed, revoked };
+  return { flow, completed, started };
 }
 
 function startServer(flow: DeviceRegistrationFlow) {
@@ -178,34 +177,117 @@ test("the relay callback is a plain GET that changes nothing until the UI posts 
   }
 });
 
-test("devices are listed and revoked only through the localhost UI with a management session", async () => {
-  const { flow, revoked } = fakeFlow({
-    listDevices: async () => [
+test("the UI starts a fresh GitHub login for listing and for each revocation", async () => {
+  const { flow, started } = fakeFlow();
+  const server = startServer(flow);
+
+  try {
+    const shell = await openShell(server.origin);
+    const post = (body: unknown) =>
+      fetch(`${server.origin}/api/device-registrations`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Origin: server.origin,
+          cookie: shell.session,
+          "x-oriel-csrf": shell.csrf,
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect((await post({ purpose: "installations" })).status).toBe(200);
+    expect(
+      (
+        await post({
+          purpose: "device_list",
+          installationId,
+          repositoryId,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post({
+          purpose: "revocation",
+          installationId,
+          repositoryId,
+          deviceId: "device-1",
+        })
+      ).status,
+    ).toBe(200);
+
+    // 失効にはdeviceの指定が要る。IDだけの手入力経路は無い。
+    expect(
+      (await post({ purpose: "revocation", installationId, repositoryId }))
+        .status,
+    ).toBe(400);
+    expect((await post({ purpose: "registration" })).status).toBe(400);
+    expect((await post({ purpose: "unknown" })).status).toBe(400);
+
+    expect(started).toEqual([
       {
-        deviceId: "device-1",
+        purpose: "installations",
+        installationId: 0,
+        repositoryId: 0,
+        deviceId: undefined,
+      },
+      {
+        purpose: "device_list",
         installationId,
         repositoryId,
-        repository: { owner: "mikan-919", name: "oriel" },
-        registeredAt: 1_000,
-        revokedAt: null,
+        deviceId: undefined,
       },
-    ],
+      {
+        purpose: "revocation",
+        installationId,
+        repositoryId,
+        deviceId: "device-1",
+      },
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
+test("the shell offers GitHub installation choices instead of typed IDs", async () => {
+  const { flow } = fakeFlow();
+  const server = startServer(flow);
+
+  try {
+    const shell = await openShell(server.origin);
+
+    expect(shell.html).toContain("GitHubのinstallation");
+    expect(shell.html).toContain('id="targets"');
+    expect(shell.html).not.toContain('name="installationId"');
+  } finally {
+    server.close();
+  }
+});
+
+test("held cancellations are reported and can be resumed from the localhost UI", async () => {
+  const pending = [
+    {
+      deviceId: "device-1",
+      cancellationToken: "cancellation",
+      cancellationExpiresAt: 2_000,
+    },
+  ];
+  const { flow } = fakeFlow({
+    pendingCancellations: () => pending,
+    resumePendingCancellations: async () => pending,
   });
   const server = startServer(flow);
 
   try {
     const shell = await openShell(server.origin);
-    const listed = await fetch(`${server.origin}/api/devices`, {
+    const listed = await fetch(`${server.origin}/api/device-cancellations`, {
       headers: { Origin: server.origin, cookie: shell.session },
     });
 
-    expect(listed.status).toBe(200);
-    expect(await listed.json()).toMatchObject({
-      devices: [{ deviceId: "device-1" }],
-    });
+    expect(await listed.json()).toEqual({ pending });
 
-    const revocation = await fetch(
-      `${server.origin}/api/devices/device-1/revocation`,
+    const resumed = await fetch(
+      `${server.origin}/api/device-cancellations/resume`,
       {
         method: "POST",
         headers: {
@@ -216,43 +298,7 @@ test("devices are listed and revoked only through the localhost UI with a manage
       },
     );
 
-    expect(revocation.status).toBe(200);
-    expect(revoked).toEqual(["device-1"]);
-  } finally {
-    server.close();
-  }
-});
-
-test("management actions are refused without a current management session", async () => {
-  const { flow } = fakeFlow({
-    hasManagementSession: () => false,
-    listDevices: async () => null,
-    revokeDevice: async () => false,
-  });
-  const server = startServer(flow);
-
-  try {
-    const shell = await openShell(server.origin);
-
-    expect(
-      (
-        await fetch(`${server.origin}/api/devices`, {
-          headers: { Origin: server.origin, cookie: shell.session },
-        })
-      ).status,
-    ).toBe(409);
-    expect(
-      (
-        await fetch(`${server.origin}/api/devices/device-1/revocation`, {
-          method: "POST",
-          headers: {
-            Origin: server.origin,
-            cookie: shell.session,
-            "x-oriel-csrf": shell.csrf,
-          },
-        })
-      ).status,
-    ).toBe(409);
+    expect(await resumed.json()).toEqual({ pending });
   } finally {
     server.close();
   }

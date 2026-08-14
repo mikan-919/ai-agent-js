@@ -1,7 +1,9 @@
 import {
   parseDeviceCancellationRequest,
   parseDeviceTokenExchangeRequest,
+  type DeviceRegistrationPurpose,
   type DeviceTokenExchangeResponse,
+  type GitHubInstallation,
 } from "@mikan-919/oriel-contracts";
 import { Hono } from "hono";
 
@@ -22,7 +24,6 @@ export interface RelayOptions {
   relayOrigin: string;
   /** 運用値は測定と検証専用環境から決めるため、relayは既定値を持たない。 */
   codeExpiryMs: number;
-  managementSessionExpiryMs: number;
   cancellationExpiryMs: number;
   now?: () => number;
 }
@@ -30,24 +31,17 @@ export interface RelayOptions {
 interface AuthorizationState {
   codeChallenge: string;
   state: string;
-  purpose: "registration" | "management";
+  purpose: DeviceRegistrationPurpose;
+  deviceId: string | null;
   installationId: number;
   repositoryId: number;
   redirectUri: string;
   expiresAt: number;
 }
 
-/**
- * 管理session。installationを現在管理できることをGitHub loginの直後に確認してから
- * 短命の署名値として発行し、relayへ保存しない。
- */
-interface ManagementSession {
-  installationId: number;
-  repositoryId: number;
-  expiresAt: number;
-}
-
 const oauthCallbackPath = "/device/authorize/callback";
+/** installation選択のcodeだけを預かる、repositoryに紐付かない登録簿。 */
+const discoveryRegistryName = "discovery";
 
 /** localhostへ戻す先はloopbackだけに限る。 */
 function isLoopbackRedirect(value: string): boolean {
@@ -65,7 +59,7 @@ function isLoopbackRedirect(value: string): boolean {
   }
 }
 
-/** codeと取消証明は、担当するDurable Objectを見つけるための経路情報を前置きする。 */
+/** codeと取消証明とdevice tokenは、担当するDurable Objectへの経路情報を前置きする。 */
 function routedSecret(installationId: number, repositoryId: number): string {
   return `${installationId}.${repositoryId}.${randomSecret()}`;
 }
@@ -80,11 +74,20 @@ function routeOf(
   };
 
   return Number.isInteger(parsed.installationId) &&
-    parsed.installationId > 0 &&
+    parsed.installationId >= 0 &&
     Number.isInteger(parsed.repositoryId) &&
-    parsed.repositoryId > 0
+    parsed.repositoryId >= 0
     ? parsed
     : null;
+}
+
+function isPurpose(value: string): value is DeviceRegistrationPurpose {
+  return (
+    value === "installations" ||
+    value === "registration" ||
+    value === "device_list" ||
+    value === "revocation"
+  );
 }
 
 export function createRelayApp({
@@ -93,35 +96,68 @@ export function createRelayApp({
   signingKey,
   relayOrigin,
   codeExpiryMs,
-  managementSessionExpiryMs,
   cancellationExpiryMs,
   now = Date.now,
 }: RelayOptions) {
   const app = new Hono();
 
   function registryFor(installationId: number, repositoryId: number) {
-    return deviceRegistry.get(
-      deviceRegistry.idFromName(`${installationId}/${repositoryId}`),
+    const name =
+      installationId === 0
+        ? discoveryRegistryName
+        : `${installationId}/${repositoryId}`;
+
+    return deviceRegistry.get(deviceRegistry.idFromName(name));
+  }
+
+  async function listInstallations(
+    userToken: string,
+  ): Promise<GitHubInstallation[]> {
+    const installations = await github.listInstallations(userToken);
+
+    return Promise.all(
+      installations.map(async (installation) => ({
+        installationId: installation.id,
+        account: installation.account,
+        canAdminister: await github.canAdministerInstallation({
+          userToken,
+          installationId: installation.id,
+        }),
+        repositories: (
+          await github.listInstallationRepositories({
+            userToken,
+            installationId: installation.id,
+          })
+        ).map((repository) => ({
+          repositoryId: repository.id,
+          repository: { owner: repository.owner, name: repository.name },
+        })),
+      })),
     );
   }
 
   app.get("/device/authorize", async (context) => {
     const parameters = new URL(context.req.url).searchParams;
-    const installationId = Number(parameters.get("installation_id"));
-    const repositoryId = Number(parameters.get("repository_id"));
+    const rawPurpose = parameters.get("purpose") ?? "registration";
+    const purpose = isPurpose(rawPurpose) ? rawPurpose : null;
+    const discovering = purpose === "installations";
+    const installationId = discovering
+      ? 0
+      : Number(parameters.get("installation_id"));
+    const repositoryId = discovering
+      ? 0
+      : Number(parameters.get("repository_id"));
+    const deviceId = parameters.get("device_id");
     const codeChallenge = parameters.get("code_challenge") ?? "";
     const state = parameters.get("state") ?? "";
     const redirectUri = parameters.get("redirect_uri") ?? "";
-    const purpose =
-      parameters.get("purpose") === "management"
-        ? "management"
-        : "registration";
 
     if (
+      purpose === null ||
       !Number.isInteger(installationId) ||
-      installationId <= 0 ||
       !Number.isInteger(repositoryId) ||
-      repositoryId <= 0 ||
+      (!discovering && (installationId <= 0 || repositoryId <= 0)) ||
+      (purpose === "revocation" && (deviceId === null || deviceId === "")) ||
       codeChallenge === "" ||
       state === "" ||
       parameters.get("code_challenge_method") !== "S256" ||
@@ -134,6 +170,7 @@ export function createRelayApp({
       codeChallenge,
       state,
       purpose,
+      deviceId,
       installationId,
       repositoryId,
       redirectUri,
@@ -160,6 +197,7 @@ export function createRelayApp({
       return context.text("Bad Request", 400);
     }
 
+    // 操作のたびに新しいGitHub loginを求め、その場の現在値だけで判断する。
     const userToken = await github.exchangeAuthorizationCode({
       code: parameters.get("code") ?? "",
       redirectUri: `${relayOrigin}${oauthCallbackPath}`,
@@ -171,26 +209,35 @@ export function createRelayApp({
       return context.text("Unauthorized", 401);
     }
 
-    const repositories = await github.listInstallationRepositories({
-      userToken,
-      installationId: started.installationId,
-    });
-    const repository = repositories.find(
-      (candidate) => candidate.id === started.repositoryId,
-    );
+    let repositoryOwner = "";
+    let repositoryName = "";
 
-    if (repository === undefined) {
-      return context.text("Forbidden", 403);
-    }
-
-    if (
-      started.purpose === "management" &&
-      !(await github.canAdministerInstallation({
+    if (started.purpose !== "installations") {
+      const repositories = await github.listInstallationRepositories({
         userToken,
         installationId: started.installationId,
-      }))
-    ) {
-      return context.text("Forbidden", 403);
+      });
+      const repository = repositories.find(
+        (candidate) => candidate.id === started.repositoryId,
+      );
+
+      if (repository === undefined) {
+        return context.text("Forbidden", 403);
+      }
+
+      repositoryOwner = repository.owner;
+      repositoryName = repository.name;
+
+      // 失効と一覧はinstallationを現在管理できるGitHub userだけに許す。
+      if (
+        started.purpose !== "registration" &&
+        !(await github.canAdministerInstallation({
+          userToken,
+          installationId: started.installationId,
+        }))
+      ) {
+        return context.text("Forbidden", 403);
+      }
     }
 
     const code = routedSecret(started.installationId, started.repositoryId);
@@ -202,12 +249,22 @@ export function createRelayApp({
       codeChallenge: started.codeChallenge,
       state: started.state,
       purpose: started.purpose,
+      deviceId: started.deviceId ?? undefined,
       installationId: started.installationId,
       repositoryId: started.repositoryId,
-      repositoryOwner: repository.owner,
-      repositoryName: repository.name,
+      repositoryOwner,
+      repositoryName,
       expiresAt: now() + codeExpiryMs,
     });
+
+    if (started.purpose === "installations") {
+      // 選択肢はcodeの交換時に返す。localhostへ戻るURLへはcodeとstateだけを載せる。
+      await registry.rememberInstallations(
+        await sha256Hex(code),
+        JSON.stringify(await listInstallations(userToken)),
+        now() + codeExpiryMs,
+      );
+    }
 
     const target = new URL(started.redirectUri);
     target.searchParams.set("code", code);
@@ -232,7 +289,8 @@ export function createRelayApp({
     }
 
     const registry = registryFor(route.installationId, route.repositoryId);
-    const consumed = await registry.consumeCode(await sha256Hex(request.code));
+    const codeHash = await sha256Hex(request.code);
+    const consumed = await registry.consumeCode(codeHash);
 
     if (
       consumed === null ||
@@ -246,26 +304,51 @@ export function createRelayApp({
       owner: consumed.repositoryOwner,
       name: consumed.repositoryName,
     };
+    const target = {
+      installationId: consumed.installationId,
+      repositoryId: consumed.repositoryId,
+      repository,
+    };
 
-    if (consumed.purpose === "management") {
-      const session: ManagementSession = {
-        installationId: consumed.installationId,
-        repositoryId: consumed.repositoryId,
-        expiresAt: now() + managementSessionExpiryMs,
-      };
-      const response: DeviceTokenExchangeResponse = {
-        purpose: "management",
-        managementToken: await signPayload(signingKey, session),
-        expiresAt: session.expiresAt,
-        installationId: consumed.installationId,
-        repositoryId: consumed.repositoryId,
-        repository,
-      };
+    if (consumed.purpose === "installations") {
+      const remembered = await registry.takeInstallations(codeHash);
 
-      return context.json(response);
+      return context.json({
+        purpose: "installations",
+        installations: JSON.parse(remembered ?? "[]") as GitHubInstallation[],
+      } satisfies DeviceTokenExchangeResponse);
     }
 
-    const deviceToken = randomSecret();
+    if (consumed.purpose === "device_list") {
+      return context.json({
+        purpose: "device_list",
+        ...target,
+        devices: await registry.listDevices(),
+      } satisfies DeviceTokenExchangeResponse);
+    }
+
+    if (consumed.purpose === "revocation") {
+      const revoked =
+        consumed.deviceId === null
+          ? null
+          : await registry.revokeDevice(consumed.deviceId, now());
+
+      if (revoked === null || revoked.revokedAt === null) {
+        return context.text("Not Found", 404);
+      }
+
+      return context.json({
+        purpose: "revocation",
+        ...target,
+        deviceId: revoked.deviceId,
+        revokedAt: revoked.revokedAt,
+      } satisfies DeviceTokenExchangeResponse);
+    }
+
+    const deviceToken = routedSecret(
+      consumed.installationId,
+      consumed.repositoryId,
+    );
     const cancellationToken = routedSecret(
       consumed.installationId,
       consumed.repositoryId,
@@ -282,68 +365,15 @@ export function createRelayApp({
       repositoryName: repository.name,
       registeredAt: now(),
     });
-    const response: DeviceTokenExchangeResponse = {
+
+    return context.json({
       purpose: "registration",
       deviceId: registered.deviceId,
       deviceToken,
       cancellationToken,
       cancellationExpiresAt,
-      installationId: consumed.installationId,
-      repositoryId: consumed.repositoryId,
-      repository,
-    };
-
-    return context.json(response);
-  });
-
-  async function managementSession(
-    header: string | undefined,
-  ): Promise<ManagementSession | null> {
-    const token = header?.startsWith("Bearer ") ? header.slice(7) : "";
-    const session = await verifyPayload<ManagementSession>(signingKey, token);
-
-    return session === null || session.expiresAt < now() ? null : session;
-  }
-
-  app.get("/devices", async (context) => {
-    const session = await managementSession(
-      context.req.header("authorization"),
-    );
-
-    if (session === null) {
-      return context.text("Unauthorized", 401);
-    }
-
-    const devices = await registryFor(
-      session.installationId,
-      session.repositoryId,
-    ).listDevices();
-
-    return context.json({ devices });
-  });
-
-  app.post("/devices/:deviceId/revocation", async (context) => {
-    const session = await managementSession(
-      context.req.header("authorization"),
-    );
-
-    if (session === null) {
-      return context.text("Unauthorized", 401);
-    }
-
-    const revoked = await registryFor(
-      session.installationId,
-      session.repositoryId,
-    ).revokeDevice(context.req.param("deviceId"), now());
-
-    if (revoked === null || revoked.revokedAt === null) {
-      return context.text("Not Found", 404);
-    }
-
-    return context.json({
-      deviceId: revoked.deviceId,
-      revokedAt: revoked.revokedAt,
-    });
+      ...target,
+    } satisfies DeviceTokenExchangeResponse);
   });
 
   app.post("/device/cancellation", async (context) => {
@@ -373,6 +403,35 @@ export function createRelayApp({
     return outcome === "cancelled"
       ? context.json({ deviceId: request.deviceId, cancelled: true })
       : context.text("Forbidden", 403);
+  });
+
+  // 所有権接続。device bearer tokenはAuthorization headerだけで受け取る。
+  app.get("/ownership", async (context) => {
+    if (context.req.header("upgrade")?.toLowerCase() !== "websocket") {
+      return context.text("Upgrade Required", 426);
+    }
+
+    const authorization = context.req.header("authorization") ?? "";
+    const deviceToken = authorization.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
+    const route = routeOf(deviceToken);
+    const parameters = new URL(context.req.url).searchParams;
+    const key = parameters.get("key") ?? "";
+
+    if (route === null || route.installationId === 0 || key === "") {
+      return context.text("Unauthorized", 401);
+    }
+
+    // upgradeはDurable Objectが受け、接続付随情報として所有権を持つ。
+    return registryFor(route.installationId, route.repositoryId).fetch(
+      new Request(context.req.url, {
+        headers: {
+          upgrade: "websocket",
+          "x-device-token-hash": await sha256Hex(deviceToken),
+        },
+      }),
+    );
   });
 
   return app;

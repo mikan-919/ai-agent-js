@@ -15,7 +15,6 @@ export interface RelayEnv {
   RELAY_VERSION: string;
   /** 運用値はdeploy設定から与える。欠けている場合はfail closedにする。 */
   DEVICE_CODE_EXPIRY_MS: string;
-  DEVICE_MANAGEMENT_SESSION_EXPIRY_MS: string;
   DEVICE_CANCELLATION_EXPIRY_MS: string;
 }
 
@@ -43,10 +42,6 @@ export default {
       codeExpiryMs: requiredMilliseconds(
         env.DEVICE_CODE_EXPIRY_MS,
         "DEVICE_CODE_EXPIRY_MS",
-      ),
-      managementSessionExpiryMs: requiredMilliseconds(
-        env.DEVICE_MANAGEMENT_SESSION_EXPIRY_MS,
-        "DEVICE_MANAGEMENT_SESSION_EXPIRY_MS",
       ),
       cancellationExpiryMs: requiredMilliseconds(
         env.DEVICE_CANCELLATION_EXPIRY_MS,

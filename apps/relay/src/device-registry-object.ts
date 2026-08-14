@@ -1,11 +1,19 @@
-import type { DeviceRecord } from "@mikan-919/oriel-contracts";
+import {
+  parseOwnershipClientMessage,
+  type DeviceRecord,
+  type OwnershipServerMessage,
+} from "@mikan-919/oriel-contracts";
 import { DurableObject } from "cloudflare:workers";
+
+export type RegistrationCodePurpose =
+  "installations" | "registration" | "device_list" | "revocation";
 
 export interface IssueCodeInput {
   codeHash: string;
   codeChallenge: string;
   state: string;
-  purpose: "registration" | "management";
+  purpose: RegistrationCodePurpose;
+  deviceId?: string;
   installationId: number;
   repositoryId: number;
   repositoryOwner: string;
@@ -16,7 +24,8 @@ export interface IssueCodeInput {
 export interface ConsumedCode {
   codeChallenge: string;
   state: string;
-  purpose: "registration" | "management";
+  purpose: RegistrationCodePurpose;
+  deviceId: string | null;
   installationId: number;
   repositoryId: number;
   repositoryOwner: string;
@@ -34,6 +43,16 @@ export interface RegisterDeviceInput {
   repositoryOwner: string;
   repositoryName: string;
   registeredAt: number;
+}
+
+/** 休止を越えて残る接続付随情報。 */
+interface OwnershipAttachment {
+  deviceId: string;
+  kind: "job" | "branch";
+  key: string;
+  leaseId: string;
+  parentLeaseId: string | null;
+  valid: boolean;
 }
 
 interface DeviceRow extends Record<string, SqlStorageValue> {
@@ -74,6 +93,7 @@ export class DeviceRegistryObject extends DurableObject {
           code_challenge TEXT NOT NULL,
           state TEXT NOT NULL,
           purpose TEXT NOT NULL,
+          device_id TEXT,
           installation_id INTEGER NOT NULL,
           repository_id INTEGER NOT NULL,
           repository_owner TEXT NOT NULL,
@@ -90,6 +110,11 @@ export class DeviceRegistryObject extends DurableObject {
           registered_at INTEGER NOT NULL,
           revoked_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS installation_choices (
+          code_hash TEXT PRIMARY KEY,
+          payload TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS device_cancellations (
           device_id TEXT PRIMARY KEY,
           cancellation_token_hash TEXT NOT NULL,
@@ -102,13 +127,14 @@ export class DeviceRegistryObject extends DurableObject {
   issueCode(input: IssueCodeInput): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO registration_codes
-       (code_hash, code_challenge, state, purpose, installation_id, repository_id,
-        repository_owner, repository_name, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (code_hash, code_challenge, state, purpose, device_id, installation_id,
+        repository_id, repository_owner, repository_name, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.codeHash,
       input.codeChallenge,
       input.state,
       input.purpose,
+      input.deviceId ?? null,
       input.installationId,
       input.repositoryId,
       input.repositoryOwner,
@@ -124,6 +150,7 @@ export class DeviceRegistryObject extends DurableObject {
         code_challenge: string;
         state: string;
         purpose: string;
+        device_id: string | null;
         installation_id: number;
         repository_id: number;
         repository_owner: string;
@@ -142,7 +169,8 @@ export class DeviceRegistryObject extends DurableObject {
     return {
       codeChallenge: row.code_challenge,
       state: row.state,
-      purpose: row.purpose === "management" ? "management" : "registration",
+      purpose: row.purpose as RegistrationCodePurpose,
+      deviceId: row.device_id,
       installationId: row.installation_id,
       repositoryId: row.repository_id,
       repositoryOwner: row.repository_owner,
@@ -231,6 +259,8 @@ export class DeviceRegistryObject extends DurableObject {
       `DELETE FROM device_cancellations WHERE device_id = ?`,
       deviceId,
     );
+    // 登録簿を失効させた後で、そのdeviceの所有権接続とブランチ排他を閉じる。
+    this.closeOwnershipOf(deviceId);
 
     return toDeviceRecord(row);
   }
@@ -267,6 +297,173 @@ export class DeviceRegistryObject extends DurableObject {
       : "cancelled";
   }
 
+  rememberInstallations(
+    codeHash: string,
+    payload: string,
+    expiresAt: number,
+  ): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO installation_choices (code_hash, payload, expires_at) VALUES (?, ?, ?)`,
+      codeHash,
+      payload,
+      expiresAt,
+    );
+  }
+
+  takeInstallations(codeHash: string): string | null {
+    const [row] = this.ctx.storage.sql
+      .exec<{ payload: string }>(
+        `DELETE FROM installation_choices WHERE code_hash = ? RETURNING payload`,
+        codeHash,
+      )
+      .toArray();
+
+    return row?.payload ?? null;
+  }
+
+  /**
+   * 所有権接続のupgrade。取得IDと対象キーは接続付随情報だけに置き、
+   * Durable Objectsストレージへ所有権recordも履歴も保存しない。
+   */
+  override fetch(request: Request): Response {
+    const url = new URL(request.url);
+    const deviceTokenHash = request.headers.get("x-device-token-hash") ?? "";
+    const kind = url.searchParams.get("kind") === "branch" ? "branch" : "job";
+    const key = url.searchParams.get("key") ?? "";
+    const parentLeaseId = url.searchParams.get("parent_lease_id");
+    const device = this.authenticateDevice(deviceTokenHash);
+
+    if (
+      request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
+      key === "" ||
+      device === null
+    ) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const outcome = this.admitOwnership({
+      deviceId: device.deviceId,
+      kind,
+      key,
+      parentLeaseId,
+    });
+    const pair = new WebSocketPair();
+
+    if (outcome.type === "ownership.acquired") {
+      this.ctx.acceptWebSocket(pair[1]);
+      pair[1].serializeAttachment({
+        deviceId: device.deviceId,
+        kind,
+        key,
+        leaseId: outcome.leaseId,
+        parentLeaseId,
+        valid: true,
+      } satisfies OwnershipAttachment);
+      pair[1].send(JSON.stringify(outcome));
+    } else {
+      pair[1].accept();
+      pair[1].send(JSON.stringify(outcome));
+      pair[1].close(
+        4001,
+        outcome.type === "ownership.rejected" ? outcome.reason : "rejected",
+      );
+    }
+
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  private admitOwnership(input: {
+    deviceId: string;
+    kind: "job" | "branch";
+    key: string;
+    parentLeaseId: string | null;
+  }): OwnershipServerMessage {
+    if (input.kind === "branch") {
+      const parent = this.activeOwnership().find(
+        (attachment) =>
+          attachment.kind === "job" &&
+          attachment.leaseId === input.parentLeaseId &&
+          attachment.deviceId === input.deviceId,
+      );
+
+      if (parent === undefined) {
+        return { type: "ownership.rejected", reason: "ownership_not_current" };
+      }
+    }
+
+    const taken = this.activeOwnership().some(
+      (attachment) =>
+        attachment.kind === input.kind && attachment.key === input.key,
+    );
+
+    return taken
+      ? { type: "ownership.rejected", reason: "already_owned" }
+      : { type: "ownership.acquired", leaseId: crypto.randomUUID() };
+  }
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    if (typeof message !== "string") {
+      return;
+    }
+
+    let request;
+
+    try {
+      request = parseOwnershipClientMessage(JSON.parse(message));
+    } catch {
+      ws.send(
+        JSON.stringify({
+          type: "ownership.rejected",
+          reason: "invalid_request",
+        } satisfies OwnershipServerMessage),
+      );
+      return;
+    }
+
+    const attachment = ws.deserializeAttachment() as OwnershipAttachment | null;
+
+    ws.send(
+      JSON.stringify({
+        type: "ownership.confirmed",
+        requestId: request.requestId,
+        current:
+          attachment !== null &&
+          attachment.valid &&
+          attachment.leaseId === request.leaseId,
+      } satisfies OwnershipServerMessage),
+    );
+  }
+
+  private activeOwnership(): OwnershipAttachment[] {
+    return this.ctx
+      .getWebSockets()
+      .map((ws) => ws.deserializeAttachment() as OwnershipAttachment | null)
+      .filter(
+        (attachment): attachment is OwnershipAttachment =>
+          attachment !== null && attachment.valid,
+      );
+  }
+
+  /** 失効したdeviceの接続を、付随情報を失効させてから閉じる。 */
+  private closeOwnershipOf(deviceId: string): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment =
+        ws.deserializeAttachment() as OwnershipAttachment | null;
+
+      if (attachment === null || attachment.deviceId !== deviceId) {
+        continue;
+      }
+
+      ws.serializeAttachment({ ...attachment, valid: false });
+      ws.send(
+        JSON.stringify({
+          type: "ownership.revoked",
+        } satisfies OwnershipServerMessage),
+      );
+      ws.close(4003, "device revoked");
+    }
+  }
+
   /** 期限切れのcodeと取消証明を掃除する。失効済deviceの記録は残す。 */
   purgeExpired(now: number): void {
     this.ctx.storage.sql.exec(
@@ -275,6 +472,10 @@ export class DeviceRegistryObject extends DurableObject {
     );
     this.ctx.storage.sql.exec(
       `DELETE FROM device_cancellations WHERE expires_at < ?`,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      `DELETE FROM installation_choices WHERE expires_at < ?`,
       now,
     );
   }

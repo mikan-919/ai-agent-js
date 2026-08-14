@@ -1,9 +1,21 @@
 import { randomBytes } from "node:crypto";
 
+import type { DeviceRegistrationPurpose } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 import { Hono, type Context } from "hono";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
+
+function isDeviceRegistrationPurpose(
+  value: string,
+): value is DeviceRegistrationPurpose {
+  return (
+    value === "installations" ||
+    value === "registration" ||
+    value === "device_list" ||
+    value === "revocation"
+  );
+}
 
 const loopbackHostname = "127.0.0.1";
 const readinessPath = "/healthz";
@@ -34,16 +46,11 @@ function shellHtml(csrfToken: string): string {
   </head>
   <body>
     <h1>${identity.displayName} device</h1>
-    <form id="start">
-      <label>installation ID <input name="installationId" type="number" required /></label>
-      <label>repository ID <input name="repositoryId" type="number" required /></label>
-      <label>purpose
-        <select name="purpose">
-          <option value="registration">registration</option>
-          <option value="management">management</option>
-        </select>
-      </label>
-      <button type="submit">GitHubで続ける</button>
+    <button id="discover" type="button">GitHubのinstallationを読み込む</button>
+    <form id="target" hidden>
+      <label>repository <select name="target" id="targets"></select></label>
+      <button type="submit" name="purpose" value="registration">このrepositoryへ登録</button>
+      <button type="submit" name="purpose" value="device_list">deviceを一覧</button>
     </form>
     <ul id="devices"></ul>
     <pre id="result"></pre>
@@ -58,45 +65,84 @@ function shellHtml(csrfToken: string): string {
           headers: { "content-type": "application/json", "${csrfHeaderName}": csrf },
           body: JSON.stringify(body ?? {}),
         }).then((response) => response.json().catch(() => ({ status: response.status })));
-
-      document.querySelector("#start").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const form = new FormData(event.target);
-        const started = await post("/api/device-registrations", {
-          installationId: Number(form.get("installationId")),
-          repositoryId: Number(form.get("repositoryId")),
-          purpose: form.get("purpose"),
-        });
+      const start = async (body) => {
+        const started = await post("/api/device-registrations", body);
         if (started.authorizeUrl) {
           window.location.href = started.authorizeUrl;
         } else {
           show(started);
         }
+      };
+
+      document.querySelector("#discover").addEventListener("click", () => {
+        void start({ purpose: "installations" });
       });
+
+      const showTargets = (installations) => {
+        const targets = document.querySelector("#targets");
+        targets.replaceChildren();
+        for (const installation of installations) {
+          for (const entry of installation.repositories) {
+            const option = document.createElement("option");
+            option.value = JSON.stringify({
+              installationId: installation.installationId,
+              repositoryId: entry.repositoryId,
+            });
+            option.textContent =
+              entry.repository.owner + "/" + entry.repository.name +
+              (installation.canAdminister ? "" : " (失効不可)");
+            targets.append(option);
+          }
+        }
+        document.querySelector("#target").hidden = installations.length === 0;
+      };
+
+      document.querySelector("#target").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const selected = document.querySelector("#targets").value;
+        if (selected) {
+          void start({
+            purpose: event.submitter.value,
+            ...JSON.parse(selected),
+          });
+        }
+      });
+
+      const showDevices = (devices, target) => {
+        const list = document.querySelector("#devices");
+        list.replaceChildren();
+        for (const device of devices) {
+          const item = document.createElement("li");
+          item.textContent =
+            device.deviceId + (device.revokedAt === null ? "" : " (revoked)");
+          if (device.revokedAt === null) {
+            const button = document.createElement("button");
+            button.textContent = "失効";
+            button.addEventListener("click", () => {
+              void start({ purpose: "revocation", deviceId: device.deviceId, ...target });
+            });
+            item.append(button);
+          }
+          list.append(item);
+        }
+      };
 
       const parameters = new URLSearchParams(window.location.search);
       if (parameters.has("code") && parameters.has("state")) {
-        show(
-          await post("/api/device-registrations/completion", {
-            code: parameters.get("code"),
-            state: parameters.get("state"),
-          }),
-        );
-      }
-
-      const listed = await fetch("/api/devices").then((response) =>
-        response.ok ? response.json() : { devices: [] },
-      );
-      for (const device of listed.devices) {
-        const item = document.createElement("li");
-        item.textContent = device.deviceId + (device.revokedAt === null ? "" : " (revoked)");
-        const button = document.createElement("button");
-        button.textContent = "失効";
-        button.addEventListener("click", async () => {
-          show(await post("/api/devices/" + encodeURIComponent(device.deviceId) + "/revocation"));
+        const completed = await post("/api/device-registrations/completion", {
+          code: parameters.get("code"),
+          state: parameters.get("state"),
         });
-        item.append(button);
-        document.querySelector("#devices").append(item);
+        show(completed);
+        if (completed.status === "installations") {
+          showTargets(completed.installations);
+        }
+        if (completed.status === "devices") {
+          showDevices(completed.devices, {
+            installationId: completed.installationId,
+            repositoryId: completed.repositoryId,
+          });
+        }
       }
     </script>
   </body>
@@ -176,25 +222,32 @@ export function startServeHttpServer({
       installationId?: unknown;
       repositoryId?: unknown;
       purpose?: unknown;
+      deviceId?: unknown;
     } | null;
-    const installationId = Number(body?.installationId);
-    const repositoryId = Number(body?.repositoryId);
-    const purpose =
-      body?.purpose === "management" ? "management" : "registration";
+    const purpose = body?.purpose;
+    const installationId = Number(body?.installationId ?? 0);
+    const repositoryId = Number(body?.repositoryId ?? 0);
+    const deviceId = body?.deviceId;
 
     if (
-      !Number.isInteger(installationId) ||
-      installationId <= 0 ||
-      !Number.isInteger(repositoryId) ||
-      repositoryId <= 0
+      typeof purpose !== "string" ||
+      !isDeviceRegistrationPurpose(purpose) ||
+      (purpose !== "installations" &&
+        (!Number.isInteger(installationId) ||
+          installationId <= 0 ||
+          !Number.isInteger(repositoryId) ||
+          repositoryId <= 0)) ||
+      (purpose === "revocation" &&
+        (typeof deviceId !== "string" || deviceId === ""))
     ) {
       return context.text("Bad Request", 400);
     }
 
     const { authorizeUrl } = deviceRegistration!.begin({
+      purpose,
       installationId,
       repositoryId,
-      purpose,
+      deviceId: typeof deviceId === "string" ? deviceId : undefined,
     });
 
     return context.json({ authorizeUrl: authorizeUrl.toString() });
@@ -217,23 +270,15 @@ export function startServeHttpServer({
     return context.json(await deviceRegistration!.complete(callbackUrl));
   });
 
-  app.get("/api/devices", async (context) => {
-    const devices = await deviceRegistration!.listDevices();
+  app.get("/api/device-cancellations", (context) =>
+    context.json({ pending: deviceRegistration!.pendingCancellations() }),
+  );
 
-    return devices === null
-      ? context.text("A current management session is required", 409)
-      : context.json({ devices });
-  });
-
-  app.post("/api/devices/:deviceId/revocation", async (context) => {
-    const revoked = await deviceRegistration!.revokeDevice(
-      context.req.param("deviceId"),
-    );
-
-    return revoked
-      ? context.json({ status: "revoked" })
-      : context.text("A current management session is required", 409);
-  });
+  app.post("/api/device-cancellations/resume", async (context) =>
+    context.json({
+      pending: await deviceRegistration!.resumePendingCancellations(),
+    }),
+  );
 
   const server = Bun.serve({
     hostname: loopbackHostname,

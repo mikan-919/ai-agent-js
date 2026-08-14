@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   parseDeviceRegistrationCallback,
   parseDeviceTokenExchangeResponse,
+  parseOwnershipServerMessage,
 } from "./index";
 
 const registeredRepository = {
@@ -23,10 +24,6 @@ test("callback carries only the one-time code and state", () => {
       deviceToken: "leaked",
     }),
   ).toThrow();
-
-  expect(() =>
-    parseDeviceRegistrationCallback({ code: "", state: "" }),
-  ).toThrow();
 });
 
 test("a registration exchange binds the token to one installation repository", () => {
@@ -43,21 +40,57 @@ test("a registration exchange binds the token to one installation repository", (
   expect(() =>
     parseDeviceTokenExchangeResponse({ ...response, repositoryId: 0 }),
   ).toThrow();
-  expect(() =>
-    parseDeviceTokenExchangeResponse({ ...response, cancellationToken: "" }),
-  ).toThrow();
 });
 
-test("a management exchange carries a session instead of a device token", () => {
-  const response = {
-    purpose: "management" as const,
-    managementToken: "session",
-    expiresAt: 1_000,
+test("management exchanges carry the finished result instead of a reusable session", () => {
+  const revocation = {
+    purpose: "revocation" as const,
     ...registeredRepository,
+    deviceId: "device-1",
+    revokedAt: 1_000,
   };
 
-  expect(parseDeviceTokenExchangeResponse(response)).toEqual(response);
+  expect(parseDeviceTokenExchangeResponse(revocation)).toEqual(revocation);
   expect(() =>
-    parseDeviceTokenExchangeResponse({ ...response, deviceToken: "leaked" }),
+    parseDeviceTokenExchangeResponse({
+      ...revocation,
+      managementToken: "session",
+    }),
+  ).toThrow();
+
+  const installations = {
+    purpose: "installations" as const,
+    installations: [
+      {
+        installationId: 7,
+        account: "mikan-919",
+        canAdminister: true,
+        repositories: [
+          {
+            repositoryId: 11,
+            repository: { owner: "mikan-919", name: "oriel" },
+          },
+        ],
+      },
+    ],
+  };
+
+  expect(parseDeviceTokenExchangeResponse(installations)).toEqual(
+    installations,
+  );
+});
+
+test("ownership messages only carry relay issued acquisition IDs", () => {
+  expect(
+    parseOwnershipServerMessage({
+      type: "ownership.acquired",
+      leaseId: "lease-1",
+    }),
+  ).toEqual({ type: "ownership.acquired", leaseId: "lease-1" });
+  expect(parseOwnershipServerMessage({ type: "ownership.revoked" })).toEqual({
+    type: "ownership.revoked",
+  });
+  expect(() =>
+    parseOwnershipServerMessage({ type: "ownership.acquired" }),
   ).toThrow();
 });

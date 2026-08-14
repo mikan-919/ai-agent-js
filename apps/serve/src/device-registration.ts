@@ -4,9 +4,15 @@ import {
   parseDeviceRegistrationCallback,
   type DeviceRecord,
   type DeviceRegistrationPurpose,
+  type GitHubInstallation,
 } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 
+import {
+  createInMemoryPendingCancellationStore,
+  type PendingCancellationStore,
+  type PendingDeviceCancellation,
+} from "./pending-cancellations";
 import type { RelayDeviceClient } from "./relay-client";
 
 /** device tokenの保存先。Secret Serviceを使えない場合はfail closedにする。 */
@@ -27,8 +33,10 @@ export function bunSecretsDeviceTokenStore(): DeviceTokenStore {
 }
 
 export type DeviceRegistrationResult =
+  | { status: "installations"; installations: GitHubInstallation[] }
   | { status: "registered"; deviceId: string }
-  | { status: "management_session"; expiresAt: number }
+  | { status: "devices"; devices: DeviceRecord[] }
+  | { status: "revoked"; deviceId: string; revokedAt: number }
   | {
       status: "rejected";
       reason:
@@ -39,20 +47,15 @@ export type DeviceRegistrationResult =
         | "registration_target_mismatch"
         | "credential_store_unavailable";
     }
-  /** 発行済deviceを取り消せたか確認できない状態。人手か再試行で収束させる。 */
+  /** 発行済deviceを取り消せたか確認できない状態。再起動後も再調停を続ける。 */
   | { status: "reconciliation_required"; deviceId: string };
-
-export interface PendingDeviceCancellation {
-  deviceId: string;
-  cancellationToken: string;
-  cancellationExpiresAt: number;
-}
 
 export interface DeviceRegistrationFlowOptions {
   relay: RelayDeviceClient;
   tokenStore: DeviceTokenStore;
   authorizeEndpoint: URL;
   redirectUri: URL;
+  cancellationStore?: PendingCancellationStore;
   now?: () => number;
   newSecret?: () => string;
 }
@@ -64,26 +67,23 @@ interface PendingAuthorization {
   repositoryId: number;
 }
 
-interface ManagementSession {
-  managementToken: string;
-  expiresAt: number;
-}
-
 /**
  * localhost UIから始めるdevice登録と管理。verifier、challenge、stateは`serve`が作り、
  * codeの交換にverifierを要求することで、開始したこの`serve`へ結び付ける。
+ *
+ * 一覧と失効も毎回GitHub loginをやり直し、relayがその場でinstallation管理権限を
+ * 確かめる。再利用できるsessionもGitHub user tokenも持たない。
  */
 export function createDeviceRegistrationFlow({
   relay,
   tokenStore,
   authorizeEndpoint,
   redirectUri,
+  cancellationStore = createInMemoryPendingCancellationStore(),
   now = Date.now,
   newSecret = () => randomBytes(32).toString("base64url"),
 }: DeviceRegistrationFlowOptions) {
   const pending = new Map<string, PendingAuthorization>();
-  const pendingCancellations = new Map<string, PendingDeviceCancellation>();
-  let management: ManagementSession | null = null;
 
   async function cancelIssuedDevice(issued: {
     deviceId: string;
@@ -96,37 +96,32 @@ export function createDeviceRegistrationFlow({
       cancellationExpiresAt: issued.cancellationExpiresAt,
     };
 
+    // 取消を確認できるまで、証明を`serve`のlocal stateへ残す。
+    cancellationStore.save(cancellation);
+
     try {
       if (await relay.cancelIssuedDevice(cancellation)) {
-        pendingCancellations.delete(cancellation.deviceId);
+        cancellationStore.delete(cancellation.deviceId);
         return true;
       }
     } catch {
-      // 結果不明。取消証明を保持して再調停できるようにする。
+      // 結果不明。保持したまま再調停へ回す。
     }
 
-    pendingCancellations.set(cancellation.deviceId, cancellation);
     return false;
-  }
-
-  function currentManagementSession(): string | null {
-    if (management === null || management.expiresAt <= now()) {
-      management = null;
-      return null;
-    }
-
-    return management.managementToken;
   }
 
   return {
     begin({
-      installationId,
-      repositoryId,
-      purpose = "registration",
+      purpose,
+      installationId = 0,
+      repositoryId = 0,
+      deviceId,
     }: {
-      installationId: number;
-      repositoryId: number;
-      purpose?: DeviceRegistrationPurpose;
+      purpose: DeviceRegistrationPurpose;
+      installationId?: number;
+      repositoryId?: number;
+      deviceId?: string;
     }): { authorizeUrl: URL } {
       const codeVerifier = newSecret();
       const state = newSecret();
@@ -139,8 +134,20 @@ export function createDeviceRegistrationFlow({
       });
 
       const authorizeUrl = new URL(authorizeEndpoint);
-      authorizeUrl.searchParams.set("installation_id", String(installationId));
-      authorizeUrl.searchParams.set("repository_id", String(repositoryId));
+      authorizeUrl.searchParams.set("purpose", purpose);
+
+      if (purpose !== "installations") {
+        authorizeUrl.searchParams.set(
+          "installation_id",
+          String(installationId),
+        );
+        authorizeUrl.searchParams.set("repository_id", String(repositoryId));
+      }
+
+      if (deviceId !== undefined) {
+        authorizeUrl.searchParams.set("device_id", deviceId);
+      }
+
       authorizeUrl.searchParams.set(
         "code_challenge",
         createHash("sha256").update(codeVerifier).digest("base64url"),
@@ -148,7 +155,6 @@ export function createDeviceRegistrationFlow({
       authorizeUrl.searchParams.set("code_challenge_method", "S256");
       authorizeUrl.searchParams.set("state", state);
       authorizeUrl.searchParams.set("redirect_uri", redirectUri.toString());
-      authorizeUrl.searchParams.set("purpose", purpose);
 
       return { authorizeUrl };
     },
@@ -187,29 +193,37 @@ export function createDeviceRegistrationFlow({
         return { status: "rejected", reason: "unexpected_purpose" };
       }
 
-      if (
-        exchanged.installationId !== started.installationId ||
-        exchanged.repositoryId !== started.repositoryId
-      ) {
-        if (exchanged.purpose === "registration") {
-          return (await cancelIssuedDevice(exchanged))
-            ? { status: "rejected", reason: "registration_target_mismatch" }
-            : {
-                status: "reconciliation_required",
-                deviceId: exchanged.deviceId,
-              };
-        }
-
-        return { status: "rejected", reason: "registration_target_mismatch" };
+      if (exchanged.purpose === "installations") {
+        return {
+          status: "installations",
+          installations: exchanged.installations,
+        };
       }
 
-      if (exchanged.purpose === "management") {
-        management = {
-          managementToken: exchanged.managementToken,
-          expiresAt: exchanged.expiresAt,
-        };
+      const sameTarget =
+        exchanged.installationId === started.installationId &&
+        exchanged.repositoryId === started.repositoryId;
 
-        return { status: "management_session", expiresAt: exchanged.expiresAt };
+      if (exchanged.purpose === "device_list") {
+        return sameTarget
+          ? { status: "devices", devices: exchanged.devices }
+          : { status: "rejected", reason: "registration_target_mismatch" };
+      }
+
+      if (exchanged.purpose === "revocation") {
+        return sameTarget
+          ? {
+              status: "revoked",
+              deviceId: exchanged.deviceId,
+              revokedAt: exchanged.revokedAt,
+            }
+          : { status: "rejected", reason: "registration_target_mismatch" };
+      }
+
+      if (!sameTarget) {
+        return (await cancelIssuedDevice(exchanged))
+          ? { status: "rejected", reason: "registration_target_mismatch" }
+          : { status: "reconciliation_required", deviceId: exchanged.deviceId };
       }
 
       try {
@@ -228,44 +242,20 @@ export function createDeviceRegistrationFlow({
     },
     /** 取消を確認できなかった発行済device。空でない限り登録は完了していない。 */
     pendingCancellations(): PendingDeviceCancellation[] {
-      return [...pendingCancellations.values()];
-    },
-    /** 期限切れの取消証明は自動収束できないため、報告したまま残す。 */
-    async retryPendingCancellations(): Promise<PendingDeviceCancellation[]> {
-      for (const cancellation of [...pendingCancellations.values()]) {
-        if (cancellation.cancellationExpiresAt <= now()) {
-          continue;
-        }
-
-        await cancelIssuedDevice(cancellation);
-      }
-
-      return [...pendingCancellations.values()];
-    },
-    hasManagementSession(): boolean {
-      return currentManagementSession() !== null;
-    },
-    async listDevices(): Promise<DeviceRecord[] | null> {
-      const managementToken = currentManagementSession();
-
-      return managementToken === null
-        ? null
-        : relay.listDevices(managementToken);
+      return cancellationStore.list();
     },
     /**
-     * 失効はinstallationを現在管理できるGitHub userのsessionでだけ実行できる。
-     * device bearer tokenでは失効できない。
+     * 起動時と手動再試行から呼ぶ収束処理。期限切れの証明は自動収束できないため、
+     * 報告したまま残す。
      */
-    async revokeDevice(deviceId: string): Promise<boolean> {
-      const managementToken = currentManagementSession();
-
-      if (managementToken === null) {
-        return false;
+    async resumePendingCancellations(): Promise<PendingDeviceCancellation[]> {
+      for (const cancellation of cancellationStore.list()) {
+        if (cancellation.cancellationExpiresAt > now()) {
+          await cancelIssuedDevice(cancellation);
+        }
       }
 
-      const revoked = await relay.revokeDevice({ managementToken, deviceId });
-
-      return revoked !== null;
+      return cancellationStore.list();
     },
   };
 }

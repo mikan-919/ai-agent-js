@@ -5,9 +5,15 @@ import { githubRepositorySchema } from "./github";
 const nonEmptyString = v.pipe(v.string(), v.minLength(1));
 const positiveInteger = v.pipe(v.number(), v.integer(), v.minValue(1));
 
+/**
+ * device登録と管理の各操作。どれも一回限りのGitHub loginを伴い、
+ * relayはその都度の現在値だけで判断する。
+ */
 export const deviceRegistrationPurposeSchema = v.picklist([
+  "installations",
   "registration",
-  "management",
+  "device_list",
+  "revocation",
 ]);
 
 export type DeviceRegistrationPurpose = v.InferOutput<
@@ -39,6 +45,37 @@ const registeredRepositorySchema = v.strictObject({
   repository: githubRepositorySchema,
 });
 
+/** relayが永続化してよい表示metadata。tokenのhashは外へ出さない。 */
+export const deviceRecordSchema = v.strictObject({
+  deviceId: nonEmptyString,
+  ...registeredRepositorySchema.entries,
+  registeredAt: positiveInteger,
+  revokedAt: v.nullable(positiveInteger),
+});
+
+export type DeviceRecord = v.InferOutput<typeof deviceRecordSchema>;
+
+export const installationRepositorySchema = v.strictObject({
+  repositoryId: positiveInteger,
+  repository: githubRepositorySchema,
+});
+
+export const githubInstallationSchema = v.strictObject({
+  installationId: positiveInteger,
+  account: nonEmptyString,
+  /** 失効を実行できるのは、この値が真であるinstallationだけ。 */
+  canAdminister: v.boolean(),
+  repositories: v.array(installationRepositorySchema),
+});
+
+export type GitHubInstallation = v.InferOutput<typeof githubInstallationSchema>;
+
+/** 対象を選ぶための現在のinstallationとrepository。 */
+export const installationsExchangeResponseSchema = v.strictObject({
+  purpose: v.literal("installations"),
+  installations: v.array(githubInstallationSchema),
+});
+
 /**
  * 登録の交換結果。`cancellationToken`はこのdeviceだけを取り消せる内部限定の証明で、
  * 通常の失効経路ではない。
@@ -56,42 +93,30 @@ export type DeviceRegistrationExchangeResponse = v.InferOutput<
   typeof deviceRegistrationExchangeResponseSchema
 >;
 
-/** 管理の交換結果。installationを現在管理できるGitHub userだけが受け取れる。 */
-export const deviceManagementExchangeResponseSchema = v.strictObject({
-  purpose: v.literal("management"),
-  managementToken: nonEmptyString,
-  expiresAt: positiveInteger,
+export const deviceListExchangeResponseSchema = v.strictObject({
+  purpose: v.literal("device_list"),
   ...registeredRepositorySchema.entries,
+  devices: v.array(deviceRecordSchema),
 });
 
-export type DeviceManagementExchangeResponse = v.InferOutput<
-  typeof deviceManagementExchangeResponseSchema
->;
+/** 失効はGitHub loginの直後にrelayが実行し、結果だけを返す。 */
+export const deviceRevocationExchangeResponseSchema = v.strictObject({
+  purpose: v.literal("revocation"),
+  ...registeredRepositorySchema.entries,
+  deviceId: nonEmptyString,
+  revokedAt: positiveInteger,
+});
 
 export const deviceTokenExchangeResponseSchema = v.variant("purpose", [
+  installationsExchangeResponseSchema,
   deviceRegistrationExchangeResponseSchema,
-  deviceManagementExchangeResponseSchema,
+  deviceListExchangeResponseSchema,
+  deviceRevocationExchangeResponseSchema,
 ]);
 
 export type DeviceTokenExchangeResponse = v.InferOutput<
   typeof deviceTokenExchangeResponseSchema
 >;
-
-/** relayが永続化してよい表示metadata。tokenのhashは外へ出さない。 */
-export const deviceRecordSchema = v.strictObject({
-  deviceId: nonEmptyString,
-  ...registeredRepositorySchema.entries,
-  registeredAt: positiveInteger,
-  revokedAt: v.nullable(positiveInteger),
-});
-
-export type DeviceRecord = v.InferOutput<typeof deviceRecordSchema>;
-
-export const deviceListResponseSchema = v.strictObject({
-  devices: v.array(deviceRecordSchema),
-});
-
-export type DeviceListResponse = v.InferOutput<typeof deviceListResponseSchema>;
 
 export const deviceCancellationRequestSchema = v.strictObject({
   deviceId: nonEmptyString,
@@ -102,13 +127,55 @@ export type DeviceCancellationRequest = v.InferOutput<
   typeof deviceCancellationRequestSchema
 >;
 
-export const deviceRevocationResponseSchema = v.strictObject({
-  deviceId: nonEmptyString,
-  revokedAt: positiveInteger,
+/** 所有権接続の受理と失効。取得IDはrelayだけが発行する。 */
+export const ownershipAcquiredEventSchema = v.strictObject({
+  type: v.literal("ownership.acquired"),
+  leaseId: nonEmptyString,
 });
 
-export type DeviceRevocationResponse = v.InferOutput<
-  typeof deviceRevocationResponseSchema
+export const ownershipRejectedEventSchema = v.strictObject({
+  type: v.literal("ownership.rejected"),
+  reason: v.picklist([
+    "already_owned",
+    "device_revoked",
+    "ownership_not_current",
+    "invalid_request",
+  ]),
+});
+
+export const ownershipRevokedEventSchema = v.strictObject({
+  type: v.literal("ownership.revoked"),
+});
+
+export const ownershipConfirmRequestSchema = v.strictObject({
+  type: v.literal("ownership.confirm"),
+  requestId: nonEmptyString,
+  leaseId: nonEmptyString,
+});
+
+export const ownershipConfirmedEventSchema = v.strictObject({
+  type: v.literal("ownership.confirmed"),
+  requestId: nonEmptyString,
+  current: v.boolean(),
+});
+
+export const ownershipServerMessageSchema = v.variant("type", [
+  ownershipAcquiredEventSchema,
+  ownershipRejectedEventSchema,
+  ownershipRevokedEventSchema,
+  ownershipConfirmedEventSchema,
+]);
+
+export type OwnershipServerMessage = v.InferOutput<
+  typeof ownershipServerMessageSchema
+>;
+
+export const ownershipClientMessageSchema = v.variant("type", [
+  ownershipConfirmRequestSchema,
+]);
+
+export type OwnershipClientMessage = v.InferOutput<
+  typeof ownershipClientMessageSchema
 >;
 
 export function parseDeviceRegistrationCallback(
@@ -129,18 +196,20 @@ export function parseDeviceTokenExchangeResponse(
   return v.parse(deviceTokenExchangeResponseSchema, value);
 }
 
-export function parseDeviceListResponse(value: unknown): DeviceListResponse {
-  return v.parse(deviceListResponseSchema, value);
-}
-
 export function parseDeviceCancellationRequest(
   value: unknown,
 ): DeviceCancellationRequest {
   return v.parse(deviceCancellationRequestSchema, value);
 }
 
-export function parseDeviceRevocationResponse(
+export function parseOwnershipServerMessage(
   value: unknown,
-): DeviceRevocationResponse {
-  return v.parse(deviceRevocationResponseSchema, value);
+): OwnershipServerMessage {
+  return v.parse(ownershipServerMessageSchema, value);
+}
+
+export function parseOwnershipClientMessage(
+  value: unknown,
+): OwnershipClientMessage {
+  return v.parse(ownershipClientMessageSchema, value);
 }

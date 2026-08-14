@@ -19,6 +19,7 @@ const redirectUri = "http://127.0.0.1:49152/device/callback";
 const signingKey = "relay-signing-key";
 
 let currentTime = 1_700_000_000_000;
+let administrable = true;
 
 const github: RelayGitHubClient = {
   authorizeUrl: ({ state, redirectUri: callback }) =>
@@ -31,9 +32,13 @@ const github: RelayGitHubClient = {
       : userToken === memberToken
         ? { id: 2, login: "member" }
         : null,
+  listInstallations: async () => [{ id: installationId, account: "mikan-919" }],
   listInstallationRepositories: async () => [repository],
-  canAdministerInstallation: async ({ userToken }) => userToken === adminToken,
+  canAdministerInstallation: async ({ userToken }) =>
+    administrable && userToken === adminToken,
 };
+
+type Purpose = "installations" | "registration" | "device_list" | "revocation";
 
 function relay(overrides: Partial<RelayGitHubClient> = {}) {
   return createRelayApp({
@@ -42,7 +47,6 @@ function relay(overrides: Partial<RelayGitHubClient> = {}) {
     signingKey,
     relayOrigin: "https://relay.test",
     codeExpiryMs: 60_000,
-    managementSessionExpiryMs: 300_000,
     cancellationExpiryMs: 120_000,
     now: () => currentTime,
   });
@@ -56,20 +60,22 @@ function registryStub() {
 
 async function authorize(
   app: ReturnType<typeof relay>,
-  purpose: "registration" | "management" = "registration",
-  state = "serve-state",
+  purpose: Purpose,
+  state: string,
+  deviceId?: string,
 ) {
   const url = new URL("https://relay.test/device/authorize");
   url.searchParams.set("installation_id", String(installationId));
   url.searchParams.set("repository_id", String(repository.id));
-  url.searchParams.set(
-    "code_challenge",
-    await sha256Base64Url(codeVerifier + purpose + state),
-  );
+  url.searchParams.set("code_challenge", await sha256Base64Url(codeVerifier));
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", state);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("purpose", purpose);
+
+  if (deviceId !== undefined) {
+    url.searchParams.set("device_id", deviceId);
+  }
 
   return app.fetch(new Request(url));
 }
@@ -77,11 +83,12 @@ async function authorize(
 /** GitHub loginを終えてlocalhostへ戻るまでを一度に進める。 */
 async function callbackToLocalhost(
   app: ReturnType<typeof relay>,
-  purpose: "registration" | "management" = "registration",
+  purpose: Purpose = "registration",
   oauthCode = adminCode,
   state = "serve-state",
+  deviceId?: string,
 ) {
-  const redirect = await authorize(app, purpose, state);
+  const redirect = await authorize(app, purpose, state, deviceId);
   const relayState = new URL(
     redirect.headers.get("location") ?? "",
   ).searchParams.get("state");
@@ -92,45 +99,105 @@ async function callbackToLocalhost(
   return app.fetch(new Request(callbackUrl));
 }
 
-async function exchange(
-  app: ReturnType<typeof relay>,
-  purpose: "registration" | "management" = "registration",
-  oauthCode = adminCode,
-  state = "serve-state",
-) {
-  const callback = await callbackToLocalhost(app, purpose, oauthCode, state);
-  const location = new URL(callback.headers.get("location") ?? "");
-  const code = location.searchParams.get("code") ?? "";
-
-  const response = await app.fetch(
+function exchangeCode(app: ReturnType<typeof relay>, code: string) {
+  return app.fetch(
     new Request("https://relay.test/device/token", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        code,
-        codeVerifier: codeVerifier + purpose + state,
-      }),
+      body: JSON.stringify({ code, codeVerifier }),
     }),
   );
+}
 
-  return { response, code, location };
+async function runOperation(
+  app: ReturnType<typeof relay>,
+  purpose: Purpose = "registration",
+  oauthCode = adminCode,
+  state = "serve-state",
+  deviceId?: string,
+) {
+  const callback = await callbackToLocalhost(
+    app,
+    purpose,
+    oauthCode,
+    state,
+    deviceId,
+  );
+  const location = new URL(callback.headers.get("location") ?? "");
+  const code = location.searchParams.get("code") ?? "";
+
+  return { callback, location, code, response: await exchangeCode(app, code) };
+}
+
+async function registerDevice(app: ReturnType<typeof relay>, state: string) {
+  const { response } = await runOperation(
+    app,
+    "registration",
+    adminCode,
+    state,
+  );
+
+  return (await response.json()) as {
+    deviceId: string;
+    deviceToken: string;
+    cancellationToken: string;
+  };
+}
+
+function openOwnership(
+  app: ReturnType<typeof relay>,
+  input: {
+    deviceToken: string;
+    kind: "job" | "branch";
+    key: string;
+    parentLeaseId?: string;
+  },
+) {
+  const url = new URL("https://relay.test/ownership");
+  url.searchParams.set("kind", input.kind);
+  url.searchParams.set("key", input.key);
+
+  if (input.parentLeaseId !== undefined) {
+    url.searchParams.set("parent_lease_id", input.parentLeaseId);
+  }
+
+  return app.fetch(
+    new Request(url, {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${input.deviceToken}`,
+      },
+    }),
+  );
+}
+
+/** 接続直後にrelayが送る受理か拒否を読む。 */
+function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    socket.addEventListener("message", (event) => {
+      resolve(JSON.parse(String(event.data)) as Record<string, unknown>);
+    });
+    socket.addEventListener("close", () => {
+      reject(new Error("closed before a message arrived"));
+    });
+  });
 }
 
 beforeEach(() => {
   currentTime = 1_700_000_000_000;
+  administrable = true;
   nextRepositoryId += 1;
   repository = { id: nextRepositoryId, owner: "mikan-919", name: "oriel" };
 });
 
 describe("device registration through the relay", () => {
-  it("sends the browser to GitHub login and keeps no state of its own", async () => {
-    const response = await authorize(relay());
-    const location = new URL(response.headers.get("location") ?? "");
+  it("returns only a one-time code and the state to localhost", async () => {
+    const callback = await callbackToLocalhost(relay());
+    const location = new URL(callback.headers.get("location") ?? "");
 
-    expect(response.status).toBe(302);
-    expect(location.origin).toBe("https://github.test");
-    expect(location.searchParams.get("state")).toBeTruthy();
-    expect(location.searchParams.get("state")).not.toContain(codeVerifier);
+    expect(callback.status).toBe(302);
+    expect(location.origin + location.pathname).toBe(redirectUri);
+    expect([...location.searchParams.keys()].sort()).toEqual(["code", "state"]);
   });
 
   it("refuses a non-loopback redirect target and a plain code challenge", async () => {
@@ -151,41 +218,27 @@ describe("device registration through the relay", () => {
     expect((await app.fetch(new Request(url))).status).toBe(400);
   });
 
-  it("returns only a one-time code and the state to localhost", async () => {
-    const callback = await callbackToLocalhost(relay());
-    const location = new URL(callback.headers.get("location") ?? "");
-
-    expect(callback.status).toBe(302);
-    expect(location.origin + location.pathname).toBe(redirectUri);
-    expect([...location.searchParams.keys()].sort()).toEqual(["code", "state"]);
-    expect(location.searchParams.get("state")).toBe("serve-state");
-  });
-
   it("exchanges the one-time code for a device token bound to the repository", async () => {
-    const { response } = await exchange(relay());
-    const body = await response.json();
+    const { response } = await runOperation(relay());
+    const body = (await response.json()) as {
+      deviceId: string;
+      deviceToken: string;
+    };
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
       purpose: "registration",
       installationId,
       repositoryId: repository.id,
-      repository: { owner: repository.owner, name: repository.name },
     });
 
-    const deviceTokenHash = await sha256Hex(
-      (body as { deviceToken: string }).deviceToken,
-    );
     const authenticated = await runInDurableObject(
       registryStub(),
-      (instance: DeviceRegistryObject) =>
-        instance.authenticateDevice(deviceTokenHash),
+      async (instance: DeviceRegistryObject) =>
+        instance.authenticateDevice(await sha256Hex(body.deviceToken)),
     );
 
-    expect(authenticated).toMatchObject({
-      deviceId: (body as { deviceId: string }).deviceId,
-      repositoryId: repository.id,
-    });
+    expect(authenticated).toMatchObject({ deviceId: body.deviceId });
   });
 
   it("consumes the one-time code exactly once even under concurrent exchanges", async () => {
@@ -195,46 +248,12 @@ describe("device registration through the relay", () => {
       new URL(callback.headers.get("location") ?? "").searchParams.get(
         "code",
       ) ?? "";
-    const request = () =>
-      app.fetch(
-        new Request("https://relay.test/device/token", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            code,
-            codeVerifier: codeVerifier + "registration" + "serve-state",
-          }),
-        }),
-      );
-
-    const statuses = (await Promise.all([request(), request()])).map(
-      (response) => response.status,
-    );
+    const statuses = (
+      await Promise.all([exchangeCode(app, code), exchangeCode(app, code)])
+    ).map((response) => response.status);
 
     expect(statuses.filter((status) => status === 200)).toHaveLength(1);
     expect(statuses.filter((status) => status === 400)).toHaveLength(1);
-  });
-
-  it("refuses a mismatched verifier and burns the code", async () => {
-    const app = relay();
-    const callback = await callbackToLocalhost(app);
-    const code =
-      new URL(callback.headers.get("location") ?? "").searchParams.get(
-        "code",
-      ) ?? "";
-    const post = (verifier: string) =>
-      app.fetch(
-        new Request("https://relay.test/device/token", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ code, codeVerifier: verifier }),
-        }),
-      );
-
-    expect((await post("wrong-verifier")).status).toBe(400);
-    expect(
-      (await post(codeVerifier + "registration" + "serve-state")).status,
-    ).toBe(400);
   });
 
   it("refuses an expired code", async () => {
@@ -247,27 +266,12 @@ describe("device registration through the relay", () => {
 
     currentTime += 60_001;
 
-    const response = await app.fetch(
-      new Request("https://relay.test/device/token", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          code,
-          codeVerifier: codeVerifier + "registration" + "serve-state",
-        }),
-      }),
-    );
-
-    expect(response.status).toBe(400);
+    expect((await exchangeCode(app, code)).status).toBe(400);
   });
 
   it("keeps the device registry across a Durable Object restart", async () => {
-    const { response } = await exchange(relay());
-    const body = (await response.json()) as {
-      deviceId: string;
-      deviceToken: string;
-    };
-    const deviceTokenHash = await sha256Hex(body.deviceToken);
+    const registered = await registerDevice(relay(), "serve-state");
+    const deviceTokenHash = await sha256Hex(registered.deviceToken);
 
     // Durable Objectを落として、SQLiteから読み直させる。
     await runInDurableObject(
@@ -283,158 +287,130 @@ describe("device registration through the relay", () => {
         instance.authenticateDevice(deviceTokenHash),
     );
 
-    expect(afterRestart).toMatchObject({ deviceId: body.deviceId });
+    expect(afterRestart).toMatchObject({ deviceId: registered.deviceId });
   });
-});
 
-describe("device management through the relay", () => {
-  it("issues a management session only to a current installation administrator", async () => {
+  it("lists the installations and repositories the signed-in user can choose", async () => {
     const app = relay();
-    const memberCallback = await callbackToLocalhost(
+    const { response } = await runOperation(
       app,
-      "management",
-      memberCode,
+      "installations",
+      adminCode,
+      "discovery-state",
     );
 
-    expect(memberCallback.status).toBe(403);
-
-    const { response } = await exchange(app, "management");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      purpose: "management",
-      installationId,
-      repositoryId: repository.id,
-    });
-  });
-
-  it("lists and revokes devices with a management session only", async () => {
-    const app = relay();
-    const registered = (await (await exchange(app)).response.json()) as {
-      deviceId: string;
-      deviceToken: string;
-    };
-    const management = (await (
-      await exchange(app, "management", adminCode, "management-state")
-    ).response.json()) as { managementToken: string };
-    const authorized = {
-      authorization: `Bearer ${management.managementToken}`,
-    };
-
-    expect(
-      (await app.fetch(new Request("https://relay.test/devices"))).status,
-    ).toBe(401);
-    expect(
-      (
-        await app.fetch(
-          new Request("https://relay.test/devices", {
-            headers: { authorization: "Bearer forged" },
-          }),
-        )
-      ).status,
-    ).toBe(401);
-
-    const listed = await app.fetch(
-      new Request("https://relay.test/devices", { headers: authorized }),
-    );
-
-    expect(await listed.json()).toEqual({
-      devices: [
+    expect(await response.json()).toEqual({
+      purpose: "installations",
+      installations: [
         {
-          deviceId: registered.deviceId,
           installationId,
-          repositoryId: repository.id,
-          repository: { owner: repository.owner, name: repository.name },
-          registeredAt: expect.any(Number),
-          revokedAt: null,
+          account: "mikan-919",
+          canAdminister: true,
+          repositories: [
+            {
+              repositoryId: repository.id,
+              repository: { owner: repository.owner, name: repository.name },
+            },
+          ],
         },
       ],
     });
-
-    const revocation = await app.fetch(
-      new Request(
-        `https://relay.test/devices/${registered.deviceId}/revocation`,
-        { method: "POST", headers: authorized },
-      ),
-    );
-
-    expect(revocation.status).toBe(200);
-
-    const afterRevocation = await runInDurableObject(
-      registryStub(),
-      async (instance: DeviceRegistryObject) =>
-        instance.authenticateDevice(await sha256Hex(registered.deviceToken)),
-    );
-
-    expect(afterRevocation).toBeNull();
-  });
-
-  it("refuses a management session that has expired", async () => {
-    const app = relay();
-    const management = (await (
-      await exchange(app, "management")
-    ).response.json()) as { managementToken: string };
-
-    currentTime += 300_001;
-
-    const response = await app.fetch(
-      new Request("https://relay.test/devices", {
-        headers: { authorization: `Bearer ${management.managementToken}` },
-      }),
-    );
-
-    expect(response.status).toBe(401);
-  });
-
-  it("refuses a device bearer token as a management credential", async () => {
-    const app = relay();
-    const registered = (await (await exchange(app)).response.json()) as {
-      deviceToken: string;
-      deviceId: string;
-    };
-
-    const response = await app.fetch(
-      new Request(
-        `https://relay.test/devices/${registered.deviceId}/revocation`,
-        {
-          method: "POST",
-          headers: { authorization: `Bearer ${registered.deviceToken}` },
-        },
-      ),
-    );
-
-    expect(response.status).toBe(401);
   });
 });
 
-describe("cancelling a device that was just issued", () => {
-  async function cancel(
-    app: ReturnType<typeof relay>,
-    body: { deviceId: string; cancellationToken: string },
-  ) {
-    return app.fetch(
-      new Request("https://relay.test/device/cancellation", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-    );
-  }
-
-  it("cancels only the device the proof was issued for", async () => {
+describe("device revocation through the relay", () => {
+  it("checks the current installation administrator on every revocation", async () => {
     const app = relay();
-    const first = (await (await exchange(app)).response.json()) as {
-      deviceId: string;
-      deviceToken: string;
-      cancellationToken: string;
-    };
-    const second = (await (
-      await exchange(app, "registration", adminCode, "second-state")
-    ).response.json()) as { deviceId: string; cancellationToken: string };
+    const registered = await registerDevice(app, "serve-state");
+
+    // 登録できたuserでも、失効時点で管理権限がなければ拒否する。
+    const byMember = await callbackToLocalhost(
+      app,
+      "revocation",
+      memberCode,
+      "revoke-state",
+      registered.deviceId,
+    );
+
+    expect(byMember.status).toBe(403);
+
+    administrable = false;
+
+    const afterLosingAdmin = await callbackToLocalhost(
+      app,
+      "revocation",
+      adminCode,
+      "revoke-state-2",
+      registered.deviceId,
+    );
+
+    expect(afterLosingAdmin.status).toBe(403);
+    expect(
+      await runInDurableObject(registryStub(), async (instance) =>
+        instance.authenticateDevice(await sha256Hex(registered.deviceToken)),
+      ),
+    ).not.toBeNull();
+
+    administrable = true;
+
+    const { response } = await runOperation(
+      app,
+      "revocation",
+      adminCode,
+      "revoke-state-3",
+      registered.deviceId,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      purpose: "revocation",
+      deviceId: registered.deviceId,
+    });
+    expect(
+      await runInDurableObject(registryStub(), async (instance) =>
+        instance.authenticateDevice(await sha256Hex(registered.deviceToken)),
+      ),
+    ).toBeNull();
+  });
+
+  it("lists devices only for a current installation administrator", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    expect(
+      (await callbackToLocalhost(app, "device_list", memberCode, "list-state"))
+        .status,
+    ).toBe(403);
+
+    const { response } = await runOperation(
+      app,
+      "device_list",
+      adminCode,
+      "list-state-2",
+    );
+
+    expect(await response.json()).toMatchObject({
+      purpose: "device_list",
+      devices: [{ deviceId: registered.deviceId, revokedAt: null }],
+    });
+  });
+
+  it("cancels only the device its proof was issued for", async () => {
+    const app = relay();
+    const first = await registerDevice(app, "first-state");
+    const second = await registerDevice(app, "second-state");
+    const cancel = (body: { deviceId: string; cancellationToken: string }) =>
+      app.fetch(
+        new Request("https://relay.test/device/cancellation", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
 
     expect(
       (
-        await cancel(app, {
+        await cancel({
           deviceId: second.deviceId,
           cancellationToken: first.cancellationToken,
         })
@@ -442,47 +418,155 @@ describe("cancelling a device that was just issued", () => {
     ).toBe(403);
     expect(
       (
-        await cancel(app, {
-          deviceId: first.deviceId,
-          cancellationToken: "forged",
-        })
-      ).status,
-    ).toBe(403);
-
-    expect(
-      (
-        await cancel(app, {
+        await cancel({
           deviceId: first.deviceId,
           cancellationToken: first.cancellationToken,
         })
       ).status,
     ).toBe(200);
-
-    const authenticated = await runInDurableObject(
-      registryStub(),
-      async (instance: DeviceRegistryObject) =>
+    expect(
+      await runInDurableObject(registryStub(), async (instance) =>
         instance.authenticateDevice(await sha256Hex(first.deviceToken)),
-    );
+      ),
+    ).toBeNull();
+  });
+});
 
-    expect(authenticated).toBeNull();
+describe("ownership connections on the relay", () => {
+  it("grants Job ownership and branch exclusivity to one connection at a time", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const job = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+    const jobSocket = job.webSocket!;
+
+    jobSocket.accept();
+
+    const acquired = await nextMessage(jobSocket);
+
+    expect(job.status).toBe(101);
+    expect(acquired).toMatchObject({ type: "ownership.acquired" });
+
+    const second = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+
+    second.webSocket!.accept();
+
+    expect(await nextMessage(second.webSocket!)).toEqual({
+      type: "ownership.rejected",
+      reason: "already_owned",
+    });
+
+    const branch = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "branch",
+      key: `${repository.id}/oriel-job-1`,
+      parentLeaseId: String(acquired.leaseId),
+    });
+
+    branch.webSocket!.accept();
+
+    expect(await nextMessage(branch.webSocket!)).toMatchObject({
+      type: "ownership.acquired",
+    });
+
+    const orphanBranch = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "branch",
+      key: `${repository.id}/other`,
+      parentLeaseId: "not-current",
+    });
+
+    orphanBranch.webSocket!.accept();
+
+    expect(await nextMessage(orphanBranch.webSocket!)).toEqual({
+      type: "ownership.rejected",
+      reason: "ownership_not_current",
+    });
   });
 
-  it("refuses an expired or reused cancellation proof", async () => {
+  it("refuses ownership without a valid device bearer token", async () => {
     const app = relay();
-    const registered = (await (await exchange(app)).response.json()) as {
-      deviceId: string;
-      cancellationToken: string;
-    };
-
-    currentTime += 120_001;
 
     expect(
       (
-        await cancel(app, {
-          deviceId: registered.deviceId,
-          cancellationToken: registered.cancellationToken,
+        await openOwnership(relay(), {
+          deviceToken: `${installationId}.${repository.id}.forged`,
+          kind: "job",
+          key: "job-1",
         })
       ).status,
-    ).toBe(403);
+    ).toBe(401);
+    expect(
+      (
+        await app.fetch(
+          new Request("https://relay.test/ownership?kind=job&key=job-1"),
+        )
+      ).status,
+    ).toBe(426);
+  });
+
+  it("invalidates and closes the ownership connections of a revoked device", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const job = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+    const jobSocket = job.webSocket!;
+
+    jobSocket.accept();
+
+    const acquired = await nextMessage(jobSocket);
+    const branch = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "branch",
+      key: `${repository.id}/oriel-job-1`,
+      parentLeaseId: String(acquired.leaseId),
+    });
+
+    branch.webSocket!.accept();
+    await nextMessage(branch.webSocket!);
+
+    const closedJob = new Promise<number>((resolve) => {
+      jobSocket.addEventListener("close", (event) => {
+        resolve(event.code);
+      });
+    });
+    const closedBranch = new Promise<number>((resolve) => {
+      branch.webSocket!.addEventListener("close", (event) => {
+        resolve(event.code);
+      });
+    });
+
+    const { response } = await runOperation(
+      app,
+      "revocation",
+      adminCode,
+      "revoke-state",
+      registered.deviceId,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await closedJob).toBe(4003);
+    expect(await closedBranch).toBe(4003);
+
+    // 失効後は同じdeviceで新しい接続を取れない。
+    expect(
+      (
+        await openOwnership(app, {
+          deviceToken: registered.deviceToken,
+          kind: "job",
+          key: "job-2",
+        })
+      ).status,
+    ).toBe(401);
   });
 });

@@ -1,10 +1,6 @@
 import {
-  parseDeviceListResponse,
-  parseDeviceRevocationResponse,
   parseDeviceTokenExchangeResponse,
   type DeviceCancellationRequest,
-  type DeviceRecord,
-  type DeviceRevocationResponse,
   type DeviceTokenExchangeRequest,
   type DeviceTokenExchangeResponse,
 } from "@mikan-919/oriel-contracts";
@@ -18,11 +14,6 @@ export interface RelayDeviceClient {
     request: DeviceTokenExchangeRequest,
   ): Promise<DeviceTokenExchangeResponse | null>;
   cancelIssuedDevice(request: DeviceCancellationRequest): Promise<boolean>;
-  listDevices(managementToken: string): Promise<DeviceRecord[] | null>;
-  revokeDevice(input: {
-    managementToken: string;
-    deviceId: string;
-  }): Promise<DeviceRevocationResponse | null>;
 }
 
 /** testと製品経路で同じ形を使うための最小のfetch。 */
@@ -42,13 +33,10 @@ export function createRelayDeviceClient({
     return new URL(path, baseUrl).toString();
   }
 
-  async function postJson(path: string, body: unknown, bearer?: string) {
+  async function postJson(path: string, body: unknown) {
     return fetchImpl(endpoint(path), {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
   }
@@ -79,23 +67,6 @@ export function createRelayDeviceClient({
 
       refusedOrThrow(response, "/device/cancellation");
       return false;
-    },
-    async listDevices(managementToken) {
-      const response = await fetchImpl(endpoint("/devices"), {
-        headers: { authorization: `Bearer ${managementToken}` },
-      });
-
-      return response.ok
-        ? parseDeviceListResponse(await response.json()).devices
-        : refusedOrThrow(response, "/devices");
-    },
-    async revokeDevice({ managementToken, deviceId }) {
-      const path = `/devices/${encodeURIComponent(deviceId)}/revocation`;
-      const response = await postJson(path, {}, managementToken);
-
-      return response.ok
-        ? parseDeviceRevocationResponse(await response.json())
-        : refusedOrThrow(response, path);
     },
   };
 }
