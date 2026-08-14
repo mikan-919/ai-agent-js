@@ -191,3 +191,94 @@ test("releases Job ownership so a replacement connection can acquire it", async 
   ).toMatchObject({ status: "acquired" });
   expect(connection.stopSignal.aborted).toBe(true);
 });
+
+test("a revoked device loses its Job ownership and branch exclusivity, and the serve side stops", async () => {
+  const arbiter = createConnectionOwnershipArbiter({
+    heartbeatExpiryMs,
+    now: () => 0,
+  });
+  const connection = createJobOwnershipConnection({
+    relay: arbiter,
+    jobId: binding.jobId,
+    deviceId: "device-1",
+    heartbeatStopMs,
+    now: () => 0,
+  });
+  const jobLeaseId = await connection.acquire();
+  const branch = await arbiter.acquireBranchExclusivity({
+    repositoryId: 11,
+    branch: "oriel/job-1",
+    deviceId: "device-1",
+    jobLeaseId: jobLeaseId ?? "",
+  });
+
+  expect(branch).toMatchObject({ status: "acquired" });
+  expect(connection.stopSignal.aborted).toBe(false);
+
+  arbiter.revokeDevice("device-1");
+
+  // 失効はJob所有権とブランチ排他の両方を閉じ、`serve`側のworkerを止める。
+  expect(connection.stopSignal.aborted).toBe(true);
+  expect(
+    await connection.hasCurrentJobOwnership({
+      ...binding,
+      jobLeaseId: jobLeaseId ?? "",
+    }),
+  ).toBe(false);
+  expect(
+    await arbiter.confirmBranchExclusivity({
+      repositoryId: 11,
+      branch: "oriel/job-1",
+      branchLeaseId:
+        branch.status === "acquired" ? branch.branchLeaseId : "unreachable",
+    }),
+  ).toBe(false);
+  expect(
+    await arbiter.acquireBranchExclusivity({
+      repositoryId: 11,
+      branch: "oriel/job-1",
+      deviceId: "device-1",
+      jobLeaseId: jobLeaseId ?? "",
+    }),
+  ).toEqual({ status: "rejected", reason: "device_revoked" });
+});
+
+test("branch exclusivity is held by one connection and needs a current Job ownership", async () => {
+  const arbiter = createConnectionOwnershipArbiter({
+    heartbeatExpiryMs,
+    now: () => 0,
+  });
+  const acquisition = await arbiter.acquireJobOwnership({
+    jobId: binding.jobId,
+    deviceId: "device-1",
+  });
+  const jobLeaseId =
+    acquisition.status === "acquired" ? acquisition.jobLeaseId : "";
+
+  expect(
+    await arbiter.acquireBranchExclusivity({
+      repositoryId: 11,
+      branch: "oriel/job-1",
+      deviceId: "device-1",
+      jobLeaseId: "not-current",
+    }),
+  ).toEqual({ status: "rejected", reason: "ownership_not_current" });
+
+  expect(
+    await arbiter.acquireBranchExclusivity({
+      repositoryId: 11,
+      branch: "oriel/job-1",
+      deviceId: "device-1",
+      jobLeaseId,
+    }),
+  ).toMatchObject({ status: "acquired" });
+
+  expect(
+    await arbiter.acquireBranchExclusivity({
+      repositoryId: 11,
+      branch: "oriel/job-1",
+      deviceId: "device-1",
+      jobLeaseId,
+    }),
+  ).toEqual({ status: "rejected", reason: "already_owned" });
+});

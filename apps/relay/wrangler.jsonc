@@ -1,0 +1,14 @@
+{
+  "name": "oriel-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "DEVICE_REGISTRY", "class_name": "DeviceRegistryObject" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DeviceRegistryObject"] },
+  ],
+}

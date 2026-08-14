@@ -24,7 +24,33 @@ export interface ConnectionOwnershipRelay {
   releaseJobOwnership(jobLeaseId: string): void | Promise<void>;
 }
 
-export interface ConnectionOwnershipArbiter extends ConnectionOwnershipRelay {
+export type BranchExclusivityAcquisition =
+  | { status: "acquired"; branchLeaseId: string }
+  | {
+      status: "rejected";
+      reason: "already_owned" | "device_revoked" | "ownership_not_current";
+    };
+
+/** ADR 0004のブランチ排他。Job所有権を持つ接続だけが取得できる。 */
+export interface BranchExclusivityRelay {
+  acquireBranchExclusivity(input: {
+    repositoryId: number;
+    branch: string;
+    deviceId: string;
+    jobLeaseId: string;
+    onClosed?: () => void;
+  }): BranchExclusivityAcquisition | Promise<BranchExclusivityAcquisition>;
+  confirmBranchExclusivity(input: {
+    repositoryId: number;
+    branch: string;
+    branchLeaseId: string;
+  }): boolean | Promise<boolean>;
+  releaseBranchExclusivity(branchLeaseId: string): void | Promise<void>;
+}
+
+export interface ConnectionOwnershipArbiter
+  extends ConnectionOwnershipRelay, BranchExclusivityRelay {
+  /** deviceの失効。接続付随情報を失効させてから、Job所有権とブランチ排他を閉じる。 */
   revokeDevice(deviceId: string): void;
 }
 
@@ -35,11 +61,20 @@ interface JobOwnershipConnectionRecord {
   onClosed?: () => void;
 }
 
+interface BranchExclusivityConnectionRecord {
+  repositoryId: number;
+  branch: string;
+  deviceId: string;
+  jobLeaseId: string;
+  onClosed?: () => void;
+}
+
 export interface ConnectionOwnershipArbiterOptions {
   /** server側失効期限。運用値は測定と検証専用環境から決めるため既定値を持たない。 */
   heartbeatExpiryMs: number;
   now?: () => number;
   newJobLeaseId?: () => string;
+  newBranchLeaseId?: () => string;
 }
 
 /**
@@ -52,9 +87,25 @@ export function createConnectionOwnershipArbiter({
   heartbeatExpiryMs,
   now = Date.now,
   newJobLeaseId = randomUUID,
+  newBranchLeaseId = randomUUID,
 }: ConnectionOwnershipArbiterOptions): ConnectionOwnershipArbiter {
   const connections = new Map<string, JobOwnershipConnectionRecord>();
+  const branchConnections = new Map<
+    string,
+    BranchExclusivityConnectionRecord
+  >();
   const revokedDevices = new Set<string>();
+
+  function closeBranchConnections(
+    matches: (connection: BranchExclusivityConnectionRecord) => boolean,
+  ) {
+    for (const [branchLeaseId, connection] of branchConnections) {
+      if (matches(connection)) {
+        branchConnections.delete(branchLeaseId);
+        connection.onClosed?.();
+      }
+    }
+  }
 
   function expireStaleConnections() {
     const deadline = now() - heartbeatExpiryMs;
@@ -66,6 +117,9 @@ export function createConnectionOwnershipArbiter({
       ) {
         // 接続付随情報を失効させてから閉じる。閉じた後の確認は取得ID不一致になる。
         connections.delete(jobLeaseId);
+        closeBranchConnections(
+          (branchConnection) => branchConnection.jobLeaseId === jobLeaseId,
+        );
         connection.onClosed?.();
       }
     }
@@ -114,10 +168,66 @@ export function createConnectionOwnershipArbiter({
       return current(jobLeaseId)?.jobId === jobId;
     },
     releaseJobOwnership(jobLeaseId) {
+      // 明示的な解放はブランチ排他、Job所有権の順に閉じる。
+      closeBranchConnections(
+        (connection) => connection.jobLeaseId === jobLeaseId,
+      );
       connections.delete(jobLeaseId);
+    },
+    acquireBranchExclusivity({
+      repositoryId,
+      branch,
+      deviceId,
+      jobLeaseId,
+      onClosed,
+    }) {
+      expireStaleConnections();
+
+      if (revokedDevices.has(deviceId)) {
+        return { status: "rejected", reason: "device_revoked" };
+      }
+
+      if (connections.get(jobLeaseId)?.deviceId !== deviceId) {
+        return { status: "rejected", reason: "ownership_not_current" };
+      }
+
+      for (const connection of branchConnections.values()) {
+        if (
+          connection.repositoryId === repositoryId &&
+          connection.branch === branch
+        ) {
+          return { status: "rejected", reason: "already_owned" };
+        }
+      }
+
+      const branchLeaseId = newBranchLeaseId();
+      branchConnections.set(branchLeaseId, {
+        repositoryId,
+        branch,
+        deviceId,
+        jobLeaseId,
+        onClosed,
+      });
+
+      return { status: "acquired", branchLeaseId };
+    },
+    confirmBranchExclusivity({ repositoryId, branch, branchLeaseId }) {
+      expireStaleConnections();
+      const connection = branchConnections.get(branchLeaseId);
+
+      return (
+        connection !== undefined &&
+        connection.repositoryId === repositoryId &&
+        connection.branch === branch
+      );
+    },
+    releaseBranchExclusivity(branchLeaseId) {
+      branchConnections.delete(branchLeaseId);
     },
     revokeDevice(deviceId) {
       revokedDevices.add(deviceId);
+      // 先にブランチ排他を閉じ、その後でJob所有権を閉じる。
+      closeBranchConnections((connection) => connection.deviceId === deviceId);
       expireStaleConnections();
     },
   };
@@ -174,7 +284,14 @@ export function createJobOwnershipConnection({
         return null;
       }
 
-      const acquisition = await relay.acquireJobOwnership({ jobId, deviceId });
+      const acquisition = await relay.acquireJobOwnership({
+        jobId,
+        deviceId,
+        // リレーが接続を閉じたら、切断通知を待たずworkerと新しい外部操作を止める。
+        onClosed: () => {
+          stop();
+        },
+      });
 
       if (acquisition.status === "rejected") {
         return null;

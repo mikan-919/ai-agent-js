@@ -11,6 +11,7 @@ import {
   type IssueConversationBinding,
   serveOwnedHarnessIssueCommentIpc,
 } from "./issue-comment-ipc";
+import { createJobStateStore } from "./job-state";
 import { openServeLocalState } from "./local-state";
 
 export interface StartIssueCommentRuntimeOptions {
@@ -25,10 +26,21 @@ export function startIssueCommentRuntime({
   ownershipVerifier,
 }: StartIssueCommentRuntimeOptions) {
   const database = openServeLocalState(databasePath);
+  const jobState = createJobStateStore(database);
   const service = createIssueCommentService({
     outbox: createIssueCommentOutbox(database),
     ownershipVerifier,
     publisher: createOctokitIssueCommentPublisher(octokit),
+  });
+  const runningJobs = new Set<string>();
+
+  // 所有権を失ったら、workerと新しい外部操作を止めてJobを`interrupted`へ移す。
+  ownershipVerifier.stopSignal?.addEventListener("abort", () => {
+    for (const jobId of runningJobs) {
+      jobState.set(jobId, "interrupted");
+    }
+
+    runningJobs.clear();
   });
 
   return {
@@ -37,6 +49,13 @@ export function startIssueCommentRuntime({
       output: WritableStream<Uint8Array>,
       binding: IssueConversationBinding,
     ) {
+      if (ownershipVerifier.stopSignal?.aborted === true) {
+        jobState.set(binding.jobId, "interrupted");
+      } else {
+        runningJobs.add(binding.jobId);
+        jobState.set(binding.jobId, "running");
+      }
+
       void service.resumePending(binding);
       return serveOwnedHarnessIssueCommentIpc(
         input,
@@ -45,6 +64,9 @@ export function startIssueCommentRuntime({
         service,
         ownershipVerifier.stopSignal,
       );
+    },
+    jobStatus(jobId: string) {
+      return jobState.get(jobId);
     },
     close() {
       database.close();

@@ -1,0 +1,101 @@
+import {
+  parseDeviceListResponse,
+  parseDeviceRevocationResponse,
+  parseDeviceTokenExchangeResponse,
+  type DeviceCancellationRequest,
+  type DeviceRecord,
+  type DeviceRevocationResponse,
+  type DeviceTokenExchangeRequest,
+  type DeviceTokenExchangeResponse,
+} from "@mikan-919/oriel-contracts";
+
+/**
+ * `serve`から公開relayのdevice APIを呼ぶ境界。応答は必ずcontractで検証する。
+ * 結果が不明な場合は例外を投げ、呼び出し側が再調停できるようにする。
+ */
+export interface RelayDeviceClient {
+  exchange(
+    request: DeviceTokenExchangeRequest,
+  ): Promise<DeviceTokenExchangeResponse | null>;
+  cancelIssuedDevice(request: DeviceCancellationRequest): Promise<boolean>;
+  listDevices(managementToken: string): Promise<DeviceRecord[] | null>;
+  revokeDevice(input: {
+    managementToken: string;
+    deviceId: string;
+  }): Promise<DeviceRevocationResponse | null>;
+}
+
+/** testと製品経路で同じ形を使うための最小のfetch。 */
+export type RelayFetch = (
+  input: string,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export function createRelayDeviceClient({
+  baseUrl,
+  fetch: fetchImpl = fetch,
+}: {
+  baseUrl: URL | string;
+  fetch?: RelayFetch;
+}): RelayDeviceClient {
+  function endpoint(path: string): string {
+    return new URL(path, baseUrl).toString();
+  }
+
+  async function postJson(path: string, body: unknown, bearer?: string) {
+    return fetchImpl(endpoint(path), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** 4xxはrelayの拒否、それ以外の失敗は結果不明として投げ直す。 */
+  function refusedOrThrow(response: Response, path: string): null {
+    if (response.status >= 400 && response.status < 500) {
+      return null;
+    }
+
+    throw new Error(`Relay responded ${response.status} for ${path}`);
+  }
+
+  return {
+    async exchange(request) {
+      const response = await postJson("/device/token", request);
+
+      return response.ok
+        ? parseDeviceTokenExchangeResponse(await response.json())
+        : refusedOrThrow(response, "/device/token");
+    },
+    async cancelIssuedDevice(request) {
+      const response = await postJson("/device/cancellation", request);
+
+      if (response.ok) {
+        return true;
+      }
+
+      refusedOrThrow(response, "/device/cancellation");
+      return false;
+    },
+    async listDevices(managementToken) {
+      const response = await fetchImpl(endpoint("/devices"), {
+        headers: { authorization: `Bearer ${managementToken}` },
+      });
+
+      return response.ok
+        ? parseDeviceListResponse(await response.json()).devices
+        : refusedOrThrow(response, "/devices");
+    },
+    async revokeDevice({ managementToken, deviceId }) {
+      const path = `/devices/${encodeURIComponent(deviceId)}/revocation`;
+      const response = await postJson(path, {}, managementToken);
+
+      return response.ok
+        ? parseDeviceRevocationResponse(await response.json())
+        : refusedOrThrow(response, path);
+    },
+  };
+}

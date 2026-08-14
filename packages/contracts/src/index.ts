@@ -1,58 +1,8 @@
 import * as v from "valibot";
 
+import { githubRepositorySchema } from "./github";
+
 const nonEmptyString = v.pipe(v.string(), v.minLength(1));
-
-export const githubRepositorySchema = v.strictObject({
-  owner: nonEmptyString,
-  name: nonEmptyString,
-});
-
-export type GitHubRepository = v.InferOutput<typeof githubRepositorySchema>;
-
-const positiveInteger = v.pipe(v.number(), v.integer(), v.minValue(1));
-
-/** relayからlocalhostへ戻るURLへ載せてよいのは短命codeとstateだけとする。 */
-export const deviceRegistrationCallbackSchema = v.strictObject({
-  code: nonEmptyString,
-  state: nonEmptyString,
-});
-
-export type DeviceRegistrationCallback = v.InferOutput<
-  typeof deviceRegistrationCallbackSchema
->;
-
-export const deviceTokenExchangeRequestSchema = v.strictObject({
-  code: nonEmptyString,
-  codeVerifier: nonEmptyString,
-});
-
-export type DeviceTokenExchangeRequest = v.InferOutput<
-  typeof deviceTokenExchangeRequestSchema
->;
-
-export const deviceTokenExchangeResponseSchema = v.strictObject({
-  deviceId: nonEmptyString,
-  deviceToken: nonEmptyString,
-  installationId: positiveInteger,
-  repositoryId: positiveInteger,
-  repository: githubRepositorySchema,
-});
-
-export type DeviceTokenExchangeResponse = v.InferOutput<
-  typeof deviceTokenExchangeResponseSchema
->;
-
-export function parseDeviceRegistrationCallback(
-  value: unknown,
-): DeviceRegistrationCallback {
-  return v.parse(deviceRegistrationCallbackSchema, value);
-}
-
-export function parseDeviceTokenExchangeResponse(
-  value: unknown,
-): DeviceTokenExchangeResponse {
-  return v.parse(deviceTokenExchangeResponseSchema, value);
-}
 
 export const issueCommentRequestSchema = v.strictObject({
   type: v.literal("issue_comment.request"),
@@ -144,3 +94,6 @@ export function parseIssueCommentCompletedEvent(
 export function parseIssueCommentEvent(value: unknown): IssueCommentEvent {
   return v.parse(issueCommentEventSchema, value);
 }
+
+export * from "./device-registration";
+export * from "./github";
