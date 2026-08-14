@@ -55,20 +55,19 @@ interface OwnershipAttachment {
   leaseId: string;
   parentLeaseId: string | null;
   acceptedAt: number;
+  audit: OwnershipAuditConfig;
   valid: boolean;
 }
 
 /**
  * 生存確認の運用値。根拠のある値が決まるまで既定値を持たず、deploy設定から
- * 毎回の接続要求で受け取る。
+ * 毎回の接続要求で受け取る。値はストレージへ保存せず、接続付随情報だけに置く。
  */
 interface OwnershipAuditConfig {
   heartbeatIntervalMs: number;
   heartbeatExpiryMs: number;
   auditIntervalMs: number;
 }
-
-const auditConfigKey = "ownership-audit-config";
 
 interface DeviceRow extends Record<string, SqlStorageValue> {
   device_id: string;
@@ -119,8 +118,6 @@ function toDeviceRecord(row: DeviceRow): DeviceRecord {
  * 短命codeはhashで保存し、`DELETE ... RETURNING`の単一文で一度だけ消費する。
  */
 export class DeviceRegistryObject extends DurableObject {
-  private auditConfig: OwnershipAuditConfig | null = null;
-
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as never);
 
@@ -133,8 +130,6 @@ export class DeviceRegistryObject extends DurableObject {
     );
 
     ctx.blockConcurrencyWhile(async () => {
-      this.auditConfig =
-        (await ctx.storage.get<OwnershipAuditConfig>(auditConfigKey)) ?? null;
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS registration_codes (
           code_hash TEXT PRIMARY KEY,
@@ -391,8 +386,6 @@ export class DeviceRegistryObject extends DurableObject {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    this.auditConfig = audit;
-    void this.ctx.storage.put(auditConfigKey, audit);
     // 新しい取得の前に、期限を過ぎた接続を失効させてから数える。
     this.expireStaleOwnership();
 
@@ -414,6 +407,7 @@ export class DeviceRegistryObject extends DurableObject {
         leaseId: outcome.leaseId,
         parentLeaseId,
         acceptedAt: Date.now(),
+        audit,
         valid: true,
       } satisfies OwnershipAttachment);
       pair[1].send(JSON.stringify(outcome));
@@ -465,24 +459,29 @@ export class DeviceRegistryObject extends DurableObject {
         };
   }
 
-  /** Alarmでも最終heartbeatを監査し、期限を過ぎた接続を失効させてから閉じる。 */
+  /**
+   * Alarmでも最終heartbeatを監査し、期限を過ぎた接続を失効させてから閉じる。
+   * 監査の運用値は接続付随情報から再構成する。
+   */
   override async alarm(): Promise<void> {
     this.expireStaleOwnership();
 
-    if (this.ctx.getWebSockets().length > 0 && this.auditConfig !== null) {
-      await this.ctx.storage.setAlarm(
-        Date.now() + this.auditConfig.auditIntervalMs,
-      );
+    const next = Math.min(
+      ...this.ctx
+        .getWebSockets()
+        .map(
+          (ws) =>
+            (ws.deserializeAttachment() as OwnershipAttachment | null)?.audit
+              .auditIntervalMs ?? Number.POSITIVE_INFINITY,
+        ),
+    );
+
+    if (Number.isFinite(next)) {
+      await this.ctx.storage.setAlarm(Date.now() + next);
     }
   }
 
   private expireStaleOwnership(): void {
-    const audit = this.auditConfig;
-
-    if (audit === null) {
-      return;
-    }
-
     for (const ws of this.ctx.getWebSockets()) {
       const attachment =
         ws.deserializeAttachment() as OwnershipAttachment | null;
@@ -495,7 +494,7 @@ export class DeviceRegistryObject extends DurableObject {
         this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ??
         attachment.acceptedAt;
 
-      if (Date.now() - lastHeartbeat <= audit.heartbeatExpiryMs) {
+      if (Date.now() - lastHeartbeat <= attachment.audit.heartbeatExpiryMs) {
         continue;
       }
 

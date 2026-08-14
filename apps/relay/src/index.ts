@@ -19,9 +19,14 @@ export interface RelayEnv {
   OWNERSHIP_HEARTBEAT_INTERVAL_MS: string;
   OWNERSHIP_HEARTBEAT_EXPIRY_MS: string;
   OWNERSHIP_AUDIT_INTERVAL_MS: string;
+  GITHUB_APP_ID: string;
+  GITHUB_APP_PRIVATE_KEY: string;
+  GITHUB_APP_JWT_LIFETIME_SECONDS: string;
+  /** installation tokenへ載せる最小権限のJSON。 */
+  INSTALLATION_TOKEN_PERMISSIONS: string;
 }
 
-function requiredMilliseconds(value: string, name: string): number {
+function requiredPositiveInteger(value: string, name: string): number {
   const parsed = Number(value);
 
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -38,30 +43,39 @@ export default {
         clientId: env.GITHUB_CLIENT_ID,
         clientSecret: env.GITHUB_CLIENT_SECRET,
         userAgent: userAgent(env.RELAY_VERSION),
+        appId: env.GITHUB_APP_ID,
+        privateKeyPem: env.GITHUB_APP_PRIVATE_KEY,
+        appJwtLifetimeSeconds: requiredPositiveInteger(
+          env.GITHUB_APP_JWT_LIFETIME_SECONDS,
+          "GITHUB_APP_JWT_LIFETIME_SECONDS",
+        ),
       }),
       deviceRegistry: env.DEVICE_REGISTRY,
       signingKey: env.RELAY_SIGNING_KEY,
       relayOrigin: env.RELAY_ORIGIN,
-      codeExpiryMs: requiredMilliseconds(
+      codeExpiryMs: requiredPositiveInteger(
         env.DEVICE_CODE_EXPIRY_MS,
         "DEVICE_CODE_EXPIRY_MS",
       ),
-      cancellationExpiryMs: requiredMilliseconds(
+      cancellationExpiryMs: requiredPositiveInteger(
         env.DEVICE_CANCELLATION_EXPIRY_MS,
         "DEVICE_CANCELLATION_EXPIRY_MS",
       ),
-      ownershipHeartbeatIntervalMs: requiredMilliseconds(
+      ownershipHeartbeatIntervalMs: requiredPositiveInteger(
         env.OWNERSHIP_HEARTBEAT_INTERVAL_MS,
         "OWNERSHIP_HEARTBEAT_INTERVAL_MS",
       ),
-      ownershipHeartbeatExpiryMs: requiredMilliseconds(
+      ownershipHeartbeatExpiryMs: requiredPositiveInteger(
         env.OWNERSHIP_HEARTBEAT_EXPIRY_MS,
         "OWNERSHIP_HEARTBEAT_EXPIRY_MS",
       ),
-      ownershipAuditIntervalMs: requiredMilliseconds(
+      ownershipAuditIntervalMs: requiredPositiveInteger(
         env.OWNERSHIP_AUDIT_INTERVAL_MS,
         "OWNERSHIP_AUDIT_INTERVAL_MS",
       ),
+      installationTokenPermissions: JSON.parse(
+        env.INSTALLATION_TOKEN_PERMISSIONS,
+      ) as Record<string, string>,
     });
 
     return app.fetch(request, env, context);

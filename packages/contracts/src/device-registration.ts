@@ -128,6 +128,27 @@ export type DeviceCancellationRequest = v.InferOutput<
 >;
 
 /**
+ * repositoryとpermissionsを絞った短命installation token。`serve`は要求した
+ * 時だけ受け取り、どこにも永続化しない。
+ */
+export const installationTokenResponseSchema = v.strictObject({
+  token: nonEmptyString,
+  expiresAt: nonEmptyString,
+  installationId: positiveInteger,
+  repositoryId: positiveInteger,
+});
+
+export type InstallationTokenResponse = v.InferOutput<
+  typeof installationTokenResponseSchema
+>;
+
+export function parseInstallationTokenResponse(
+  value: unknown,
+): InstallationTokenResponse {
+  return v.parse(installationTokenResponseSchema, value);
+}
+
+/**
  * 所有権接続のapplication-level heartbeat。Hibernationの自動応答で返すため、
  * JSONではなく固定文字列とする。
  */

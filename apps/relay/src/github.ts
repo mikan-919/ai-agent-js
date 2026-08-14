@@ -20,7 +20,18 @@ export interface RelayGitHubClient {
     userToken: string;
     installationId: number;
   }): Promise<boolean>;
+  /**
+   * repositoryとpermissionsを絞った短命installation token。relayは保存せず、
+   * 要求した`serve`へその場で返す。
+   */
+  createInstallationAccessToken(input: {
+    installationId: number;
+    repositoryIds: number[];
+    permissions: Record<string, string>;
+  }): Promise<{ token: string; expiresAt: string } | null>;
 }
+
+import { createAppJwt } from "./crypto";
 
 const githubApi = "https://api.github.com";
 
@@ -28,10 +39,18 @@ export function createGitHubClient({
   clientId,
   clientSecret,
   userAgent,
+  appId,
+  privateKeyPem,
+  appJwtLifetimeSeconds,
+  now = Date.now,
 }: {
   clientId: string;
   clientSecret: string;
   userAgent: string;
+  appId: string;
+  privateKeyPem: string;
+  appJwtLifetimeSeconds: number;
+  now?: () => number;
 }): RelayGitHubClient {
   async function callApi<T>(
     userToken: string,
@@ -57,6 +76,47 @@ export function createGitHubClient({
   }
 
   return {
+    async createInstallationAccessToken({
+      installationId,
+      repositoryIds,
+      permissions,
+    }) {
+      const jwt = await createAppJwt({
+        appId,
+        privateKeyPem,
+        now: now(),
+        lifetimeSeconds: appJwtLifetimeSeconds,
+      });
+      const response = await fetch(
+        `${githubApi}/app/installations/${installationId}/access_tokens`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${jwt}`,
+            "content-type": "application/json",
+            "user-agent": userAgent,
+          },
+          body: JSON.stringify({
+            repository_ids: repositoryIds,
+            permissions,
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const body = (await response.json()) as {
+        token?: string;
+        expires_at?: string;
+      };
+
+      return body.token === undefined || body.expires_at === undefined
+        ? null
+        : { token: body.token, expiresAt: body.expires_at };
+    },
     authorizeUrl({ state, redirectUri }) {
       const url = new URL("https://github.com/login/oauth/authorize");
       url.searchParams.set("client_id", clientId);

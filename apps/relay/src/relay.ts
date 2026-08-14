@@ -29,6 +29,8 @@ export interface RelayOptions {
   ownershipHeartbeatIntervalMs: number;
   ownershipHeartbeatExpiryMs: number;
   ownershipAuditIntervalMs: number;
+  /** installation tokenへ載せる最小権限。deploy設定から与える。 */
+  installationTokenPermissions: Record<string, string>;
   now?: () => number;
 }
 
@@ -104,6 +106,7 @@ export function createRelayApp({
   ownershipHeartbeatIntervalMs,
   ownershipHeartbeatExpiryMs,
   ownershipAuditIntervalMs,
+  installationTokenPermissions,
   now = Date.now,
 }: RelayOptions) {
   const app = new Hono();
@@ -410,6 +413,56 @@ export function createRelayApp({
     return outcome === "cancelled"
       ? context.json({ deviceId: request.deviceId, cancelled: true })
       : context.text("Forbidden", 403);
+  });
+
+  /** device bearer tokenを解決する。失効したdeviceは解決しない。 */
+  async function authenticateDevice(authorization: string | undefined) {
+    const deviceToken = authorization?.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
+    const route = routeOf(deviceToken);
+
+    if (route === null || route.installationId === 0) {
+      return null;
+    }
+
+    const device = await registryFor(
+      route.installationId,
+      route.repositoryId,
+    ).authenticateDevice(await sha256Hex(deviceToken));
+
+    return device;
+  }
+
+  /**
+   * 登録済みdeviceへ、そのrepositoryだけに絞った短命installation tokenを渡す。
+   * relayはtokenもGitHub user tokenも秘密鍵も保存しない。
+   */
+  app.post("/device/installation-token", async (context) => {
+    const device = await authenticateDevice(
+      context.req.header("authorization"),
+    );
+
+    if (device === null) {
+      return context.text("Unauthorized", 401);
+    }
+
+    const issued = await github.createInstallationAccessToken({
+      installationId: device.installationId,
+      repositoryIds: [device.repositoryId],
+      permissions: installationTokenPermissions,
+    });
+
+    if (issued === null) {
+      return context.text("Bad Gateway", 502);
+    }
+
+    return context.json({
+      token: issued.token,
+      expiresAt: issued.expiresAt,
+      installationId: device.installationId,
+      repositoryId: device.repositoryId,
+    });
   });
 
   // 所有権接続。device bearer tokenはAuthorization headerだけで受け取る。

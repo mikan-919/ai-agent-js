@@ -1,8 +1,10 @@
 import {
+  parseInstallationTokenResponse,
   parseDeviceTokenExchangeResponse,
   type DeviceCancellationRequest,
   type DeviceTokenExchangeRequest,
   type DeviceTokenExchangeResponse,
+  type InstallationTokenResponse,
 } from "@mikan-919/oriel-contracts";
 
 /**
@@ -14,6 +16,13 @@ export interface RelayDeviceClient {
     request: DeviceTokenExchangeRequest,
   ): Promise<DeviceTokenExchangeResponse | null>;
   cancelIssuedDevice(request: DeviceCancellationRequest): Promise<boolean>;
+  /**
+   * 登録済みdeviceのrepositoryへ絞った短命installation tokenを取り寄せる。
+   * 受け取ったtokenは保存せず、その要求の中だけで使う。
+   */
+  requestInstallationToken(
+    deviceToken: string,
+  ): Promise<InstallationTokenResponse | null>;
 }
 
 /** testと製品経路で同じ形を使うための最小のfetch。 */
@@ -57,6 +66,16 @@ export function createRelayDeviceClient({
       return response.ok
         ? parseDeviceTokenExchangeResponse(await response.json())
         : refusedOrThrow(response, "/device/token");
+    },
+    async requestInstallationToken(deviceToken) {
+      const response = await fetchImpl(endpoint("/device/installation-token"), {
+        method: "POST",
+        headers: { authorization: `Bearer ${deviceToken}` },
+      });
+
+      return response.ok
+        ? parseInstallationTokenResponse(await response.json())
+        : refusedOrThrow(response, "/device/installation-token");
     },
     async cancelIssuedDevice(request) {
       const response = await postJson("/device/cancellation", request);

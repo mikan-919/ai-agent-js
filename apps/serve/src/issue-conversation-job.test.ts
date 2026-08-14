@@ -84,7 +84,7 @@ function options(databasePath: string, relayOrigin: string) {
   };
 }
 
-test("an admitted conversation runs a real harness process, posts one comment, and stops on revocation", async () => {
+test("an admitted conversation runs a real harness process and cleans up on normal completion", async () => {
   await withWorkspace(async (databasePath) => {
     const relay = startFakeOwnershipRelay(deviceToken);
     const published = { bodies: [] as string[] };
@@ -104,6 +104,8 @@ test("an admitted conversation runs a real harness process, posts one comment, a
       expect(started.jobId).toBe(
         `issue-conversation:${repositoryId}:28:fingerprint-1`,
       );
+      // 非コード対話はJob所有権だけを取る。
+      expect(started.branchLeaseId).toBeNull();
 
       await started.finished;
 
@@ -111,18 +113,95 @@ test("an admitted conversation runs a real harness process, posts one comment, a
       expect(published.bodies[0]).toContain("Agent reply");
       // ADR 0005の配送識別子をHTML commentとして埋める。
       expect(published.bodies[0]).toContain("oriel-operation:");
-      expect(started.jobStatus()).toBe("running");
+      expect(started.jobStatus()).toBe("completed");
 
-      // relayがdeviceを失効させ、所有権接続を閉じる。
+      started.close();
+      await Bun.sleep(50);
+
+      // 正常終了ではleaseとheartbeatを手放す。
+      expect(relay.openConnections()).toBe(0);
+
+      // 後から所有権が失われても、完了したJobを`interrupted`にしない。
+      relay.revokeDevice();
+      await Bun.sleep(50);
+
+      expect(started.jobStatus()).toBe("completed");
+    } finally {
+      if (started.status === "started") {
+        started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
+test("a code changing Job takes a server derived canonical branch and loses both connections on revocation", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const started = await startIssueConversationJob({
+      ...options(databasePath, relay.origin),
+      changesCode: true,
+    });
+
+    try {
+      expect(started.status).toBe("started");
+
+      if (started.status !== "started") {
+        return;
+      }
+
+      expect(started.branchLeaseId).toEqual(expect.any(String));
+      expect(relay.openConnections()).toBe(2);
+
+      // 失効はJob所有権とブランチ排他の両方を閉じる。
       relay.revokeDevice();
       await Bun.sleep(100);
 
       expect(relay.openConnections()).toBe(0);
       expect(started.jobStatus()).toBe("interrupted");
-      expect(published.bodies).toHaveLength(1);
     } finally {
       if (started.status === "started") {
         started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
+test("a second code changing Job for the same canonical branch is refused and holds no connection", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const first = await startIssueConversationJob({
+      ...options(databasePath, relay.origin),
+      changesCode: true,
+    });
+
+    try {
+      expect(first.status).toBe("started");
+      expect(
+        await startIssueConversationJob({
+          ...options(databasePath, relay.origin),
+          createAdmission: () => ({
+            admit: async () => ({
+              status: "admitted",
+              jobId: "issue-conversation:11:29:fingerprint-1",
+              approvalFingerprint: "fingerprint-1",
+            }),
+            reconfirm: async () => true,
+          }),
+          issueNumber: 29,
+          changesCode: true,
+        }),
+      ).toEqual({ status: "refused", reason: "branch_not_exclusive" });
+
+      await Bun.sleep(50);
+
+      expect(relay.openConnections()).toBe(2);
+    } finally {
+      if (first.status === "started") {
+        first.close();
       }
 
       relay.stop();

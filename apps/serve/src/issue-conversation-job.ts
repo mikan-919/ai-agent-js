@@ -25,6 +25,11 @@ export interface StartIssueConversationJobOptions {
   issueNumber: number;
   /** 人間がlocalhost UIで書いた、この対話の返答本文。 */
   body: string;
+  /**
+   * コードを変更するJobか。`serve`だけが決め、HTTP入力からは受け取らない。
+   * 真の場合はcanonicalブランチのキーを承認指紋から導いて排他も取得する。
+   */
+  changesCode?: boolean;
   heartbeatStopMs: number;
 }
 
@@ -32,6 +37,7 @@ export type StartIssueConversationJobResult =
   | {
       status: "started";
       jobId: string;
+      branchLeaseId: string | null;
       /** harness processが終わるまで待つ。 */
       finished: Promise<void>;
       jobStatus(): string | null;
@@ -46,6 +52,7 @@ export type StartIssueConversationJobResult =
         | "issue_not_open"
         | "repository_mismatch"
         | "job_ownership_not_acquired"
+        | "branch_not_exclusive"
         | "approval_changed";
     };
 
@@ -54,8 +61,10 @@ export type StartIssueConversationJobResult =
  * device tokenでrelayのJob所有権を取り、credentialを持たないharness processを
  * 起動してstdioのNDJSONを`serve`の外部操作へつなぐ。
  *
- * コードを変更するJobはこの入口では起動しない。canonicalブランチの排他と
- * 封印は実装Jobの経路で扱う。
+ * コードを変更するJobでは、canonicalブランチのキーを承認指紋から導いて排他も
+ * 取得する。ブランチ名をHTTP入力から受け取らない。LinearのTriage→Todo、
+ * attachmentの逆引き、HOWの取り込み、ブランチ封印は実装Jobの受け入れ判定の
+ * 範囲であり、この経路では扱わない。
  */
 export async function startIssueConversationJob({
   relayOrigin,
@@ -68,6 +77,7 @@ export async function startIssueConversationJob({
   repository,
   issueNumber,
   body,
+  changesCode = false,
   heartbeatStopMs,
 }: StartIssueConversationJobOptions): Promise<StartIssueConversationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
@@ -116,6 +126,18 @@ export async function startIssueConversationJob({
   ) {
     ownership.release();
     return { status: "refused", reason: "approval_changed" };
+  }
+
+  if (changesCode) {
+    // ブランチキーは承認指紋から導く。clientは指定できない。
+    const branchLeaseId = await ownership.acquireBranchExclusivity(
+      `${repositoryId}/oriel/${admitted.approvalFingerprint.slice(0, 16)}`,
+    );
+
+    if (branchLeaseId === null) {
+      ownership.release();
+      return { status: "refused", reason: "branch_not_exclusive" };
+    }
   }
 
   const runtime = startIssueCommentRuntime({
@@ -167,18 +189,37 @@ export async function startIssueConversationJob({
     binding,
   );
 
+  let lastJobStatus: string | null = null;
+  let closed = false;
+  const close = () => {
+    if (closed) {
+      return;
+    }
+
+    // 閉じた後も最後の実行状態を答えられるようにする。
+    lastJobStatus = runtime.jobStatus(admitted.jobId);
+    closed = true;
+    ownership.stopSignal.removeEventListener("abort", stopHarness);
+    harness.kill();
+    // heartbeatとleaseを持ち続けない。
+    ownership.release();
+    runtime.close();
+  };
+
   return {
     status: "started",
     jobId: admitted.jobId,
+    branchLeaseId: ownership.branchLeaseId,
     finished: serving.then(async () => {
-      await harness.exited;
+      const exitCode = await harness.exited;
+
+      // 所有権を失っていない正常終了だけを`completed`にする。
+      if (!ownership.stopSignal.aborted && exitCode === 0) {
+        runtime.completeJob(admitted.jobId);
+      }
     }),
-    jobStatus: () => runtime.jobStatus(admitted.jobId),
-    close() {
-      ownership.stopSignal.removeEventListener("abort", stopHarness);
-      harness.kill();
-      ownership.release();
-      runtime.close();
-    },
+    jobStatus: () =>
+      closed ? lastJobStatus : runtime.jobStatus(admitted.jobId),
+    close,
   };
 }

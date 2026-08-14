@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
-import { startServeHttpServer } from "./server";
+import { startServeHttpServer, type StartedIssueConversation } from "./server";
 
 const installationId = 7;
 const repositoryId = 11;
@@ -35,7 +35,8 @@ function startServer(
   startIssueConversation?: (input: {
     issueNumber: number;
     body: string;
-  }) => Promise<{ status: string; reason?: string }>,
+    changesCode: boolean;
+  }) => Promise<StartedIssueConversation | { status: string; reason?: string }>,
 ) {
   const server = startServeHttpServer({
     createDeviceRegistration: () => flow,
@@ -45,7 +46,7 @@ function startServer(
   return {
     ...server,
     origin: new URL(server.readinessUrl).origin,
-    close: () => server.server.stop(true),
+    close: () => server.close(),
   };
 }
 
@@ -312,11 +313,15 @@ test("held cancellations are reported and can be resumed from the localhost UI",
 });
 
 test("the Issue conversation entry takes no Job key or code changing input", async () => {
-  const requests: { issueNumber: number; body: string }[] = [];
+  const requests: {
+    issueNumber: number;
+    body: string;
+    changesCode: boolean;
+  }[] = [];
   const { flow } = fakeFlow();
   const server = startServer(flow, async (input) => {
     requests.push(input);
-    return { status: "started" };
+    return fakeConversation(`job-${input.issueNumber}`).handle;
   });
 
   try {
@@ -341,11 +346,11 @@ test("the Issue conversation entry takes no Job key or code changing input", asy
     ).toBe(400);
     expect((await post({ issueNumber: 28 })).status).toBe(400);
     expect((await post({ issueNumber: 0, body: "reply" })).status).toBe(400);
-    expect(requests).toEqual([{ issueNumber: 28, body: "reply" }]);
+    expect(requests).toEqual([
+      { issueNumber: 28, body: "reply", changesCode: false },
+    ]);
 
-    const refused = await post({ issueNumber: 29, body: "reply" });
-
-    expect(refused.status).toBe(200);
+    expect((await post({ issueNumber: 29, body: "reply" })).status).toBe(200);
   } finally {
     server.close();
   }
@@ -376,6 +381,159 @@ test("a refused conversation answers with a conflict and starts nothing", async 
       status: "refused",
       reason: "github_credentials_unavailable",
     });
+  } finally {
+    server.close();
+  }
+});
+
+/** 開始できたJobのふるまいをHTTP境界から観察するためのfake。 */
+function fakeConversation(jobId: string) {
+  const state = { status: "running", closed: false };
+  let finish = () => {};
+  const finished = new Promise<void>((resolve) => {
+    finish = () => {
+      state.status = "completed";
+      resolve();
+    };
+  });
+
+  return {
+    state,
+    finish,
+    handle: {
+      status: "started" as const,
+      jobId,
+      finished,
+      jobStatus: () => state.status,
+      close: () => {
+        state.closed = true;
+      },
+    },
+  };
+}
+
+test("a started conversation is held, driven to completion, and cleaned up", async () => {
+  const conversation = fakeConversation("job-1");
+  const { flow } = fakeFlow();
+  const server = startServer(flow, async () => conversation.handle);
+
+  try {
+    const shell = await openShell(server.origin);
+    const started = await fetch(`${server.origin}/api/issue-conversations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Origin: server.origin,
+        cookie: shell.session,
+        "x-oriel-csrf": shell.csrf,
+      },
+      body: JSON.stringify({ issueNumber: 28, body: "reply" }),
+    });
+
+    expect(await started.json()).toEqual({ status: "started", jobId: "job-1" });
+
+    const active = await fetch(`${server.origin}/api/issue-conversations`, {
+      headers: { Origin: server.origin, cookie: shell.session },
+    });
+
+    expect(await active.json()).toEqual({
+      jobs: [{ jobId: "job-1", status: "running" }],
+    });
+    expect(conversation.state.closed).toBe(false);
+
+    conversation.finish();
+    await Bun.sleep(20);
+
+    // 正常終了でlease、heartbeat、runtime、processを片付ける。
+    expect(conversation.state.closed).toBe(true);
+    expect(conversation.state.status).toBe("completed");
+
+    const afterCompletion = await fetch(
+      `${server.origin}/api/issue-conversations`,
+      { headers: { Origin: server.origin, cookie: shell.session } },
+    );
+
+    expect(await afterCompletion.json()).toEqual({ jobs: [] });
+  } finally {
+    server.close();
+  }
+});
+
+test("shutting down closes the Jobs that are still running", async () => {
+  const conversation = fakeConversation("job-1");
+  const { flow } = fakeFlow();
+  const server = startServer(flow, async () => conversation.handle);
+  const shell = await openShell(server.origin);
+
+  await fetch(`${server.origin}/api/issue-conversations`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Origin: server.origin,
+      cookie: shell.session,
+      "x-oriel-csrf": shell.csrf,
+    },
+    body: JSON.stringify({ issueNumber: 28, body: "reply" }),
+  });
+
+  expect(conversation.state.closed).toBe(false);
+
+  server.close();
+
+  expect(conversation.state.closed).toBe(true);
+});
+
+test("a code changing Job uses its own entry and never takes a branch name from the client", async () => {
+  const requests: {
+    issueNumber: number;
+    body: string;
+    changesCode: boolean;
+  }[] = [];
+  const { flow } = fakeFlow();
+  const server = startServer(flow, async (input) => {
+    requests.push(input);
+    return fakeConversation("job-1").handle;
+  });
+
+  try {
+    const shell = await openShell(server.origin);
+    const post = (path: string, body: unknown) =>
+      fetch(`${server.origin}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Origin: server.origin,
+          cookie: shell.session,
+          "x-oriel-csrf": shell.csrf,
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect(
+      (await post("/api/implementation-jobs", { issueNumber: 28, body: "go" }))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/api/implementation-jobs", {
+          issueNumber: 28,
+          body: "go",
+          canonicalBranch: "attacker/branch",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/api/implementation-jobs", {
+          issueNumber: 28,
+          body: "go",
+          jobId: "attacker-job",
+        })
+      ).status,
+    ).toBe(400);
+    expect(requests).toEqual([
+      { issueNumber: 28, body: "go", changesCode: true },
+    ]);
   } finally {
     server.close();
   }

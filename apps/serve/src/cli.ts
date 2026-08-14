@@ -6,6 +6,7 @@ import {
   bunSecretsDeviceTokenStore,
   createDeviceRegistrationFlow,
 } from "./device-registration";
+import { createInstallationOctokitResolver } from "./installation-octokit";
 import { startIssueConversationJob } from "./issue-conversation-job";
 import { openServeLocalState } from "./local-state";
 import { createPendingCancellationStore } from "./pending-cancellations";
@@ -33,7 +34,12 @@ if (Bun.argv[2] === "serve") {
   // client側停止期限。relayが伝えるserver側失効期限より短い場合だけ所有権を持つ。
   const heartbeatStopMs = requiredNumber("OWNERSHIP_HEARTBEAT_STOP_MS");
   const tokenStore = bunSecretsDeviceTokenStore();
+  const relayDeviceClient =
+    environment === undefined
+      ? undefined
+      : createRelayDeviceClient({ baseUrl: environment });
   const conversationReady =
+    relayDeviceClient !== undefined &&
     environment !== undefined &&
     statePath !== undefined &&
     repositoryId !== undefined &&
@@ -42,29 +48,35 @@ if (Bun.argv[2] === "serve") {
     heartbeatStopMs !== undefined;
   const httpServer = startServeHttpServer({
     startIssueConversation: conversationReady
-      ? ({ issueNumber, body }) =>
+      ? ({ issueNumber, body, changesCode }) =>
           startIssueConversationJob({
             relayOrigin: environment,
             tokenStore,
-            // relayの短命installation token発行はまだ無い。認証済みclientを
-            // 用意できないため、外部書き込み経路はfail closedにする。
-            // 未認証のOctokitは使わない。
-            createOctokit: async () => null,
+            // 外部書き込みは、relayが発行するrepository限定の短命installation
+            // tokenで認証したOctokitだけで行う。未認証clientは使わない。
+            createOctokit: createInstallationOctokitResolver({
+              relay: relayDeviceClient,
+              tokenStore,
+              repositoryId,
+            }),
             databasePath: statePath,
             harnessEntry: new URL("./harness.js", import.meta.url),
             repositoryId,
             repository: { owner: repositoryOwner, name: repositoryName },
             issueNumber,
             body,
+            changesCode,
             heartbeatStopMs,
           })
       : undefined,
     createDeviceRegistration:
-      environment === undefined || statePath === undefined
+      environment === undefined ||
+      statePath === undefined ||
+      relayDeviceClient === undefined
         ? undefined
         : (redirectUri) => {
             const flow = createDeviceRegistrationFlow({
-              relay: createRelayDeviceClient({ baseUrl: environment }),
+              relay: relayDeviceClient,
               tokenStore,
               authorizeEndpoint: new URL("/device/authorize", environment),
               redirectUri,

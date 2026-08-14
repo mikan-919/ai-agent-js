@@ -65,6 +65,12 @@ export function startIssueCommentRuntime({
         ownershipVerifier.stopSignal,
       );
     },
+    /** 正常終了。以後の所有権喪失で`interrupted`へ誤って移さない。 */
+    completeJob(jobId: string) {
+      if (runningJobs.delete(jobId)) {
+        jobState.set(jobId, "completed");
+      }
+    },
     jobStatus(jobId: string) {
       return jobState.get(jobId);
     },

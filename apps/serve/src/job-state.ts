@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** ADR 0004/0005で`serve`が持つJob実行状態のうち、この経路で必要な最小の値。 */
-export type JobExecutionStatus = "running" | "interrupted";
+export type JobExecutionStatus = "running" | "interrupted" | "completed";
 
 export interface JobStateStore {
   set(jobId: string, status: JobExecutionStatus): void;
@@ -27,7 +27,9 @@ export function createJobStateStore(
     get(jobId) {
       const row = select.get(jobId);
 
-      return row?.status === "running" || row?.status === "interrupted"
+      return row?.status === "running" ||
+        row?.status === "interrupted" ||
+        row?.status === "completed"
         ? row.status
         : null;
     },

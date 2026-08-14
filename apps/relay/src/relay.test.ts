@@ -47,7 +47,21 @@ const github: RelayGitHubClient = {
   listInstallationRepositories: async () => [repository],
   canAdministerInstallation: async ({ userToken }) =>
     administrable && userToken === adminToken,
+  createInstallationAccessToken: async (input) => {
+    issuedInstallationTokens.push(input);
+
+    return installationTokenAvailable
+      ? { token: "installation-token", expiresAt: "2026-08-14T00:10:00Z" }
+      : null;
+  },
 };
+
+let issuedInstallationTokens: {
+  installationId: number;
+  repositoryIds: number[];
+  permissions: Record<string, string>;
+}[] = [];
+let installationTokenAvailable = true;
 
 type Purpose = "installations" | "registration" | "device_list" | "revocation";
 
@@ -62,6 +76,7 @@ function relay(overrides: Partial<RelayGitHubClient> = {}) {
     ownershipHeartbeatIntervalMs: 1_000,
     ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
     ownershipAuditIntervalMs: 5_000,
+    installationTokenPermissions: { issues: "write", metadata: "read" },
     now: () => currentTime,
   });
 }
@@ -215,6 +230,8 @@ beforeEach(() => {
   heartbeatExpiryMs = 60_000;
   nextRepositoryId += 1;
   repository = { id: nextRepositoryId, owner: "mikan-919", name: "oriel" };
+  issuedInstallationTokens = [];
+  installationTokenAvailable = true;
 });
 
 describe("device registration through the relay", () => {
@@ -681,5 +698,112 @@ describe("ownership liveness on the relay", () => {
     expect(await nextMessage(replacement.webSocket!)).toMatchObject({
       type: "ownership.acquired",
     });
+  });
+});
+
+describe("short lived installation tokens", () => {
+  function requestInstallationToken(
+    app: ReturnType<typeof relay>,
+    deviceToken: string,
+  ) {
+    return app.fetch(
+      new Request("https://relay.test/device/installation-token", {
+        method: "POST",
+        headers: { authorization: `Bearer ${deviceToken}` },
+      }),
+    );
+  }
+
+  it("issues a token scoped to the repository of a valid device token", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const response = await requestInstallationToken(
+      app,
+      registered.deviceToken,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      token: "installation-token",
+      expiresAt: "2026-08-14T00:10:00Z",
+      installationId,
+      repositoryId: repository.id,
+    });
+    expect(issuedInstallationTokens).toEqual([
+      {
+        installationId,
+        repositoryIds: [repository.id],
+        permissions: { issues: "write", metadata: "read" },
+      },
+    ]);
+  });
+
+  it("refuses a forged or revoked device token", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    expect(
+      (
+        await requestInstallationToken(
+          app,
+          `${installationId}.${repository.id}.forged`,
+        )
+      ).status,
+    ).toBe(401);
+    expect(issuedInstallationTokens).toEqual([]);
+
+    await runOperation(
+      app,
+      "revocation",
+      adminCode,
+      "revoke-state",
+      registered.deviceId,
+    );
+
+    expect(
+      (await requestInstallationToken(app, registered.deviceToken)).status,
+    ).toBe(401);
+    expect(issuedInstallationTokens).toEqual([]);
+  });
+
+  it("does not persist the issued token", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    await requestInstallationToken(app, registered.deviceToken);
+
+    const stored = await runInDurableObject(
+      registryStub(),
+      (_instance: DeviceRegistryObject, state: DurableObjectState) => ({
+        keys: [
+          ...state.storage.sql
+            .exec<{ name: string }>(
+              `SELECT name FROM sqlite_master WHERE type = 'table'`,
+            )
+            .toArray(),
+        ].map((row) => row.name),
+        rows: [
+          ...state.storage.sql
+            .exec<{ total: number }>(
+              `SELECT count(*) AS total FROM devices WHERE device_token_hash LIKE '%installation-token%'`,
+            )
+            .toArray(),
+        ],
+      }),
+    );
+
+    expect(stored.keys).not.toContain("installation_tokens");
+    expect(stored.rows[0]?.total).toBe(0);
+  });
+
+  it("fails closed when GitHub does not issue a token", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    installationTokenAvailable = false;
+
+    expect(
+      (await requestInstallationToken(app, registered.deviceToken)).status,
+    ).toBe(502);
   });
 });

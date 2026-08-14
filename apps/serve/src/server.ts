@@ -6,6 +6,21 @@ import { Hono, type Context } from "hono";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
 
+/** 起動できたJobの取り扱い。開始結果を捨てず、終了まで面倒を見る。 */
+export interface StartedIssueConversation {
+  status: "started";
+  jobId: string;
+  finished: Promise<void>;
+  jobStatus(): string | null;
+  close(): void;
+}
+
+function isStarted(
+  value: StartedIssueConversation | { status: string; reason?: string },
+): value is StartedIssueConversation {
+  return value.status === "started";
+}
+
 function isDeviceRegistrationPurpose(
   value: string,
 ): value is DeviceRegistrationPurpose {
@@ -30,7 +45,8 @@ export interface ServeHttpServerOptions {
   startIssueConversation?: (input: {
     issueNumber: number;
     body: string;
-  }) => Promise<{ status: string; reason?: string }>;
+    changesCode: boolean;
+  }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
 }
 
 /** 起動ごとのsession値とCSRF token。永続化しない。 */
@@ -160,6 +176,7 @@ export function startServeHttpServer({
   startIssueConversation,
 }: ServeHttpServerOptions = {}) {
   const { sessionId, csrfToken } = newSessionSecrets();
+  const activeConversations = new Set<StartedIssueConversation>();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
   const app = new Hono();
@@ -276,19 +293,24 @@ export function startServeHttpServer({
     return context.json(await deviceRegistration!.complete(callbackUrl));
   });
 
-  app.post("/api/issue-conversations", async (context) => {
+  async function startConversation(
+    context: Context,
+    changesCode: boolean,
+  ): Promise<Response> {
     const body = (await context.req.json().catch(() => null)) as {
       issueNumber?: unknown;
       body?: unknown;
       canonicalBranch?: unknown;
+      jobId?: unknown;
     } | null;
     const issueNumber = Number(body?.issueNumber);
 
-    // JobキーはWHATの現在値から導く。clientはJobキーを指定できない。
-    // コードを変更するJobはこの入口では起動しない。
+    // JobキーとcanonicalブランチはWHATの現在値からserveが導く。
+    // clientはどちらも指定できない。
     if (
       startIssueConversation === undefined ||
       body?.canonicalBranch !== undefined ||
+      body?.jobId !== undefined ||
       typeof body?.body !== "string" ||
       body.body === "" ||
       !Number.isInteger(issueNumber) ||
@@ -300,10 +322,45 @@ export function startServeHttpServer({
     const started = await startIssueConversation({
       issueNumber,
       body: body.body,
+      changesCode,
     });
 
-    return context.json(started, started.status === "started" ? 200 : 409);
-  });
+    if (!isStarted(started)) {
+      return context.json(started, 409);
+    }
+
+    activeConversations.add(started);
+    // 正常終了でも失敗でも、leaseとheartbeatとprocessを片付ける。
+    void started.finished
+      .catch(() => undefined)
+      .finally(() => {
+        started.close();
+        activeConversations.delete(started);
+      });
+
+    return context.json({
+      status: "started",
+      jobId: started.jobId,
+    });
+  }
+
+  app.post("/api/issue-conversations", (context) =>
+    startConversation(context, false),
+  );
+
+  // コードを変更するJob。ブランチキーはserveが承認指紋から導く。
+  app.post("/api/implementation-jobs", (context) =>
+    startConversation(context, true),
+  );
+
+  app.get("/api/issue-conversations", (context) =>
+    context.json({
+      jobs: [...activeConversations].map((conversation) => ({
+        jobId: conversation.jobId,
+        status: conversation.jobStatus(),
+      })),
+    }),
+  );
 
   app.get("/api/device-cancellations", (context) =>
     context.json({ pending: deviceRegistration!.pendingCancellations() }),
@@ -329,5 +386,14 @@ export function startServeHttpServer({
   return {
     readinessUrl: new URL(`http://${expectedAuthority}${readinessPath}`),
     server,
+    /** 停止時も動いているJobのprocessと所有権接続を閉じる。 */
+    close() {
+      for (const conversation of activeConversations) {
+        conversation.close();
+      }
+
+      activeConversations.clear();
+      server.stop(true);
+    },
   };
 }
