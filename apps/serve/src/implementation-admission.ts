@@ -21,7 +21,7 @@ export interface LinearApprovalSnapshot {
   identifier: string;
   title: string;
   description: string | null;
-  /** 現在のworkflow state名。実行承認はTodoだけとする。 */
+  /** 現在のworkflow state名。実行承認とみなすのはTodoだけとする。 */
   stateName: string;
   attachmentUrls: string[];
 }
@@ -150,7 +150,29 @@ export type SealResult =
   | { status: "refused"; reason: ImplementationRefusalReason };
 
 /** 実行承認とみなすLinearのworkflow state名。 */
-const approvedStateName = "Todo";
+export const approvedStateName = "Todo";
+
+/**
+ * 承認後にworker起動直後の機械的な反映で入るstate名。
+ *
+ * ADR 0005のとおり、これは承認そのものではなく承認後の状態反映であり、`serve`
+ * だけが送る。実行承認は人間のTriage→Todoだけである。
+ */
+export const inProgressStateName = "In Progress";
+
+/** admissionが受理するstate。承認そのものを読むので、Todoだけとする。 */
+const admittedStateNames: readonly string[] = [approvedStateName];
+
+/**
+ * worker起動後の再調停が受理するstate。
+ *
+ * 起動直後に`serve`自身がTodoからIn Progressへ移すため、実行中の現在値はどちらも
+ * 同じ承認episodeを指す。どちらでもないstateだけを、確定した承認の変更とする。
+ */
+export const reconciledStateNames: readonly string[] = [
+  approvedStateName,
+  inProgressStateName,
+];
 
 /** 実装Job識別子の、承認指紋を除いたWorkflow部分。 */
 function jobIdPrefix(repositoryId: number, githubIssueNumber: number): string {
@@ -210,10 +232,10 @@ export function workflowIsFenced(
 /**
  * 読み直しの拒否理由が、現在値から承認の変更だと確定できるか。
  *
- * ADR 0003の一致判定のうち、Linear stateがTodoでなくなった、attachmentから
- * GitHub Issueが一意に解決しなくなった、対象Issueが開いていないという観測は、
- * すべて現在値から読み取れた承認対象の変更である。読めなかった、能力が足りない、
- * 別のphaseへ進んだという理由はここに含めない。
+ * ADR 0003の一致判定のうち、Linear stateがその読み取りで受理するstateのどれでも
+ * なくなった、attachmentからGitHub Issueが一意に解決しなくなった、対象Issueが
+ * 開いていないという観測は、すべて現在値から読み取れた承認対象の変更である。
+ * 読めなかった、能力が足りない、別のphaseへ進んだという理由はここに含めない。
  */
 export function approvalChangedByRead(
   reason: ImplementationRefusalReason,
@@ -232,13 +254,20 @@ function refused(reason: ImplementationRefusalReason): {
   return { status: "refused", reason };
 }
 
-/** 現在値だけから承認指紋、canonicalブランチ、Job識別子を導く読み取り。 */
+/**
+ * 現在値だけから承認指紋、canonicalブランチ、Job識別子を導く読み取り。
+ *
+ * 受理するLinear stateは呼び出し文脈で決まる。admissionは実行承認そのものを読む
+ * のでTodoだけを受理し、worker起動後の再調停は`reconciledStateNames`を渡して、
+ * `serve`自身が反映したIn Progressを承認の変更と誤認しないようにする。
+ */
 export async function readImplementationApproval(
   ports: ImplementationApprovalPorts,
   {
     repositoryId,
     linearIssueId,
   }: { repositoryId: number; linearIssueId: string },
+  acceptedStateNames: readonly string[] = admittedStateNames,
 ): Promise<ImplementationApprovalRead> {
   const linear = await ports.readLinearIssue(linearIssueId);
 
@@ -246,7 +275,7 @@ export async function readImplementationApproval(
     return refused("linear_issue_not_found");
   }
 
-  if (linear.stateName !== approvedStateName) {
+  if (!acceptedStateNames.includes(linear.stateName)) {
     return refused("linear_state_not_todo");
   }
 

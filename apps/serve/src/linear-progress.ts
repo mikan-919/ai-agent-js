@@ -3,12 +3,12 @@ import { randomUUID } from "node:crypto";
 import type { GitHubRepository } from "@mikan-919/oriel-contracts";
 import type { Database } from "bun:sqlite";
 
-import type { ReconcileApproval } from "./implementation-admission";
+import {
+  approvedStateName,
+  inProgressStateName,
+  type ReconcileApproval,
+} from "./implementation-admission";
 import type { JobOwnershipVerifier } from "./issue-comments";
-
-/** 実行承認とみなすstateと、worker起動直後に反映するstate。 */
-const approvedStateName = "Todo";
-const inProgressStateName = "In Progress";
 
 /** In Progressの反映だけに使う境界。credentialは`serve`が持つ。 */
 export interface LinearInProgressPorts {

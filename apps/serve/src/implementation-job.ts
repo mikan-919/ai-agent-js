@@ -10,6 +10,7 @@ import type { GitCredential } from "./git";
 import {
   approvalChangedByRead,
   readImplementationApproval,
+  reconciledStateNames,
   sameApproval,
   sealCanonicalBranch,
   workflowIsFenced,
@@ -471,13 +472,21 @@ export async function startImplementationJob({
  * 承認対象そのものが変わった場合は、指紋だけでなく対象の一致も確かめる。現在値
  * から変更を確定できた場合と、読めずに決められない場合を区別し、後者では差し戻し
  * も送信もしない。
+ *
+ * admissionと違い、`serve`自身が反映したIn Progressも同じ承認episodeとして受理
+ * する。attachment、WHAT、HOW、承認指紋が一致する限り、この機械的な遷移だけを
+ * 理由に差し戻さない。
  */
 async function reconcileApproval(
   ports: ImplementationApprovalPorts,
   target: { repositoryId: number; linearIssueId: string },
   approval: ImplementationApproval,
 ): Promise<ApprovalReconciliation> {
-  const current = await readImplementationApproval(ports, target);
+  const current = await readImplementationApproval(
+    ports,
+    target,
+    reconciledStateNames,
+  );
 
   if (current.status === "refused") {
     return approvalChangedByRead(current.reason)

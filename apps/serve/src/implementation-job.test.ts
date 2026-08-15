@@ -984,6 +984,106 @@ test("the started worker moves the approved Linear issue to In Progress", async 
   });
 });
 
+test("the reconciliation after start accepts the In Progress state that serve itself reflected", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const linear = fakeLinearState();
+    const { ports } = fakePorts();
+    // 承認の読み直しが、機械的に反映されたLinear stateの現在値へ追従する。
+    const following: ImplementationApprovalPorts = {
+      ...ports,
+      readLinearIssue: async (issueId) => {
+        const read = await ports.readLinearIssue(issueId);
+
+        return read === null
+          ? null
+          : { ...read, stateName: linear.state() ?? "" };
+      },
+    };
+    const startedWorkers: StartImplementationWorkerOptions[] = [];
+    const started = await startImplementationJob(
+      options(
+        databasePath,
+        relay.origin,
+        following,
+        startedWorkers,
+        linear.ports,
+      ),
+    );
+
+    try {
+      expect(started.status).toBe("started");
+
+      if (started.status !== "started") {
+        return;
+      }
+
+      expect(started.linearState).toBe("in_progress");
+      expect(linear.state()).toBe("In Progress");
+
+      // harness自身が起こした遷移は承認の変更ではない。checkpoint送信直前の
+      // 再調停も、同じ承認指紋のまま先へ進める。
+      expect(await startedWorkers[0]!.reconcileApproval()).toEqual({
+        status: "current",
+        approvalFingerprint: fingerprintOf("WHAT title"),
+      });
+    } finally {
+      if (started.status === "started") {
+        await started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
+test("the reconciliation after start still reports drift for any other state and stays unknown when the read fails", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const { ports } = fakePorts();
+    let stateName = "Todo";
+    let readable = true;
+    const shifting: ImplementationApprovalPorts = {
+      ...ports,
+      readLinearIssue: async (issueId) => {
+        const read = await ports.readLinearIssue(issueId);
+
+        return read === null || !readable ? null : { ...read, stateName };
+      },
+    };
+    const startedWorkers: StartImplementationWorkerOptions[] = [];
+    const started = await startImplementationJob(
+      options(databasePath, relay.origin, shifting, startedWorkers),
+    );
+
+    try {
+      expect(started.status).toBe("started");
+
+      // In Progressでも承認済みTodoでもないstateは、確定した承認の変更として扱う。
+      for (const changed of ["Triage", "Done", "Cancelled"]) {
+        stateName = changed;
+
+        expect(await startedWorkers[0]!.reconcileApproval()).toEqual({
+          status: "changed",
+        });
+      }
+
+      // 読めなかっただけの提供元障害を、承認の変更と偽って主張しない。
+      readable = false;
+
+      expect(await startedWorkers[0]!.reconcileApproval()).toEqual({
+        status: "unknown",
+      });
+    } finally {
+      if (started.status === "started") {
+        await started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
 test("a return to Triage that stays Todo is reported instead of being resent", async () => {
   await withWorkspace(async (databasePath) => {
     const relay = startFakeOwnershipRelay(deviceToken);
