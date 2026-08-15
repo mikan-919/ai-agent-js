@@ -2,6 +2,10 @@ import { identity, userAgent } from "@mikan-919/oriel-identity";
 
 import { DeviceRegistryObject } from "./device-registry-object";
 import { createGitHubClient } from "./github";
+import {
+  minimalInstallationTokenPermissions,
+  parseInstallationTokenPermissions,
+} from "./installation-token-permissions";
 import { createRelayApp } from "./relay";
 
 export { DeviceRegistryObject };
@@ -22,8 +26,11 @@ export interface RelayEnv {
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
   GITHUB_APP_JWT_LIFETIME_SECONDS: string;
-  /** installation tokenへ載せる最小権限のJSON。 */
-  INSTALLATION_TOKEN_PERMISSIONS: string;
+  /**
+   * installation tokenへ載せる権限のJSON。省略時は固定allowlistの最小権限を使い、
+   * 与えた場合もallowlistを越える権限は受け付けない。
+   */
+  INSTALLATION_TOKEN_PERMISSIONS?: string;
 }
 
 function requiredPositiveInteger(value: string, name: string): number {
@@ -73,9 +80,12 @@ export default {
         env.OWNERSHIP_AUDIT_INTERVAL_MS,
         "OWNERSHIP_AUDIT_INTERVAL_MS",
       ),
-      installationTokenPermissions: JSON.parse(
-        env.INSTALLATION_TOKEN_PERMISSIONS,
-      ) as Record<string, string>,
+      installationTokenPermissions:
+        env.INSTALLATION_TOKEN_PERMISSIONS === undefined
+          ? minimalInstallationTokenPermissions
+          : parseInstallationTokenPermissions(
+              env.INSTALLATION_TOKEN_PERMISSIONS,
+            ),
     });
 
     return app.fetch(request, env, context);

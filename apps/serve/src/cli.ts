@@ -6,8 +6,14 @@ import {
   bunSecretsDeviceTokenStore,
   createDeviceRegistrationFlow,
 } from "./device-registration";
+import { createGitHubApprovalPorts } from "./github-approval-ports";
+import { startImplementationJob } from "./implementation-job";
 import { createInstallationOctokitResolver } from "./installation-octokit";
 import { startIssueConversationJob } from "./issue-conversation-job";
+import {
+  bunSecretsLinearToken,
+  createLinearApprovalReader,
+} from "./linear-approval";
 import { openServeLocalState } from "./local-state";
 import { createPendingCancellationStore } from "./pending-cancellations";
 import { createRelayDeviceClient } from "./relay-client";
@@ -47,8 +53,45 @@ if (Bun.argv[2] === "serve") {
     repositoryName !== undefined &&
     heartbeatStopMs !== undefined;
   const httpServer = startServeHttpServer({
+    startImplementationJob:
+      conversationReady && repositoryId !== undefined
+        ? ({ linearIssueId }) =>
+            startImplementationJob({
+              relayOrigin: environment,
+              tokenStore,
+              createOctokit: createInstallationOctokitResolver({
+                relay: relayDeviceClient,
+                tokenStore,
+                repositoryId,
+              }),
+              // HOWの正本へ届かないなら、実装Jobを始めない。
+              createPorts: async (octokit) => {
+                const linearToken =
+                  await bunSecretsLinearToken(repositoryId).get();
+
+                return linearToken === null
+                  ? null
+                  : createGitHubApprovalPorts({
+                      octokit,
+                      repository: {
+                        owner: repositoryOwner,
+                        name: repositoryName,
+                      },
+                      linear: createLinearApprovalReader({
+                        token: linearToken,
+                      }),
+                    });
+              },
+              databasePath: statePath,
+              harnessEntry: new URL("./harness.js", import.meta.url),
+              repositoryId,
+              repository: { owner: repositoryOwner, name: repositoryName },
+              linearIssueId,
+              heartbeatStopMs,
+            })
+        : undefined,
     startIssueConversation: conversationReady
-      ? ({ issueNumber, body, changesCode }) =>
+      ? ({ issueNumber, body }) =>
           startIssueConversationJob({
             relayOrigin: environment,
             tokenStore,
@@ -65,7 +108,6 @@ if (Bun.argv[2] === "serve") {
             repository: { owner: repositoryOwner, name: repositoryName },
             issueNumber,
             body,
-            changesCode,
             heartbeatStopMs,
           })
       : undefined,

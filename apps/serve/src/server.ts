@@ -41,11 +41,20 @@ const csrfHeaderName = `x-${identity.codeName}-csrf`;
 export interface ServeHttpServerOptions {
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
-  /** 明示的に起動するIssue対話。relay所有権を取れた場合だけworkerが動く。 */
+  /**
+   * 明示的に起動する、コードを変更しないIssue対話。relay所有権を取れた場合だけ
+   * workerが動く。
+   */
   startIssueConversation?: (input: {
     issueNumber: number;
     body: string;
-    changesCode: boolean;
+  }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
+  /**
+   * コードを変更する実装Job。入力は承認されたHOWのLinear Issueだけとし、WHAT、
+   * Jobキー、canonicalブランチ、作業内容はすべて`serve`が現在値から導く。
+   */
+  startImplementationJob?: (input: {
+    linearIssueId: string;
   }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
 }
 
@@ -174,6 +183,7 @@ function shellHtml(csrfToken: string): string {
 export function startServeHttpServer({
   createDeviceRegistration,
   startIssueConversation,
+  startImplementationJob,
 }: ServeHttpServerOptions = {}) {
   const { sessionId, csrfToken } = newSessionSecrets();
   const activeConversations = new Set<StartedIssueConversation>();
@@ -293,37 +303,14 @@ export function startServeHttpServer({
     return context.json(await deviceRegistration!.complete(callbackUrl));
   });
 
-  async function startConversation(
+  /** 起動できたJobを保持し、終了まで面倒を見る共通処理。 */
+  async function holdStartedJob(
     context: Context,
-    changesCode: boolean,
+    start: () => Promise<
+      StartedIssueConversation | { status: string; reason?: string }
+    >,
   ): Promise<Response> {
-    const body = (await context.req.json().catch(() => null)) as {
-      issueNumber?: unknown;
-      body?: unknown;
-      canonicalBranch?: unknown;
-      jobId?: unknown;
-    } | null;
-    const issueNumber = Number(body?.issueNumber);
-
-    // JobキーとcanonicalブランチはWHATの現在値からserveが導く。
-    // clientはどちらも指定できない。
-    if (
-      startIssueConversation === undefined ||
-      body?.canonicalBranch !== undefined ||
-      body?.jobId !== undefined ||
-      typeof body?.body !== "string" ||
-      body.body === "" ||
-      !Number.isInteger(issueNumber) ||
-      issueNumber <= 0
-    ) {
-      return context.text("Bad Request", 400);
-    }
-
-    const started = await startIssueConversation({
-      issueNumber,
-      body: body.body,
-      changesCode,
-    });
+    const started = await start();
 
     if (!isStarted(started)) {
       return context.json(started, 409);
@@ -344,14 +331,58 @@ export function startServeHttpServer({
     });
   }
 
-  app.post("/api/issue-conversations", (context) =>
-    startConversation(context, false),
-  );
+  // コードを変更しない対話。WHATのIssueと人間が書いた返答本文だけを受け取る。
+  app.post("/api/issue-conversations", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      issueNumber?: unknown;
+      body?: unknown;
+    } | null;
+    const issueNumber = Number(body?.issueNumber);
 
-  // コードを変更するJob。ブランチキーはserveが承認指紋から導く。
-  app.post("/api/implementation-jobs", (context) =>
-    startConversation(context, true),
-  );
+    // JobキーとcanonicalブランチはWHATの現在値からserveが導く。
+    // clientはどちらも指定できず、この入口ではコードを変更するJobも起動できない。
+    if (
+      startIssueConversation === undefined ||
+      body === null ||
+      Object.keys(body).some(
+        (field) => field !== "issueNumber" && field !== "body",
+      ) ||
+      typeof body.body !== "string" ||
+      body.body === "" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0
+    ) {
+      return context.text("Bad Request", 400);
+    }
+
+    return holdStartedJob(context, () =>
+      startIssueConversation({ issueNumber, body: body.body as string }),
+    );
+  });
+
+  /**
+   * コードを変更する実装Job。入力は承認されたHOWのLinear Issueだけとし、WHAT、
+   * Jobキー、canonicalブランチ、承認指紋、作業内容はclientから受け取らない。
+   */
+  app.post("/api/implementation-jobs", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      linearIssueId?: unknown;
+    } | null;
+
+    if (
+      startImplementationJob === undefined ||
+      body === null ||
+      Object.keys(body).some((field) => field !== "linearIssueId") ||
+      typeof body.linearIssueId !== "string" ||
+      body.linearIssueId === ""
+    ) {
+      return context.text("Bad Request", 400);
+    }
+
+    return holdStartedJob(context, () =>
+      startImplementationJob({ linearIssueId: body.linearIssueId as string }),
+    );
+  });
 
   app.get("/api/issue-conversations", (context) =>
     context.json({

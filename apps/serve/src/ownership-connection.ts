@@ -52,8 +52,9 @@ export function createRelayOwnershipConnection({
   const stopped = new AbortController();
   const heartbeats = new Set<ReturnType<typeof setInterval>>();
   let lastHeartbeatAt = 0;
-  const sockets: WebSocket[] = [];
+  const acquired = new Set<WebSocket>();
   let jobSocket: WebSocket | null = null;
+  let branchSocket: WebSocket | null = null;
   let jobLeaseId: string | null = null;
   let branchLeaseId: string | null = null;
   let nextRequestId = 0;
@@ -73,12 +74,24 @@ export function createRelayOwnershipConnection({
       stopped.abort();
     }
 
-    for (const socket of sockets) {
-      socket.close();
+    // ADR 0002: 返却順序はブランチ排他接続、Job所有権接続とする。
+    const ordered = [branchSocket, jobSocket].filter(
+      (socket): socket is WebSocket => socket !== null,
+    );
+
+    for (const socket of ordered) {
+      acquired.delete(socket);
     }
 
-    sockets.length = 0;
+    const remaining = [...acquired];
+
+    acquired.clear();
     jobSocket = null;
+    branchSocket = null;
+
+    for (const socket of [...ordered, ...remaining]) {
+      socket.close();
+    }
 
     for (const heartbeat of heartbeats) {
       clearInterval(heartbeat);
@@ -160,7 +173,14 @@ export function createRelayOwnershipConnection({
             return;
           }
 
-          sockets.push(socket);
+          acquired.add(socket);
+
+          if (kind === "job") {
+            jobSocket = socket;
+          } else {
+            branchSocket = socket;
+          }
+
           startHeartbeat(socket, message.heartbeatIntervalMs);
           settle({ socket, leaseId: message.leaseId });
           return;
@@ -187,7 +207,7 @@ export function createRelayOwnershipConnection({
       socket.addEventListener("close", () => {
         settle(null);
 
-        if (sockets.includes(socket)) {
+        if (acquired.has(socket)) {
           stop();
         }
       });
@@ -210,9 +230,7 @@ export function createRelayOwnershipConnection({
     },
     stopSignal: stopped.signal,
     async acquireJobOwnership() {
-      const acquired = await open("job", jobId);
-      jobLeaseId = acquired?.leaseId ?? null;
-      jobSocket = acquired?.socket ?? null;
+      jobLeaseId = (await open("job", jobId))?.leaseId ?? null;
 
       return jobLeaseId;
     },
@@ -221,8 +239,8 @@ export function createRelayOwnershipConnection({
         return null;
       }
 
-      const acquired = await open("branch", branchKey, jobLeaseId);
-      branchLeaseId = acquired?.leaseId ?? null;
+      branchLeaseId =
+        (await open("branch", branchKey, jobLeaseId))?.leaseId ?? null;
 
       return branchLeaseId;
     },

@@ -16,6 +16,7 @@ import {
 } from "./crypto";
 import type { DeviceRegistryObject } from "./device-registry-object";
 import type { RelayGitHubClient } from "./github";
+import { assertInstallationTokenPermissions } from "./installation-token-permissions";
 
 export interface RelayOptions {
   github: RelayGitHubClient;
@@ -29,7 +30,10 @@ export interface RelayOptions {
   ownershipHeartbeatIntervalMs: number;
   ownershipHeartbeatExpiryMs: number;
   ownershipAuditIntervalMs: number;
-  /** installation tokenへ載せる最小権限。deploy設定から与える。 */
+  /**
+   * installation tokenへ載せる最小権限。deploy設定から与えるが、固定allowlistを
+   * 越える権限はrelayが受け付けない。
+   */
   installationTokenPermissions: Record<string, string>;
   now?: () => number;
 }
@@ -109,6 +113,10 @@ export function createRelayApp({
   installationTokenPermissions,
   now = Date.now,
 }: RelayOptions) {
+  // 広い権限のまま起動しない。設定の誤りはtoken発行より前にfail closedにする。
+  const grantedPermissions = assertInstallationTokenPermissions(
+    installationTokenPermissions,
+  );
   const app = new Hono();
 
   function registryFor(installationId: number, repositoryId: number) {
@@ -450,7 +458,7 @@ export function createRelayApp({
     const issued = await github.createInstallationAccessToken({
       installationId: device.installationId,
       repositoryIds: [device.repositoryId],
-      permissions: installationTokenPermissions,
+      permissions: grantedPermissions,
     });
 
     if (issued === null) {

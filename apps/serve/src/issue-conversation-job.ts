@@ -2,7 +2,7 @@ import type { GitHubRepository } from "@mikan-919/oriel-contracts";
 import type { Octokit } from "@octokit/rest";
 
 import type { DeviceTokenStore } from "./device-registration";
-import { startIssueCommentRuntime } from "./issue-comment-runtime";
+import { startHarnessWorker } from "./harness-worker";
 import {
   createGitHubIssueConversationAdmission,
   type IssueConversationAdmission,
@@ -25,11 +25,6 @@ export interface StartIssueConversationJobOptions {
   issueNumber: number;
   /** 人間がlocalhost UIで書いた、この対話の返答本文。 */
   body: string;
-  /**
-   * コードを変更するJobか。`serve`だけが決め、HTTP入力からは受け取らない。
-   * 真の場合はcanonicalブランチのキーを承認指紋から導いて排他も取得する。
-   */
-  changesCode?: boolean;
   heartbeatStopMs: number;
 }
 
@@ -37,7 +32,6 @@ export type StartIssueConversationJobResult =
   | {
       status: "started";
       jobId: string;
-      branchLeaseId: string | null;
       /** harness processが終わるまで待つ。 */
       finished: Promise<void>;
       jobStatus(): string | null;
@@ -52,7 +46,6 @@ export type StartIssueConversationJobResult =
         | "issue_not_open"
         | "repository_mismatch"
         | "job_ownership_not_acquired"
-        | "branch_not_exclusive"
         | "approval_changed";
     };
 
@@ -61,10 +54,9 @@ export type StartIssueConversationJobResult =
  * device tokenでrelayのJob所有権を取り、credentialを持たないharness processを
  * 起動してstdioのNDJSONを`serve`の外部操作へつなぐ。
  *
- * コードを変更するJobでは、canonicalブランチのキーを承認指紋から導いて排他も
- * 取得する。ブランチ名をHTTP入力から受け取らない。LinearのTriage→Todo、
- * attachmentの逆引き、HOWの取り込み、ブランチ封印は実装Jobの受け入れ判定の
- * 範囲であり、この経路では扱わない。
+ * この経路はコードを変更しない対話Jobだけを扱い、Job所有権しか取らない。
+ * LinearのTriage→Todo、attachmentの逆引き、HOWの取り込み、ブランチ封印を伴う
+ * 実装Jobは`implementation-job.ts`が別の境界型と起動経路で扱う。
  */
 export async function startIssueConversationJob({
   relayOrigin,
@@ -77,7 +69,6 @@ export async function startIssueConversationJob({
   repository,
   issueNumber,
   body,
-  changesCode = false,
   heartbeatStopMs,
 }: StartIssueConversationJobOptions): Promise<StartIssueConversationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
@@ -128,98 +119,23 @@ export async function startIssueConversationJob({
     return { status: "refused", reason: "approval_changed" };
   }
 
-  if (changesCode) {
-    // ブランチキーは承認指紋から導く。clientは指定できない。
-    const branchLeaseId = await ownership.acquireBranchExclusivity(
-      `${repositoryId}/oriel/${admitted.approvalFingerprint.slice(0, 16)}`,
-    );
-
-    if (branchLeaseId === null) {
-      ownership.release();
-      return { status: "refused", reason: "branch_not_exclusive" };
-    }
-  }
-
-  const runtime = startIssueCommentRuntime({
+  const worker = startHarnessWorker({
     databasePath,
     octokit,
-    ownershipVerifier: ownership,
-  });
-  const binding = {
+    ownership,
+    harnessEntry,
     jobId: admitted.jobId,
     jobLeaseId,
     repository,
     issueNumber,
-  };
-  // harnessへはcredentialを渡さない。対象と取得IDだけを引数で渡す。
-  const harness = Bun.spawn(
-    [
-      process.execPath,
-      typeof harnessEntry === "string" ? harnessEntry : harnessEntry.pathname,
-      "--request",
-      `${admitted.jobId}:1`,
-      "--job",
-      admitted.jobId,
-      "--lease",
-      jobLeaseId,
-      "--repository",
-      `${repository.owner}/${repository.name}`,
-      "--issue",
-      String(issueNumber),
-      "--body",
-      body,
-    ],
-    { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: {} },
-  );
-  const stopHarness = () => harness.kill();
-
-  ownership.stopSignal.addEventListener("abort", stopHarness, { once: true });
-
-  const serving = runtime.serveHarnessIssueConversation(
-    harness.stdout,
-    new WritableStream<Uint8Array>({
-      write(chunk) {
-        harness.stdin.write(chunk);
-        harness.stdin.flush();
-      },
-      close() {
-        harness.stdin.end();
-      },
-    }),
-    binding,
-  );
-
-  let lastJobStatus: string | null = null;
-  let closed = false;
-  const close = () => {
-    if (closed) {
-      return;
-    }
-
-    // 閉じた後も最後の実行状態を答えられるようにする。
-    lastJobStatus = runtime.jobStatus(admitted.jobId);
-    closed = true;
-    ownership.stopSignal.removeEventListener("abort", stopHarness);
-    harness.kill();
-    // heartbeatとleaseを持ち続けない。
-    ownership.release();
-    runtime.close();
-  };
+    body,
+  });
 
   return {
     status: "started",
     jobId: admitted.jobId,
-    branchLeaseId: ownership.branchLeaseId,
-    finished: serving.then(async () => {
-      const exitCode = await harness.exited;
-
-      // 所有権を失っていない正常終了だけを`completed`にする。
-      if (!ownership.stopSignal.aborted && exitCode === 0) {
-        runtime.completeJob(admitted.jobId);
-      }
-    }),
-    jobStatus: () =>
-      closed ? lastJobStatus : runtime.jobStatus(admitted.jobId),
-    close,
+    finished: worker.finished,
+    jobStatus: worker.jobStatus,
+    close: worker.close,
   };
 }

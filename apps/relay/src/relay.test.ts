@@ -738,6 +738,29 @@ describe("short lived installation tokens", () => {
     ]);
   });
 
+  it("refuses to run with permissions wider than the product needs", () => {
+    // 環境の設定JSONをそのまま通さず、固定allowlistと値検証で組み立てる。
+    expect(() =>
+      createRelayApp({
+        github,
+        deviceRegistry: env.DEVICE_REGISTRY,
+        signingKey,
+        relayOrigin: "https://relay.test",
+        codeExpiryMs: 60_000,
+        cancellationExpiryMs: 120_000,
+        ownershipHeartbeatIntervalMs: 1_000,
+        ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
+        ownershipAuditIntervalMs: 5_000,
+        installationTokenPermissions: {
+          issues: "write",
+          administration: "write",
+        },
+        now: () => currentTime,
+      }),
+    ).toThrow();
+    expect(issuedInstallationTokens).toEqual([]);
+  });
+
   it("refuses a forged or revoked device token", async () => {
     const app = relay();
     const registered = await registerDevice(app, "serve-state");

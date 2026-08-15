@@ -35,12 +35,15 @@ function startServer(
   startIssueConversation?: (input: {
     issueNumber: number;
     body: string;
-    changesCode: boolean;
+  }) => Promise<StartedIssueConversation | { status: string; reason?: string }>,
+  startImplementationJob?: (input: {
+    linearIssueId: string;
   }) => Promise<StartedIssueConversation | { status: string; reason?: string }>,
 ) {
   const server = startServeHttpServer({
     createDeviceRegistration: () => flow,
     startIssueConversation,
+    startImplementationJob,
   });
 
   return {
@@ -313,11 +316,7 @@ test("held cancellations are reported and can be resumed from the localhost UI",
 });
 
 test("the Issue conversation entry takes no Job key or code changing input", async () => {
-  const requests: {
-    issueNumber: number;
-    body: string;
-    changesCode: boolean;
-  }[] = [];
+  const requests: { issueNumber: number; body: string }[] = [];
   const { flow } = fakeFlow();
   const server = startServer(flow, async (input) => {
     requests.push(input);
@@ -346,9 +345,12 @@ test("the Issue conversation entry takes no Job key or code changing input", asy
     ).toBe(400);
     expect((await post({ issueNumber: 28 })).status).toBe(400);
     expect((await post({ issueNumber: 0, body: "reply" })).status).toBe(400);
-    expect(requests).toEqual([
-      { issueNumber: 28, body: "reply", changesCode: false },
-    ]);
+    // 実装Jobの入力は対話の入口では受け付けない。
+    expect(
+      (await post({ issueNumber: 28, body: "reply", linearIssueId: "ENG-12" }))
+        .status,
+    ).toBe(400);
+    expect(requests).toEqual([{ issueNumber: 28, body: "reply" }]);
 
     expect((await post({ issueNumber: 29, body: "reply" })).status).toBe(200);
   } finally {
@@ -483,22 +485,26 @@ test("shutting down closes the Jobs that are still running", async () => {
   expect(conversation.state.closed).toBe(true);
 });
 
-test("a code changing Job uses its own entry and never takes a branch name from the client", async () => {
-  const requests: {
-    issueNumber: number;
-    body: string;
-    changesCode: boolean;
-  }[] = [];
+test("the implementation Job entry takes only the approved Linear issue", async () => {
+  const conversations: unknown[] = [];
+  const implementations: { linearIssueId: string }[] = [];
   const { flow } = fakeFlow();
-  const server = startServer(flow, async (input) => {
-    requests.push(input);
-    return fakeConversation("job-1").handle;
-  });
+  const server = startServer(
+    flow,
+    async (input) => {
+      conversations.push(input);
+      return fakeConversation("conversation-1").handle;
+    },
+    async (input) => {
+      implementations.push(input);
+      return fakeConversation("implementation-1").handle;
+    },
+  );
 
   try {
     const shell = await openShell(server.origin);
-    const post = (path: string, body: unknown) =>
-      fetch(`${server.origin}${path}`, {
+    const post = (body: unknown) =>
+      fetch(`${server.origin}/api/implementation-jobs`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -508,32 +514,56 @@ test("a code changing Job uses its own entry and never takes a branch name from 
         },
         body: JSON.stringify(body),
       });
+    const started = await post({ linearIssueId: "ENG-12" });
 
-    expect(
-      (await post("/api/implementation-jobs", { issueNumber: 28, body: "go" }))
-        .status,
-    ).toBe(200);
-    expect(
-      (
-        await post("/api/implementation-jobs", {
-          issueNumber: 28,
-          body: "go",
-          canonicalBranch: "attacker/branch",
-        })
-      ).status,
-    ).toBe(400);
-    expect(
-      (
-        await post("/api/implementation-jobs", {
-          issueNumber: 28,
-          body: "go",
-          jobId: "attacker-job",
-        })
-      ).status,
-    ).toBe(400);
-    expect(requests).toEqual([
-      { issueNumber: 28, body: "go", changesCode: true },
-    ]);
+    expect(started.status).toBe(200);
+    expect(await started.json()).toEqual({
+      status: "started",
+      jobId: "implementation-1",
+    });
+
+    // WHAT、Jobキー、ブランチ、作業内容はclientから受け取らない。
+    for (const rejected of [
+      {},
+      { linearIssueId: "" },
+      { linearIssueId: "ENG-12", issueNumber: 28 },
+      { linearIssueId: "ENG-12", body: "go" },
+      { linearIssueId: "ENG-12", canonicalBranch: "attacker/branch" },
+      { linearIssueId: "ENG-12", jobId: "attacker-job" },
+      { linearIssueId: "ENG-12", approvalFingerprint: "0".repeat(64) },
+    ]) {
+      expect((await post(rejected)).status).toBe(400);
+    }
+
+    expect(implementations).toEqual([{ linearIssueId: "ENG-12" }]);
+    // 対話の起動経路とは混ぜない。
+    expect(conversations).toEqual([]);
+  } finally {
+    server.close();
+  }
+});
+
+test("the implementation Job entry is closed while the product cannot run one", async () => {
+  const { flow } = fakeFlow();
+  const server = startServer(
+    flow,
+    async () => fakeConversation("job-1").handle,
+  );
+
+  try {
+    const shell = await openShell(server.origin);
+    const response = await fetch(`${server.origin}/api/implementation-jobs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Origin: server.origin,
+        cookie: shell.session,
+        "x-oriel-csrf": shell.csrf,
+      },
+      body: JSON.stringify({ linearIssueId: "ENG-12" }),
+    });
+
+    expect(response.status).toBe(400);
   } finally {
     server.close();
   }

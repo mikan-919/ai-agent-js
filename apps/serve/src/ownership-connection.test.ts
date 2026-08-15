@@ -20,6 +20,67 @@ function connect(relayOrigin: string, token = deviceToken, stopMs = 1_000) {
   });
 }
 
+/** 閉じる順序だけを観測する所有権接続のfake。 */
+function recordingSocket(url: string, closed: string[]): WebSocket {
+  const kind = new URL(url).searchParams.get("kind") ?? "";
+  const events = new EventTarget();
+  let alreadyClosed = false;
+
+  queueMicrotask(() => {
+    events.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ownership.acquired",
+          leaseId: `${kind}-lease`,
+          heartbeatIntervalMs: 10_000,
+          heartbeatExpiryMs: 60_000,
+        }),
+      }),
+    );
+  });
+
+  return {
+    addEventListener: (type: string, listener: EventListener) => {
+      events.addEventListener(type, listener);
+    },
+    removeEventListener: (type: string, listener: EventListener) => {
+      events.removeEventListener(type, listener);
+    },
+    send: () => {},
+    close: () => {
+      if (alreadyClosed) {
+        return;
+      }
+
+      alreadyClosed = true;
+      closed.push(kind);
+      queueMicrotask(() => events.dispatchEvent(new Event("close")));
+    },
+  } as unknown as WebSocket;
+}
+
+test("releasing ownership closes the branch exclusivity before the Job ownership", async () => {
+  const closed: string[] = [];
+  const connection = createRelayOwnershipConnection({
+    relayOrigin: "http://relay.test",
+    deviceToken,
+    jobId,
+    heartbeatStopMs: 1_000,
+    openWebSocket: (url) => recordingSocket(url, closed),
+  });
+
+  expect(await connection.acquireJobOwnership()).toBe("job-lease");
+  expect(await connection.acquireBranchExclusivity("11/oriel-job-1")).toBe(
+    "branch-lease",
+  );
+
+  connection.release();
+  await Bun.sleep(10);
+
+  // ADR 0002: 返却順序はブランチ排他接続、Job所有権接続とする。
+  expect(closed).toEqual(["branch", "job"]);
+});
+
 test("Job ownership and branch exclusivity are acquired over the relay connection", async () => {
   const relay = startFakeOwnershipRelay();
   const connection = connect(relay.origin);
