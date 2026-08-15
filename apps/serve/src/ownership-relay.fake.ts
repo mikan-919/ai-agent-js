@@ -25,6 +25,7 @@ export function startFakeOwnershipRelay(
   let heartbeats = 0;
   let answersHeartbeats = true;
   const authorizationHeaders: string[] = [];
+  const requests: { type: string; kind: "job" | "branch" }[] = [];
   const connections = new Map<
     { data: OwnershipConnectionData },
     OwnershipConnectionData
@@ -128,12 +129,37 @@ export function startFakeOwnershipRelay(
           JSON.parse(String(message)) as unknown,
         );
         const data = connections.get(ws as never);
+        const current =
+          data?.valid === true && data.leaseId === request.leaseId;
+
+        requests.push({ type: request.type, kind: ws.data.kind });
+
+        if (request.type === "ownership.inspect") {
+          const active = current
+            ? [...connections.values()].filter((connection) => connection.valid)
+            : [];
+
+          ws.send(
+            JSON.stringify({
+              type: "ownership.state",
+              requestId: request.requestId,
+              current,
+              jobKeys: active
+                .filter((connection) => connection.kind === "job")
+                .map((connection) => connection.key),
+              branchKeys: active
+                .filter((connection) => connection.kind === "branch")
+                .map((connection) => connection.key),
+            }),
+          );
+          return;
+        }
 
         ws.send(
           JSON.stringify({
             type: "ownership.confirmed",
             requestId: request.requestId,
-            current: data?.valid === true && data.leaseId === request.leaseId,
+            current,
           }),
         );
       },
@@ -146,6 +172,8 @@ export function startFakeOwnershipRelay(
   return {
     origin: `http://127.0.0.1:${server.port}`,
     authorizationHeaders: () => authorizationHeaders,
+    /** 接続越しの確認と問い合わせの記録。 */
+    requests: () => requests,
     openConnections: () => connections.size,
     heartbeats: () => heartbeats,
     /** half-open接続として、応答だけを止める。 */

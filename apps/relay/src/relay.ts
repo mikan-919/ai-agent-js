@@ -1,9 +1,11 @@
 import {
   parseDeviceCancellationRequest,
   parseDeviceTokenExchangeRequest,
+  parseInstallationTokenRequest,
   type DeviceRegistrationPurpose,
   type DeviceTokenExchangeResponse,
   type GitHubInstallation,
+  type InstallationTokenResponse,
 } from "@mikan-919/oriel-contracts";
 import { Hono } from "hono";
 
@@ -16,7 +18,10 @@ import {
 } from "./crypto";
 import type { DeviceRegistryObject } from "./device-registry-object";
 import type { RelayGitHubClient } from "./github";
-import { assertInstallationTokenPermissions } from "./installation-token-permissions";
+import {
+  assertInstallationTokenPermissions,
+  permissionsForPurpose,
+} from "./installation-token-permissions";
 
 export interface RelayOptions {
   github: RelayGitHubClient;
@@ -443,8 +448,9 @@ export function createRelayApp({
   }
 
   /**
-   * 登録済みdeviceへ、そのrepositoryだけに絞った短命installation tokenを渡す。
-   * relayはtokenもGitHub user tokenも秘密鍵も保存しない。
+   * 登録済みdeviceへ、そのrepositoryと用途だけに絞った短命installation tokenを
+   * 渡す。用途が必要としない権限は載せない。relayはtokenもGitHub user tokenも
+   * 秘密鍵も保存しない。
    */
   app.post("/device/installation-token", async (context) => {
     const device = await authenticateDevice(
@@ -455,10 +461,28 @@ export function createRelayApp({
       return context.text("Unauthorized", 401);
     }
 
+    let request;
+
+    try {
+      request = parseInstallationTokenRequest(await context.req.json());
+    } catch {
+      return context.text("Bad Request", 400);
+    }
+
+    const permissions = permissionsForPurpose(
+      grantedPermissions,
+      request.purpose,
+    );
+
+    // 用途が要する権限をdeploy設定が与えていなければ、広い権限で代替しない。
+    if (permissions === null) {
+      return context.text("Forbidden", 403);
+    }
+
     const issued = await github.createInstallationAccessToken({
       installationId: device.installationId,
       repositoryIds: [device.repositoryId],
-      permissions: grantedPermissions,
+      permissions,
     });
 
     if (issued === null) {
@@ -468,9 +492,10 @@ export function createRelayApp({
     return context.json({
       token: issued.token,
       expiresAt: issued.expiresAt,
+      purpose: request.purpose,
       installationId: device.installationId,
       repositoryId: device.repositoryId,
-    });
+    } satisfies InstallationTokenResponse);
   });
 
   // 所有権接続。device bearer tokenはAuthorization headerだけで受け取る。

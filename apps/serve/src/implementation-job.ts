@@ -2,14 +2,21 @@ import type { GitHubRepository } from "@mikan-919/oriel-contracts";
 import type { Octokit } from "@octokit/rest";
 
 import type { DeviceTokenStore } from "./device-registration";
-import { startHarnessWorker } from "./harness-worker";
+import type { GitCredential } from "./git";
 import {
   readImplementationApproval,
   sameApproval,
   sealCanonicalBranch,
+  workflowIsFenced,
+  type ImplementationApproval,
   type ImplementationApprovalPorts,
   type ImplementationRefusalReason,
 } from "./implementation-admission";
+import {
+  startImplementationWorker,
+  type ImplementationWorker,
+  type StartImplementationWorkerOptions,
+} from "./implementation-worker";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 
 export interface StartImplementationJobOptions {
@@ -31,6 +38,32 @@ export interface StartImplementationJobOptions {
   /** 承認されたHOWのLinear Issue。WHATはattachmentから逆引きする。 */
   linearIssueId: string;
   heartbeatStopMs: number;
+  /** `serve`が持つrepositoryのclone、worktreeを置く領域、送信先remote。 */
+  repositoryRoot: string;
+  worktreesRoot: string;
+  remote: string;
+  /** canonicalブランチへの送信に使う、実装用途へ絞ったcredentialの解決。 */
+  resolveCredential: () => Promise<GitCredential | null>;
+  /**
+   * worktree内で順に実行する検証command。repositoryの実行設定はまだ正本を
+   * 持たないため、呼び出し側が明示した分だけを渡す。
+   */
+  verification?: string[][];
+  startWorker?: (
+    options: StartImplementationWorkerOptions,
+  ) => Promise<ImplementationWorker | null>;
+}
+
+export interface StartImplementationJobRefusal {
+  status: "refused";
+  reason:
+    | ImplementationRefusalReason
+    | "device_not_registered"
+    | "github_credentials_unavailable"
+    | "linear_credentials_unavailable"
+    | "job_ownership_not_acquired"
+    | "branch_not_exclusive"
+    | "canonical_worktree_unavailable";
 }
 
 export type StartImplementationJobResult =
@@ -38,21 +71,17 @@ export type StartImplementationJobResult =
       status: "started";
       jobId: string;
       canonicalBranch: string;
-      branchLeaseId: string | null;
+      /** 封印した先端、または引き継いだ未検証の作業途中成果の先端。 */
+      canonicalOid: string;
+      adopted: boolean;
+      branchLeaseId: string;
+      /** harnessが編集、build、test、commitを行う封印済みworktree。 */
+      worktreePath: string;
       finished: Promise<void>;
       jobStatus(): string | null;
-      close(): void;
+      close(): Promise<void>;
     }
-  | {
-      status: "refused";
-      reason:
-        | ImplementationRefusalReason
-        | "device_not_registered"
-        | "github_credentials_unavailable"
-        | "linear_credentials_unavailable"
-        | "job_ownership_not_acquired"
-        | "branch_not_exclusive";
-    };
+  | StartImplementationJobRefusal;
 
 /**
  * 実装Jobの製品経路。
@@ -74,6 +103,12 @@ export async function startImplementationJob({
   repository,
   linearIssueId,
   heartbeatStopMs,
+  repositoryRoot,
+  worktreesRoot,
+  remote,
+  resolveCredential,
+  verification = [],
+  startWorker = startImplementationWorker,
 }: StartImplementationJobOptions): Promise<StartImplementationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
 
@@ -115,80 +150,181 @@ export async function startImplementationJob({
     return { status: "refused", reason: "job_ownership_not_acquired" };
   }
 
-  // 手順4: 同じ`claiming`のうちに、canonicalブランチの排他も取る。
-  if (
-    (await ownership.acquireBranchExclusivity(
-      `${repositoryId}/${approval.canonicalBranch}`,
-    )) === null
-  ) {
+  const refuse = (
+    reason: StartImplementationJobRefusal["reason"],
+  ): StartImplementationJobRefusal => {
     ownership.release();
-    return { status: "refused", reason: "branch_not_exclusive" };
+    return { status: "refused", reason };
+  };
+
+  // 手順4: ブランチ排他より先に、Workflow全体の置換隔離を事前確認する。
+  if (
+    !workflowIsFenced(
+      await ownership.inspectOwnership(),
+      approval,
+      repositoryId,
+    )
+  ) {
+    return refuse("workflow_not_fenced");
+  }
+
+  const branchKey = `${repositoryId}/${approval.canonicalBranch}`;
+  const branchLeaseId = await ownership.acquireBranchExclusivity(branchKey);
+
+  if (branchLeaseId === null) {
+    return refuse("branch_not_exclusive");
   }
 
   // 手順5: 所有権を取ってからもう一度読み、同じ現在値であることを確かめる。
   const second = await readImplementationApproval(ports, target);
 
   if (second.status === "refused") {
-    ownership.release();
-    return { status: "refused", reason: second.reason };
+    return refuse(second.reason);
   }
 
-  if (!sameApproval(approval, second.approval)) {
-    ownership.release();
-    return { status: "refused", reason: "approval_changed" };
+  const canonicalBefore = await ports.readRef(approval.canonicalRef);
+  // 引き継ぎ候補では、取り込み先OIDの前進だけは承認を失効させない。
+  const adopting = canonicalBefore.status === "present";
+
+  if (
+    !sameApproval(approval, second.approval, {
+      allowTargetBaseAdvance: adopting,
+    })
+  ) {
+    return refuse("approval_changed");
   }
 
-  // 手順6と7: canonical refをatomicな比較条件付き作成だけで封印する。
-  const sealed = await sealCanonicalBranch(ports, approval);
+  // 手順6と7: 不存在なら比較条件付き作成、既存なら同じ承認指紋の引き継ぎ。
+  const sealed = await sealCanonicalBranch(ports, approval, canonicalBefore);
 
   if (sealed.status === "refused") {
-    ownership.release();
-    return { status: "refused", reason: sealed.reason };
+    return refuse(sealed.reason);
   }
 
   // 手順8: 封印後にもう一度読み、すべて一致したときだけworkerを開始する。
   const third = await readImplementationApproval(ports, target);
 
   if (third.status === "refused") {
-    ownership.release();
-    return { status: "refused", reason: third.reason };
+    return refuse(third.reason);
   }
 
-  if (!sameApproval(approval, third.approval)) {
-    ownership.release();
-    return { status: "refused", reason: "approval_changed" };
+  if (
+    !sameApproval(approval, third.approval, {
+      allowTargetBaseAdvance: adopting,
+    })
+  ) {
+    return refuse("approval_changed");
   }
 
   const canonical = await ports.readRef(approval.canonicalRef);
 
-  // 封印したcanonical refが、比較条件で作った先端のままであることも確かめる。
-  if (
-    canonical.status !== "present" ||
-    canonical.oid !== approval.targetBaseOid
-  ) {
-    ownership.release();
-    return { status: "refused", reason: "branch_seal_result_unknown" };
+  // 封印または引き継ぎで確認した先端のままであることも確かめる。
+  if (canonical.status !== "present" || canonical.oid !== sealed.canonicalOid) {
+    return refuse(
+      adopting ? "branch_adoption_unavailable" : "branch_seal_result_unknown",
+    );
   }
 
-  const worker = startHarnessWorker({
+  // worker開始直前に、現在のJob・ブランチ取得IDと置換隔離を明示して再確認する。
+  const current =
+    (await ownership.hasCurrentJobOwnership({
+      jobId: approval.jobId,
+      jobLeaseId,
+      repository,
+      issueNumber: approval.githubIssueNumber,
+    })) &&
+    (await ownership.hasCurrentBranchExclusivity(branchKey, branchLeaseId));
+
+  if (!current) {
+    return refuse("ownership_not_current");
+  }
+
+  if (
+    !workflowIsFenced(
+      await ownership.inspectOwnership(),
+      approval,
+      repositoryId,
+    )
+  ) {
+    return refuse("workflow_not_fenced");
+  }
+
+  const worker = await startWorker({
     databasePath,
-    octokit,
-    ownership,
+    repositoryRoot,
+    worktreesRoot,
+    remote,
     harnessEntry,
-    jobId: approval.jobId,
-    jobLeaseId,
-    repository,
-    issueNumber: approval.githubIssueNumber,
-    body: `実装Jobを開始した。canonical branch: ${approval.canonicalBranch}`,
+    ownership,
+    binding: {
+      jobId: approval.jobId,
+      jobLeaseId,
+      branchLeaseId,
+      branchKey,
+      approvalFingerprint: approval.approvalFingerprint,
+      canonicalBranch: approval.canonicalBranch,
+      repository,
+      issueNumber: approval.githubIssueNumber,
+    },
+    start: {
+      type: "implementation.start",
+      jobId: approval.jobId,
+      jobLeaseId,
+      branchLeaseId,
+      approvalFingerprint: approval.approvalFingerprint,
+      canonicalBranch: approval.canonicalBranch,
+      canonicalOid: canonical.oid,
+      adopted: sealed.status === "adopted",
+      // 封印後の読みで一致したWHAT/HOWだけをworkerへ渡す。保存はしない。
+      what: { title: third.content.whatTitle, body: third.content.whatBody },
+      how: {
+        title: third.content.howTitle,
+        description: third.content.howDescription,
+      },
+      verification,
+    },
+    // 送信の直前に、現在値から承認指紋を導き直す。
+    reconcileApprovalFingerprint: () =>
+      currentApprovalFingerprint(ports, target, approval),
+    resolveCredential,
+    release: () => {
+      ownership.release();
+    },
   });
+
+  if (worker === null) {
+    return refuse("canonical_worktree_unavailable");
+  }
 
   return {
     status: "started",
     jobId: approval.jobId,
     canonicalBranch: approval.canonicalBranch,
-    branchLeaseId: ownership.branchLeaseId,
+    canonicalOid: canonical.oid,
+    adopted: sealed.status === "adopted",
+    branchLeaseId,
+    worktreePath: worker.worktreePath,
     finished: worker.finished,
     jobStatus: worker.jobStatus,
     close: worker.close,
   };
+}
+
+/**
+ * 外部操作直前の再調停。現在値から導いた承認指紋を返す。
+ *
+ * 承認対象そのものが変わった場合は、指紋だけでなく対象の一致も確かめる。読めない、
+ * または一致しない場合はnullでfail closedにする。
+ */
+async function currentApprovalFingerprint(
+  ports: ImplementationApprovalPorts,
+  target: { repositoryId: number; linearIssueId: string },
+  approval: ImplementationApproval,
+): Promise<string | null> {
+  const current = await readImplementationApproval(ports, target);
+
+  return current.status === "read" &&
+    sameApproval(approval, current.approval, { allowTargetBaseAdvance: true })
+    ? current.approval.approvalFingerprint
+    : null;
 }

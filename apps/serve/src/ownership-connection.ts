@@ -3,6 +3,7 @@ import {
   ownershipHeartbeatResponse,
   parseOwnershipServerMessage,
   type OwnershipClientMessage,
+  type OwnershipServerMessage,
 } from "@mikan-919/oriel-contracts";
 
 import type { JobOwnershipVerifier } from "./issue-comments";
@@ -27,12 +28,25 @@ function defaultOpenWebSocket(url: string, deviceToken: string): WebSocket {
   } as unknown as string[]);
 }
 
+/** 同じrepositoryで現在生きている所有権キー。 */
+export interface LiveOwnership {
+  jobKeys: string[];
+  branchKeys: string[];
+}
+
 export interface RelayOwnershipConnection extends JobOwnershipVerifier {
   readonly jobLeaseId: string | null;
   readonly branchLeaseId: string | null;
   readonly stopSignal: AbortSignal;
   acquireJobOwnership(): Promise<string | null>;
   acquireBranchExclusivity(branchKey: string): Promise<string | null>;
+  /** ブランチまたはプルリクエストを変更する直前の、ブランチ取得IDの確認。 */
+  hasCurrentBranchExclusivity(
+    branchKey: string,
+    branchLeaseId: string,
+  ): Promise<boolean>;
+  /** Workflow全体の置換隔離のために、現在の所有権キーを読む。 */
+  inspectOwnership(): Promise<LiveOwnership | null>;
   release(): void;
 }
 
@@ -57,18 +71,23 @@ export function createRelayOwnershipConnection({
   let branchSocket: WebSocket | null = null;
   let jobLeaseId: string | null = null;
   let branchLeaseId: string | null = null;
+  let branchKeyOwned: string | null = null;
   let nextRequestId = 0;
-  const pendingConfirmations = new Map<string, (current: boolean) => void>();
+  const pendingRequests = new Map<
+    string,
+    (message: OwnershipServerMessage | null) => void
+  >();
 
   function stop() {
     jobLeaseId = null;
     branchLeaseId = null;
+    branchKeyOwned = null;
 
-    for (const confirm of pendingConfirmations.values()) {
-      confirm(false);
+    for (const answer of pendingRequests.values()) {
+      answer(null);
     }
 
-    pendingConfirmations.clear();
+    pendingRequests.clear();
 
     if (!stopped.signal.aborted) {
       stopped.abort();
@@ -186,9 +205,12 @@ export function createRelayOwnershipConnection({
           return;
         }
 
-        if (message.type === "ownership.confirmed") {
-          pendingConfirmations.get(message.requestId)?.(message.current);
-          pendingConfirmations.delete(message.requestId);
+        if (
+          message.type === "ownership.confirmed" ||
+          message.type === "ownership.state"
+        ) {
+          pendingRequests.get(message.requestId)?.(message);
+          pendingRequests.delete(message.requestId);
           return;
         }
 
@@ -217,8 +239,28 @@ export function createRelayOwnershipConnection({
     });
   }
 
-  function send(socket: WebSocket, message: OwnershipClientMessage) {
-    socket.send(JSON.stringify(message));
+  /**
+   * 同じ所有権接続で現在値を問い合わせる。期限内に答えが来なければ、切断通知を
+   * 待たず停止する。
+   */
+  function ask(
+    socket: WebSocket,
+    message: (requestId: string) => OwnershipClientMessage,
+  ): Promise<OwnershipServerMessage | null> {
+    const requestId = `ownership-${(nextRequestId += 1)}`;
+    const answered = new Promise<OwnershipServerMessage | null>((resolve) => {
+      pendingRequests.set(requestId, resolve);
+      setTimeout(() => {
+        if (pendingRequests.delete(requestId)) {
+          stop();
+          resolve(null);
+        }
+      }, heartbeatStopMs).unref?.();
+    });
+
+    socket.send(JSON.stringify(message(requestId)));
+
+    return answered;
   }
 
   return {
@@ -241,6 +283,7 @@ export function createRelayOwnershipConnection({
 
       branchLeaseId =
         (await open("branch", branchKey, jobLeaseId))?.leaseId ?? null;
+      branchKeyOwned = branchLeaseId === null ? null : branchKey;
 
       return branchLeaseId;
     },
@@ -258,25 +301,54 @@ export function createRelayOwnershipConnection({
         return false;
       }
 
-      const requestId = `confirm-${(nextRequestId += 1)}`;
-      const confirmed = new Promise<boolean>((resolve) => {
-        pendingConfirmations.set(requestId, resolve);
-        setTimeout(() => {
-          if (pendingConfirmations.delete(requestId)) {
-            // 期限内に確認できなければ、切断通知を待たず停止する。
-            stop();
-            resolve(false);
-          }
-        }, heartbeatStopMs).unref?.();
-      });
-
-      send(socket, {
+      const leaseId = jobLeaseId;
+      const answer = await ask(socket, (requestId) => ({
         type: "ownership.confirm",
         requestId,
-        leaseId: jobLeaseId,
-      });
+        leaseId,
+      }));
 
-      return confirmed;
+      return answer?.type === "ownership.confirmed" && answer.current;
+    },
+    async hasCurrentBranchExclusivity(branchKey, requestedBranchLeaseId) {
+      const socket = branchSocket;
+
+      if (
+        stopped.signal.aborted ||
+        socket === null ||
+        branchLeaseId === null ||
+        branchKeyOwned !== branchKey ||
+        requestedBranchLeaseId !== branchLeaseId
+      ) {
+        return false;
+      }
+
+      const leaseId = branchLeaseId;
+      const answer = await ask(socket, (requestId) => ({
+        type: "ownership.confirm",
+        requestId,
+        leaseId,
+      }));
+
+      return answer?.type === "ownership.confirmed" && answer.current;
+    },
+    async inspectOwnership() {
+      const socket = jobSocket;
+
+      if (stopped.signal.aborted || socket === null || jobLeaseId === null) {
+        return null;
+      }
+
+      const leaseId = jobLeaseId;
+      const answer = await ask(socket, (requestId) => ({
+        type: "ownership.inspect",
+        requestId,
+        leaseId,
+      }));
+
+      return answer?.type === "ownership.state" && answer.current
+        ? { jobKeys: answer.jobKeys, branchKeys: answer.branchKeys }
+        : null;
     },
     release() {
       stop();

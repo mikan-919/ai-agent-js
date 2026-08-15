@@ -128,12 +128,36 @@ export type DeviceCancellationRequest = v.InferOutput<
 >;
 
 /**
+ * 短命installation tokenの用途。用途ごとに必要な権限だけを載せるため、
+ * `serve`は要求のたびにどの外部操作のためのtokenかを明示する。
+ */
+export const installationTokenPurposeSchema = v.picklist([
+  "issue_conversation",
+  "admission",
+  "implementation",
+  "pull_request",
+]);
+
+export type InstallationTokenPurpose = v.InferOutput<
+  typeof installationTokenPurposeSchema
+>;
+
+export const installationTokenRequestSchema = v.strictObject({
+  purpose: installationTokenPurposeSchema,
+});
+
+export type InstallationTokenRequest = v.InferOutput<
+  typeof installationTokenRequestSchema
+>;
+
+/**
  * repositoryとpermissionsを絞った短命installation token。`serve`は要求した
  * 時だけ受け取り、どこにも永続化しない。
  */
 export const installationTokenResponseSchema = v.strictObject({
   token: nonEmptyString,
   expiresAt: nonEmptyString,
+  purpose: installationTokenPurposeSchema,
   installationId: positiveInteger,
   repositoryId: positiveInteger,
 });
@@ -141,6 +165,12 @@ export const installationTokenResponseSchema = v.strictObject({
 export type InstallationTokenResponse = v.InferOutput<
   typeof installationTokenResponseSchema
 >;
+
+export function parseInstallationTokenRequest(
+  value: unknown,
+): InstallationTokenRequest {
+  return v.parse(installationTokenRequestSchema, value);
+}
 
 export function parseInstallationTokenResponse(
   value: unknown,
@@ -197,12 +227,34 @@ export const ownershipConfirmedEventSchema = v.strictObject({
   current: v.boolean(),
 });
 
+/**
+ * 同じrepositoryで現在生きている所有権キーの問い合わせ。
+ *
+ * ADR 0003のWorkflow全体の置換隔離を、`serve`が自分の接続越しに確認するための
+ * 現在値である。relayはWorkflowの意味を持たず、接続付随情報から再構成した
+ * 現在のキーだけを答える。所有権履歴は持たない。
+ */
+export const ownershipInspectRequestSchema = v.strictObject({
+  type: v.literal("ownership.inspect"),
+  requestId: nonEmptyString,
+  leaseId: nonEmptyString,
+});
+
+export const ownershipStateEventSchema = v.strictObject({
+  type: v.literal("ownership.state"),
+  requestId: nonEmptyString,
+  current: v.boolean(),
+  jobKeys: v.array(nonEmptyString),
+  branchKeys: v.array(nonEmptyString),
+});
+
 export const ownershipServerMessageSchema = v.variant("type", [
   ownershipAcquiredEventSchema,
   ownershipRejectedEventSchema,
   ownershipRevokedEventSchema,
   ownershipExpiredEventSchema,
   ownershipConfirmedEventSchema,
+  ownershipStateEventSchema,
 ]);
 
 export type OwnershipServerMessage = v.InferOutput<
@@ -211,6 +263,7 @@ export type OwnershipServerMessage = v.InferOutput<
 
 export const ownershipClientMessageSchema = v.variant("type", [
   ownershipConfirmRequestSchema,
+  ownershipInspectRequestSchema,
 ]);
 
 export type OwnershipClientMessage = v.InferOutput<

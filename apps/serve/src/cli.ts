@@ -8,6 +8,7 @@ import {
 } from "./device-registration";
 import { createGitHubApprovalPorts } from "./github-approval-ports";
 import { startImplementationJob } from "./implementation-job";
+import { createInstallationGitCredentialResolver } from "./installation-credential";
 import { createInstallationOctokitResolver } from "./installation-octokit";
 import { startIssueConversationJob } from "./issue-conversation-job";
 import {
@@ -39,6 +40,12 @@ if (Bun.argv[2] === "serve") {
     Bun.env[`${identity.environmentPrefix}REPOSITORY_NAME`];
   // client側停止期限。relayが伝えるserver側失効期限より短い場合だけ所有権を持つ。
   const heartbeatStopMs = requiredNumber("OWNERSHIP_HEARTBEAT_STOP_MS");
+  // `serve`が担当するrepositoryのcloneと、Jobごとのworktreeを置く領域。
+  const repositoryRoot =
+    Bun.env[`${identity.environmentPrefix}REPOSITORY_ROOT`];
+  const worktreesRoot = Bun.env[`${identity.environmentPrefix}WORKTREES_ROOT`];
+  const canonicalRemote =
+    Bun.env[`${identity.environmentPrefix}CANONICAL_REMOTE`] ?? "origin";
   const tokenStore = bunSecretsDeviceTokenStore();
   const relayDeviceClient =
     environment === undefined
@@ -54,15 +61,21 @@ if (Bun.argv[2] === "serve") {
     heartbeatStopMs !== undefined;
   const httpServer = startServeHttpServer({
     startImplementationJob:
-      conversationReady && repositoryId !== undefined
+      conversationReady &&
+      repositoryId !== undefined &&
+      // worktreeを開けない構成では、実装Jobを始めない。
+      repositoryRoot !== undefined &&
+      worktreesRoot !== undefined
         ? ({ linearIssueId }) =>
             startImplementationJob({
               relayOrigin: environment,
               tokenStore,
+              // admissionの現在値確認は読み取り権限だけで行う。
               createOctokit: createInstallationOctokitResolver({
                 relay: relayDeviceClient,
                 tokenStore,
                 repositoryId,
+                purpose: "admission",
               }),
               // HOWの正本へ届かないなら、実装Jobを始めない。
               createPorts: async (octokit) => {
@@ -88,6 +101,15 @@ if (Bun.argv[2] === "serve") {
               repository: { owner: repositoryOwner, name: repositoryName },
               linearIssueId,
               heartbeatStopMs,
+              repositoryRoot,
+              worktreesRoot,
+              remote: canonicalRemote,
+              // canonicalブランチへの送信だけに使う一回限りのcredential。
+              resolveCredential: createInstallationGitCredentialResolver({
+                relay: relayDeviceClient,
+                tokenStore,
+                repositoryId,
+              }),
             })
         : undefined,
     startIssueConversation: conversationReady
@@ -101,6 +123,7 @@ if (Bun.argv[2] === "serve") {
               relay: relayDeviceClient,
               tokenStore,
               repositoryId,
+              purpose: "issue_conversation",
             }),
             databasePath: statePath,
             harnessEntry: new URL("./harness.js", import.meta.url),

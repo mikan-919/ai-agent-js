@@ -24,6 +24,67 @@ export const minimalInstallationTokenPermissions: Record<string, string> =
     ),
   );
 
+/**
+ * 用途ごとの権限集合。
+ *
+ * 一つのtokenへ製品全体の権限を載せず、その要求が行う外部操作に必要な権限だけを
+ * 発行する。Issue対話はcodeへ触れず、admissionの現在値確認は読み取りだけを持ち、
+ * 実装の書き込みはcanonicalブランチの送信だけを持つ。
+ */
+export const installationTokenPurposePermissions = {
+  issue_conversation: { issues: "write", metadata: "read" },
+  admission: {
+    contents: "read",
+    issues: "read",
+    pull_requests: "read",
+    metadata: "read",
+  },
+  implementation: { contents: "write", metadata: "read" },
+  pull_request: {
+    contents: "read",
+    pull_requests: "write",
+    metadata: "read",
+  },
+} as const satisfies Record<string, Record<string, string>>;
+
+export type InstallationTokenPurpose =
+  keyof typeof installationTokenPurposePermissions;
+
+/**
+ * 発行する権限を、用途とdeploy設定の狭いほうへ落とす。用途が未知の場合と、
+ * 設定が与えていない権限を用途が必要とする場合はnullでfail closedにする。
+ */
+export function permissionsForPurpose(
+  granted: Record<string, string>,
+  purpose: string,
+): Record<string, string> | null {
+  if (!Object.hasOwn(installationTokenPurposePermissions, purpose)) {
+    return null;
+  }
+
+  const required =
+    installationTokenPurposePermissions[purpose as InstallationTokenPurpose];
+  const issued: Record<string, string> = {};
+
+  for (const [permission, value] of Object.entries(required)) {
+    const configured = granted[permission];
+
+    if (configured === undefined) {
+      return null;
+    }
+
+    const allowed: readonly string[] =
+      maximumInstallationTokenPermissions[
+        permission as keyof typeof maximumInstallationTokenPermissions
+      ];
+    // allowlistの並びを広さの順序とし、狭いほうだけを載せる。
+    issued[permission] =
+      allowed.indexOf(configured) < allowed.indexOf(value) ? configured : value;
+  }
+
+  return issued;
+}
+
 function fail(detail: string): never {
   throw new Error(
     `${identity.environmentPrefix}INSTALLATION_TOKEN_PERMISSIONS ${detail}`,

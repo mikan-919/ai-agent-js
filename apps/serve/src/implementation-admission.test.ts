@@ -7,6 +7,7 @@ import {
 import {
   readImplementationApproval,
   sealCanonicalBranch,
+  workflowIsFenced,
   type ImplementationApprovalPorts,
   type SealOutcome,
 } from "./implementation-admission";
@@ -147,6 +148,14 @@ test("the current Todo approval derives the fingerprint, canonical branch, and J
 
   expect(admitted).toEqual({
     status: "read",
+    // 承認済みWHAT/HOWはworkerへ渡すためだけの現在値であり、指紋の入力には
+    // なるが識別子やbranch名へは入らない。
+    content: {
+      whatTitle: "WHAT title",
+      whatBody: "WHAT body",
+      howTitle: "HOW title",
+      howDescription: "HOW description",
+    },
     approval: {
       jobId: `implementation:${repositoryId}:28:${fingerprint}`,
       approvalFingerprint: fingerprint,
@@ -275,6 +284,15 @@ test("an open pull request for the same Workflow stops a new implementation Job"
     reason: "pull_request_state_unknown",
   });
 
+  // routing部分のidentifierが変わっていても、同じWorkflowなら止める。
+  expect(
+    await read(
+      fakeState({
+        pullRequestHeadRefs: [`oriel/ENG-9-gh-28-${"0".repeat(64)}`],
+      }),
+    ),
+  ).toEqual({ status: "refused", reason: "workflow_pull_request_open" });
+
   // 別のWorkflowのプルリクエストは妨げない。
   expect(
     (
@@ -283,6 +301,69 @@ test("an open pull request for the same Workflow stops a new implementation Job"
       )
     ).status,
   ).toBe("read");
+});
+
+test("the Workflow-wide fence only admits the current approval fingerprint", async () => {
+  const admitted = await read(fakeState());
+
+  if (admitted.status !== "read") {
+    throw new Error("the approval was refused");
+  }
+
+  const approval = admitted.approval;
+  const otherFingerprint = "0".repeat(64);
+  const fenced = (
+    live: { jobKeys: string[]; branchKeys: string[] } | null,
+  ): boolean => workflowIsFenced(live, approval, repositoryId);
+
+  expect(fenced({ jobKeys: [approval.jobId], branchKeys: [] })).toBe(true);
+  expect(
+    fenced({
+      jobKeys: [],
+      branchKeys: [`${repositoryId}/${approval.canonicalBranch}`],
+    }),
+  ).toBe(true);
+  // 別Workflowの生きたJobとブランチは妨げない。
+  expect(
+    fenced({
+      jobKeys: [`implementation:${repositoryId}:29:${otherFingerprint}`],
+      branchKeys: [`${repositoryId}/oriel/ENG-13-gh-29-${otherFingerprint}`],
+    }),
+  ).toBe(true);
+
+  // 同じWorkflowで、異なる承認指紋の生きた所有権があれば隔離できていない。
+  expect(
+    fenced({
+      jobKeys: [`implementation:${repositoryId}:28:${otherFingerprint}`],
+      branchKeys: [],
+    }),
+  ).toBe(false);
+  expect(
+    fenced({
+      jobKeys: [],
+      branchKeys: [`${repositoryId}/oriel/ENG-9-gh-28-${otherFingerprint}`],
+    }),
+  ).toBe(false);
+  // 現在値を読めない場合はfail closedにする。
+  expect(fenced(null)).toBe(false);
+});
+
+test("a canonical ref that cannot be read is neither created nor adopted", async () => {
+  const state = fakeState();
+  const ports = fakePorts(state);
+  const admitted = await readImplementationApproval(ports, {
+    repositoryId,
+    linearIssueId,
+  });
+
+  if (admitted.status !== "read") {
+    throw new Error("the approval was refused");
+  }
+
+  expect(
+    await sealCanonicalBranch(ports, admitted.approval, { status: "unknown" }),
+  ).toEqual({ status: "refused", reason: "canonical_branch_state_unknown" });
+  expect(ports.calls).toEqual([]);
 });
 
 async function seal(state: FakeState) {
@@ -297,7 +378,11 @@ async function seal(state: FakeState) {
   }
 
   return {
-    outcome: await sealCanonicalBranch(ports, admitted.approval),
+    outcome: await sealCanonicalBranch(
+      ports,
+      admitted.approval,
+      await ports.readRef(admitted.approval.canonicalRef),
+    ),
     calls: ports.calls,
     approval: admitted.approval,
   };
@@ -307,7 +392,7 @@ test("the canonical branch is created by one atomic updateRefs and read back", a
   const state = fakeState();
   const sealed = await seal(state);
 
-  expect(sealed.outcome).toEqual({ status: "sealed" });
+  expect(sealed.outcome).toEqual({ status: "sealed", canonicalOid: baseOid });
   expect(sealed.calls).toEqual([`updateRefs:refs/heads/${canonicalBranch}`]);
   expect(state.refs[`refs/heads/${canonicalBranch}`]).toBe(baseOid);
 });
@@ -331,7 +416,10 @@ test("an ambiguous seal is read back once and never resent", async () => {
   const converged = fakeState({ seal: "unknown", sealWritesOid: baseOid });
   const sealedAfterReadBack = await seal(converged);
 
-  expect(sealedAfterReadBack.outcome).toEqual({ status: "sealed" });
+  expect(sealedAfterReadBack.outcome).toEqual({
+    status: "sealed",
+    canonicalOid: baseOid,
+  });
   expect(sealedAfterReadBack.calls).toHaveLength(1);
 
   // 送ったか分からないまま、refが無い・別のOID・読めない場合は進めない。
@@ -356,15 +444,16 @@ test("an ambiguous seal is read back once and never resent", async () => {
   });
 });
 
-test("an existing canonical ref is never overwritten and is not adopted here", async () => {
+test("an existing canonical ref of the same fingerprint is adopted, never overwritten", async () => {
   const existing = fakeState();
   existing.refs[`refs/heads/${canonicalBranch}`] = "3".repeat(40);
 
   const sealed = await seal(existing);
 
+  // ADR 0004: 現在の先端を未検証の作業途中成果として引き継ぐ。
   expect(sealed.outcome).toEqual({
-    status: "refused",
-    reason: "branch_adoption_unavailable",
+    status: "adopted",
+    canonicalOid: "3".repeat(40),
   });
   // 比較条件付き作成すら送らない。
   expect(sealed.calls).toEqual([]);
@@ -385,9 +474,8 @@ test("the target base must still be at the OID the seal compares against", async
 
   moved.base = { ref: "refs/heads/main", oid: "4".repeat(40) };
 
-  expect(await sealCanonicalBranch(ports, admitted.approval)).toEqual({
-    status: "refused",
-    reason: "approval_changed",
-  });
+  expect(
+    await sealCanonicalBranch(ports, admitted.approval, { status: "absent" }),
+  ).toEqual({ status: "refused", reason: "approval_changed" });
   expect(ports.calls).toEqual([]);
 });

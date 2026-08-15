@@ -65,7 +65,13 @@ let installationTokenAvailable = true;
 
 type Purpose = "installations" | "registration" | "device_list" | "revocation";
 
-function relay(overrides: Partial<RelayGitHubClient> = {}) {
+function relay(
+  overrides: Partial<RelayGitHubClient> = {},
+  installationTokenPermissions: Record<string, string> = {
+    issues: "write",
+    metadata: "read",
+  },
+) {
   return createRelayApp({
     github: { ...github, ...overrides },
     deviceRegistry: env.DEVICE_REGISTRY,
@@ -76,7 +82,7 @@ function relay(overrides: Partial<RelayGitHubClient> = {}) {
     ownershipHeartbeatIntervalMs: 1_000,
     ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
     ownershipAuditIntervalMs: 5_000,
-    installationTokenPermissions: { issues: "write", metadata: "read" },
+    installationTokenPermissions,
     now: () => currentTime,
   });
 }
@@ -560,6 +566,168 @@ describe("ownership connections on the relay", () => {
     ).toBe(426);
   });
 
+  it("answers the live ownership keys of the repository to a current owner", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const job = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "implementation:11:28:aaa",
+    });
+    const jobSocket = job.webSocket!;
+
+    jobSocket.accept();
+
+    const jobLeaseId = leaseIdOf(await nextMessage(jobSocket));
+    const branch = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "branch",
+      key: `${repository.id}/oriel/ENG-12-gh-28-aaa`,
+      parentLeaseId: jobLeaseId,
+    });
+
+    branch.webSocket!.accept();
+    await nextMessage(branch.webSocket!);
+
+    const state = nextMessage(jobSocket);
+
+    jobSocket.send(
+      JSON.stringify({
+        type: "ownership.inspect",
+        requestId: "inspect-1",
+        leaseId: jobLeaseId,
+      }),
+    );
+
+    // 置換隔離の判断はserveが行う。relayは現在の接続キーだけを答える。
+    expect(await state).toEqual({
+      type: "ownership.state",
+      requestId: "inspect-1",
+      current: true,
+      jobKeys: ["implementation:11:28:aaa"],
+      branchKeys: [`${repository.id}/oriel/ENG-12-gh-28-aaa`],
+    });
+
+    const stale = nextMessage(jobSocket);
+
+    jobSocket.send(
+      JSON.stringify({
+        type: "ownership.inspect",
+        requestId: "inspect-2",
+        leaseId: "not-current",
+      }),
+    );
+
+    // 現在の取得IDでない問い合わせには現在値を渡さない。
+    expect(await stale).toEqual({
+      type: "ownership.state",
+      requestId: "inspect-2",
+      current: false,
+      jobKeys: [],
+      branchKeys: [],
+    });
+  });
+
+  it("counts no expired connection as live ownership, and answers no stale owner", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const fresh = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "implementation:11:28:current",
+    });
+    const freshSocket = fresh.webSocket!;
+
+    freshSocket.accept();
+
+    const freshLeaseId = leaseIdOf(await nextMessage(freshSocket));
+
+    // 同じrepositoryで、heartbeatの期限が尽きた旧Jobの接続。
+    heartbeatExpiryMs = 0;
+
+    const staleApp = relay();
+    const stale = await openOwnership(staleApp, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "implementation:11:28:older",
+    });
+    const staleSocket = stale.webSocket!;
+
+    staleSocket.accept();
+
+    await nextMessage(staleSocket);
+
+    const staleClosed = new Promise<number>((resolve) => {
+      staleSocket.addEventListener("close", (event) => {
+        resolve(event.code);
+      });
+    });
+    const state = nextMessage(freshSocket);
+
+    freshSocket.send(
+      JSON.stringify({
+        type: "ownership.inspect",
+        requestId: "inspect-1",
+        leaseId: freshLeaseId,
+      }),
+    );
+
+    // 旧Jobは失効しているため、置換隔離を妨げる生きた所有権として数えない。
+    expect(await state).toEqual({
+      type: "ownership.state",
+      requestId: "inspect-1",
+      current: true,
+      jobKeys: ["implementation:11:28:current"],
+      branchKeys: [],
+    });
+
+    // 数える前に失効させるため、旧接続は問い合わせの処理中に閉じられている。
+    expect(await staleClosed).toBe(4004);
+  });
+
+  it("answers a stale owner with the expiry, never with the live ownership", async () => {
+    heartbeatExpiryMs = 0;
+
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const stale = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "implementation:11:28:older",
+    });
+    const staleSocket = stale.webSocket!;
+
+    staleSocket.accept();
+
+    const leaseId = leaseIdOf(await nextMessage(staleSocket));
+    const answer = new Promise<{ code: number; messages: unknown[] }>(
+      (resolve) => {
+        const messages: unknown[] = [];
+
+        staleSocket.addEventListener("message", (event) => {
+          messages.push(JSON.parse(String(event.data)));
+        });
+        staleSocket.addEventListener("close", (event) => {
+          resolve({ code: event.code, messages });
+        });
+      },
+    );
+
+    staleSocket.send(
+      JSON.stringify({
+        type: "ownership.inspect",
+        requestId: "inspect-1",
+        leaseId,
+      }),
+    );
+
+    // 自身の取得IDがまだ一致していても、失効した接続へ現在値を渡さない。
+    expect(await answer).toEqual({
+      code: 4004,
+      messages: [{ type: "ownership.expired" }],
+    });
+  });
+
   it("invalidates and closes the ownership connections of a revoked device", async () => {
     const app = relay();
     const registered = await registerDevice(app, "serve-state");
@@ -705,11 +873,16 @@ describe("short lived installation tokens", () => {
   function requestInstallationToken(
     app: ReturnType<typeof relay>,
     deviceToken: string,
+    purpose = "issue_conversation",
   ) {
     return app.fetch(
       new Request("https://relay.test/device/installation-token", {
         method: "POST",
-        headers: { authorization: `Bearer ${deviceToken}` },
+        headers: {
+          authorization: `Bearer ${deviceToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ purpose }),
       }),
     );
   }
@@ -726,6 +899,7 @@ describe("short lived installation tokens", () => {
     expect(await response.json()).toEqual({
       token: "installation-token",
       expiresAt: "2026-08-14T00:10:00Z",
+      purpose: "issue_conversation",
       installationId,
       repositoryId: repository.id,
     });
@@ -736,6 +910,76 @@ describe("short lived installation tokens", () => {
         permissions: { issues: "write", metadata: "read" },
       },
     ]);
+  });
+
+  it("issues only the permissions the requested purpose needs", async () => {
+    const app = relay(
+      {},
+      {
+        contents: "write",
+        issues: "write",
+        pull_requests: "write",
+        metadata: "read",
+      },
+    );
+    const registered = await registerDevice(app, "serve-state");
+
+    expect(
+      (await requestInstallationToken(app, registered.deviceToken, "admission"))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await requestInstallationToken(
+          app,
+          registered.deviceToken,
+          "implementation",
+        )
+      ).status,
+    ).toBe(200);
+    // admissionは読み取りだけ、実装はcanonicalブランチの送信だけを持つ。
+    expect(
+      issuedInstallationTokens.map((issued) => issued.permissions),
+    ).toEqual([
+      {
+        contents: "read",
+        issues: "read",
+        pull_requests: "read",
+        metadata: "read",
+      },
+      { contents: "write", metadata: "read" },
+    ]);
+  });
+
+  it("refuses a request without a known purpose", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    expect(
+      (await requestInstallationToken(app, registered.deviceToken, "admin"))
+        .status,
+    ).toBe(400);
+    // 設定が与えていない権限を要する用途はfail closedにする。
+    expect(
+      (
+        await requestInstallationToken(
+          app,
+          registered.deviceToken,
+          "implementation",
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.fetch(
+          new Request("https://relay.test/device/installation-token", {
+            method: "POST",
+            headers: { authorization: `Bearer ${registered.deviceToken}` },
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(issuedInstallationTokens).toEqual([]);
   });
 
   it("refuses to run with permissions wider than the product needs", () => {

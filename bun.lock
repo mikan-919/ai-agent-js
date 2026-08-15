@@ -21,6 +21,7 @@
       "name": "@mikan-919/oriel-harness",
       "dependencies": {
         "@mikan-919/oriel-contracts": "workspace:*",
+        "@mikan-919/oriel-identity": "workspace:*",
       },
     },
     "apps/relay": {

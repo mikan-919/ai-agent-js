@@ -1,4 +1,11 @@
 import {
+  parseImplementationStartEvent,
+  type ImplementationClientMessage,
+} from "@mikan-919/oriel-contracts";
+
+import { systemLocalGit } from "./git";
+import { runImplementationWorker } from "./implementation";
+import {
   createNdjsonIssueCommentOperationClient,
   postIssueConversationReply,
 } from "./issue-conversation";
@@ -19,18 +26,12 @@ function argument(name: string): string {
   return value;
 }
 
-const [owner, name] = argument("repository").split("/");
-
-if (owner === undefined || name === undefined) {
-  throw new Error("--repository must be owner/name");
-}
-
 const decoder = new TextDecoder();
 let buffer = "";
 const pending: ((value: unknown) => void)[] = [];
 const received: unknown[] = [];
 
-// stdoutのNDJSONを読み、要求の対応付けだけをここで行う。
+// stdinのNDJSONを読み、要求の対応付けだけをここで行う。
 void (async () => {
   for await (const chunk of Bun.stdin.stream()) {
     buffer += decoder.decode(chunk, { stream: true });
@@ -54,17 +55,66 @@ void (async () => {
   }
 })();
 
-const operationClient = createNdjsonIssueCommentOperationClient({
-  write(message) {
-    Bun.stdout.write(`${JSON.stringify(message)}\n`);
-  },
-  read() {
-    const buffered = received.shift();
+function read(): Promise<unknown> {
+  const buffered = received.shift();
 
-    return buffered === undefined
-      ? new Promise<unknown>((resolve) => pending.push(resolve))
-      : Promise.resolve(buffered);
-  },
+  return buffered === undefined
+    ? new Promise<unknown>((resolve) => pending.push(resolve))
+    : Promise.resolve(buffered);
+}
+
+function write(message: unknown) {
+  Bun.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+const mode = Bun.argv.includes("--mode") ? argument("mode") : "issue";
+
+if (mode === "implementation") {
+  // 封印済みworktreeと承認済みWHAT/HOWだけをstart eventとして受け取る。
+  const start = parseImplementationStartEvent(await read());
+  const outcome = await runImplementationWorker({
+    start,
+    transport: {
+      write: (message: ImplementationClientMessage) => {
+        write(message);
+      },
+      read,
+    },
+    git: systemLocalGit,
+    runCommand: async (command, cwd) => {
+      const [executable, ...args] = command;
+      const spawned = Bun.spawn([executable!, ...args], {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+        // `serve`がharnessへ渡した時点でcredentialは含まれていない。
+        env: { ...Bun.env },
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(spawned.stdout).text(),
+        new Response(spawned.stderr).text(),
+        spawned.exited,
+      ]);
+
+      return { ok: exitCode === 0, output: `${stdout}${stderr}` };
+    },
+  });
+
+  process.stderr.write(
+    `implementation ${outcome.checkpoint} verified=${outcome.verified}\n`,
+  );
+  process.exit(outcome.checkpoint === "rejected" ? 1 : 0);
+}
+
+const [owner, name] = argument("repository").split("/");
+
+if (owner === undefined || name === undefined) {
+  throw new Error("--repository must be owner/name");
+}
+
+const operationClient = createNdjsonIssueCommentOperationClient({
+  write,
+  read,
 });
 
 await postIssueConversationReply(

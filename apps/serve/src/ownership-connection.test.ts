@@ -113,6 +113,66 @@ test("Job ownership and branch exclusivity are acquired over the relay connectio
   }
 });
 
+test("the connection reads the live ownership of the repository and its own branch lease", async () => {
+  const relay = startFakeOwnershipRelay();
+  const connection = connect(relay.origin);
+  const other = createRelayOwnershipConnection({
+    relayOrigin: relay.origin,
+    deviceToken,
+    jobId: "implementation:11:28:other-fingerprint",
+    heartbeatStopMs: 1_000,
+  });
+
+  try {
+    const jobLeaseId = await connection.acquireJobOwnership();
+    const branchLeaseId =
+      await connection.acquireBranchExclusivity("11/oriel-job-1");
+
+    await other.acquireJobOwnership();
+
+    // 置換隔離の判断材料は、同じrepositoryで現在生きているキーだけとする。
+    expect(await connection.inspectOwnership()).toEqual({
+      jobKeys: [jobId, "implementation:11:28:other-fingerprint"],
+      branchKeys: ["11/oriel-job-1"],
+    });
+    expect(
+      await connection.hasCurrentBranchExclusivity(
+        "11/oriel-job-1",
+        branchLeaseId ?? "",
+      ),
+    ).toBe(true);
+    expect(
+      await connection.hasCurrentBranchExclusivity(
+        "11/oriel-job-1",
+        "not-current",
+      ),
+    ).toBe(false);
+    expect(jobLeaseId).toEqual(expect.any(String));
+  } finally {
+    connection.release();
+    other.release();
+    relay.stop();
+  }
+});
+
+test("a released connection reads no ownership at all", async () => {
+  const relay = startFakeOwnershipRelay();
+  const connection = connect(relay.origin);
+
+  try {
+    await connection.acquireJobOwnership();
+    await connection.acquireBranchExclusivity("11/oriel-job-1");
+    connection.release();
+
+    expect(await connection.inspectOwnership()).toBeNull();
+    expect(
+      await connection.hasCurrentBranchExclusivity("11/oriel-job-1", "lease"),
+    ).toBe(false);
+  } finally {
+    relay.stop();
+  }
+});
+
 test("a second connection cannot take the same Job, and a branch needs a current Job lease", async () => {
   const relay = startFakeOwnershipRelay();
   const first = connect(relay.origin);

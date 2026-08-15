@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@mikan-919/oriel-contracts": "workspace:*"
+    "@mikan-919/oriel-contracts": "workspace:*",
+    "@mikan-919/oriel-identity": "workspace:*"
   }
 }

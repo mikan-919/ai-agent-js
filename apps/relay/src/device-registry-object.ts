@@ -481,7 +481,10 @@ export class DeviceRegistryObject extends DurableObject {
     }
   }
 
-  private expireStaleOwnership(): void {
+  /** 失効させて閉じた接続を返す。閉じた接続へは以後何も送らない。 */
+  private expireStaleOwnership(): Set<WebSocket> {
+    const expired = new Set<WebSocket>();
+
     for (const ws of this.ctx.getWebSockets()) {
       const attachment =
         ws.deserializeAttachment() as OwnershipAttachment | null;
@@ -506,7 +509,10 @@ export class DeviceRegistryObject extends DurableObject {
         } satisfies OwnershipServerMessage),
       );
       ws.close(4004, "heartbeat expired");
+      expired.add(ws);
     }
+
+    return expired;
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
@@ -528,17 +534,47 @@ export class DeviceRegistryObject extends DurableObject {
       return;
     }
 
-    const attachment = ws.deserializeAttachment() as OwnershipAttachment | null;
+    if (request.type === "ownership.inspect") {
+      // 問い合わせ元も数える側も、期限を過ぎた接続を先に失効させてから読む。
+      if (this.expireStaleOwnership().has(ws)) {
+        // 自身が失効した接続には、失効通知とcloseだけを答えとして返す。
+        return;
+      }
+
+      const current = this.isCurrent(ws, request.leaseId);
+      const active = current ? this.activeOwnership() : [];
+
+      ws.send(
+        JSON.stringify({
+          type: "ownership.state",
+          requestId: request.requestId,
+          current,
+          jobKeys: active
+            .filter((entry) => entry.kind === "job")
+            .map((entry) => entry.key),
+          branchKeys: active
+            .filter((entry) => entry.kind === "branch")
+            .map((entry) => entry.key),
+        } satisfies OwnershipServerMessage),
+      );
+      return;
+    }
 
     ws.send(
       JSON.stringify({
         type: "ownership.confirmed",
         requestId: request.requestId,
-        current:
-          attachment !== null &&
-          attachment.valid &&
-          attachment.leaseId === request.leaseId,
+        current: this.isCurrent(ws, request.leaseId),
       } satisfies OwnershipServerMessage),
+    );
+  }
+
+  /** 有効な接続付随情報を持ち、取得IDが現在のものと一致するか。 */
+  private isCurrent(ws: WebSocket, leaseId: string): boolean {
+    const attachment = ws.deserializeAttachment() as OwnershipAttachment | null;
+
+    return (
+      attachment !== null && attachment.valid && attachment.leaseId === leaseId
     );
   }
 

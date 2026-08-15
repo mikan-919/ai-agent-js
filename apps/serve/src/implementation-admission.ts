@@ -95,22 +95,101 @@ export type ImplementationRefusalReason =
   | "target_base_unavailable"
   | "pull_request_state_unknown"
   | "workflow_pull_request_open"
+  | "workflow_not_fenced"
+  | "ownership_not_current"
   | "approval_changed"
+  | "canonical_branch_state_unknown"
   | "branch_adoption_unavailable"
   | "branch_seal_unsupported"
   | "branch_seal_rejected"
   | "branch_seal_result_unknown";
 
+/**
+ * 承認済みのWHATとHOWの現在値。
+ *
+ * ADR 0003のとおり、これは承認指紋の入力であって正本ではない。Job識別子、所有権
+ * キー、branch名、外部操作要求、ローカルDBへは保存せず、workerへ渡すためだけに
+ * その読み取りの間だけ保持する。
+ */
+export interface ApprovedContent {
+  whatTitle: string;
+  whatBody: string;
+  howTitle: string;
+  howDescription: string;
+}
+
 export type ImplementationApprovalRead =
-  | { status: "read"; approval: ImplementationApproval }
+  | {
+      status: "read";
+      approval: ImplementationApproval;
+      content: ApprovedContent;
+    }
   | { status: "refused"; reason: ImplementationRefusalReason };
 
 export type SealResult =
-  | { status: "sealed" }
+  /** 比較条件付き作成でcanonicalブランチを封印した。 */
+  | { status: "sealed"; canonicalOid: string }
+  /** 同じ承認指紋の既存ブランチを、未検証の作業途中成果として引き継ぐ。 */
+  | { status: "adopted"; canonicalOid: string }
   | { status: "refused"; reason: ImplementationRefusalReason };
 
 /** 実行承認とみなすLinearのworkflow state名。 */
 const approvedStateName = "Todo";
+
+/** 実装Job識別子の、承認指紋を除いたWorkflow部分。 */
+function jobIdPrefix(repositoryId: number, githubIssueNumber: number): string {
+  return `implementation:${repositoryId}:${githubIssueNumber}:`;
+}
+
+/**
+ * 同じWorkflowのcanonicalブランチか。
+ *
+ * routing部分のLinear identifierは変わりうるため、branch名の先頭では判定せず、
+ * GitHub issue numberの位置だけで同じWorkflowを見分ける。
+ */
+function belongsToWorkflow(branch: string, githubIssueNumber: number): boolean {
+  return (
+    branch.startsWith("oriel/") && branch.includes(`-gh-${githubIssueNumber}-`)
+  );
+}
+
+/**
+ * ADR 0003のWorkflow全体の置換隔離。
+ *
+ * 同じWorkflowで、異なるJob識別子のコード変更Jobが現在の接続を持っていないことを
+ * 確認する。旧ブランチのGit参照が物理的に残るだけなら非有効であり、この確認を
+ * 妨げない。現在値を読めない場合はfail closedにする。
+ */
+export function workflowIsFenced(
+  live: { jobKeys: string[]; branchKeys: string[] } | null,
+  approval: ImplementationApproval,
+  repositoryId: number,
+): boolean {
+  if (live === null) {
+    return false;
+  }
+
+  const prefix = jobIdPrefix(repositoryId, approval.githubIssueNumber);
+  const branchPrefix = `${repositoryId}/`;
+
+  return (
+    live.jobKeys.every(
+      (key) => !key.startsWith(prefix) || key === approval.jobId,
+    ) &&
+    live.branchKeys.every((key) => {
+      if (!key.startsWith(branchPrefix)) {
+        return true;
+      }
+
+      const branch = key.slice(branchPrefix.length);
+
+      return (
+        !belongsToWorkflow(branch, approval.githubIssueNumber) ||
+        branch === approval.canonicalBranch
+      );
+    })
+  );
+}
 
 function refused(reason: ImplementationRefusalReason): {
   status: "refused";
@@ -205,16 +284,24 @@ export async function readImplementationApproval(
     return refused("pull_request_state_unknown");
   }
 
-  const workflowPrefix = canonicalBranch.slice(0, -fingerprint.length);
-
-  if (openHeadRefs.some((headRef) => headRef.startsWith(workflowPrefix))) {
+  if (
+    openHeadRefs.some((headRef) =>
+      belongsToWorkflow(headRef, issue.issueNumber),
+    )
+  ) {
     return refused("workflow_pull_request_open");
   }
 
   return {
     status: "read",
+    content: {
+      whatTitle: issue.title,
+      whatBody: issue.body ?? "",
+      howTitle: linear.title,
+      howDescription: linear.description ?? "",
+    },
     approval: {
-      jobId: `implementation:${repositoryId}:${issue.issueNumber}:${fingerprint}`,
+      jobId: `${jobIdPrefix(repositoryId, issue.issueNumber)}${fingerprint}`,
       approvalFingerprint: fingerprint,
       canonicalBranch,
       canonicalRef: canonicalRefName(canonicalBranch),
@@ -229,33 +316,45 @@ export async function readImplementationApproval(
   };
 }
 
-/** 二つの読み取りが同じ承認対象を指すか。 */
+/**
+ * 二つの読み取りが同じ承認対象を指すか。
+ *
+ * ADR 0004のとおり、既存ブランチを引き継ぐ場合だけ、同じ取り込み先Git参照の
+ * OID前進を承認の失効として扱わない。取り込み先の参照そのものは一致を要する。
+ */
 export function sameApproval(
   first: ImplementationApproval,
   second: ImplementationApproval,
+  { allowTargetBaseAdvance = false } = {},
 ): boolean {
-  return JSON.stringify(first) === JSON.stringify(second);
+  const compared = (approval: ImplementationApproval) =>
+    allowTargetBaseAdvance
+      ? { ...approval, targetBaseOid: "" }
+      : { ...approval };
+
+  return JSON.stringify(compared(first)) === JSON.stringify(compared(second));
 }
 
 /**
  * ADR 0003手順6と7。canonical refが不存在のときだけ、target baseの不変と
  * canonical refの不存在を同じatomic updateの比較条件にして一回だけ作る。
  * 曖昧な応答は再送せず、read-backで確定できたときだけsealとする。
+ *
+ * 同じ承認指紋のGit参照が既に存在する場合は、ADR 0004の引き継ぎとして現在の
+ * 先端をそのまま採る。強制送信、reset、上書きはしない。呼び出し側が読んだ
+ * canonical refの現在値を渡し、ここでは読み直さない。
  */
 export async function sealCanonicalBranch(
   ports: ImplementationApprovalPorts,
   approval: ImplementationApproval,
+  canonical: RefRead,
 ): Promise<SealResult> {
-  const canonical = await ports.readRef(approval.canonicalRef);
-
   if (canonical.status === "unknown") {
-    return refused("approval_changed");
+    return refused("canonical_branch_state_unknown");
   }
 
-  // 既存の同指紋ブランチの引き継ぎはADR 0004の範囲であり、ここでは行わない。
-  // 強制送信、reset、上書きはしない。
   if (canonical.status === "present") {
-    return refused("branch_adoption_unavailable");
+    return { status: "adopted", canonicalOid: canonical.oid };
   }
 
   const base = await ports.readTargetBase();
@@ -279,7 +378,7 @@ export async function sealCanonicalBranch(
   });
 
   if (outcome === "sealed") {
-    return { status: "sealed" };
+    return { status: "sealed", canonicalOid: approval.targetBaseOid };
   }
 
   if (outcome === "unsupported") {
@@ -301,6 +400,6 @@ export async function sealCanonicalBranch(
     baseAfter !== null &&
     baseAfter.ref === approval.targetBaseRef &&
     baseAfter.oid === approval.targetBaseOid
-    ? { status: "sealed" }
+    ? { status: "sealed", canonicalOid: approval.targetBaseOid }
     : refused("branch_seal_result_unknown");
 }
