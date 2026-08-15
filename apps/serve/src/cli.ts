@@ -30,6 +30,13 @@ if (Bun.argv[2] === "--version") {
   console.log(packageManifest.version);
 }
 
+/** Linear tokenを解決できた場合だけ、state反映の境界を作る。 */
+async function linearStateWriter(repositoryId: number) {
+  const token = await bunSecretsLinearToken(repositoryId).get();
+
+  return token === null ? null : createLinearApprovalStateWriter({ token });
+}
+
 function requiredNumber(name: string): number | undefined {
   const value = Number(Bun.env[`${identity.environmentPrefix}${name}`]);
 
@@ -139,28 +146,27 @@ if (Bun.argv[2] === "serve") {
                 resolveApiKey: (provider) =>
                   bunSecretsModelCredential(provider).get(),
               }),
-              // 承認対象の不一致を、所有権を確認した`serve`だけがLinearへ反映する。
+              /**
+               * 承認後の状態反映は、所有権を確認した`serve`だけがLinearへ行う。
+               * tokenはこの内側だけで解決し、harnessへも引数へも渡さない。
+               */
               linearApprovalState: {
                 readLinearState: async (issueId) => {
-                  const linearToken =
-                    await bunSecretsLinearToken(repositoryId).get();
+                  const writer = await linearStateWriter(repositoryId);
 
-                  return linearToken === null
+                  return writer === null
                     ? null
-                    : createLinearApprovalStateWriter({
-                        token: linearToken,
-                      }).readLinearState(issueId);
+                    : writer.readLinearState(issueId);
                 },
                 moveToTriage: async (issueId) => {
-                  const linearToken =
-                    await bunSecretsLinearToken(repositoryId).get();
+                  const writer = await linearStateWriter(repositoryId);
 
-                  return (
-                    linearToken !== null &&
-                    createLinearApprovalStateWriter({
-                      token: linearToken,
-                    }).moveToTriage(issueId)
-                  );
+                  return writer !== null && writer.moveToTriage(issueId);
+                },
+                moveToInProgress: async (issueId) => {
+                  const writer = await linearStateWriter(repositoryId);
+
+                  return writer !== null && writer.moveToInProgress(issueId);
                 },
               },
             })

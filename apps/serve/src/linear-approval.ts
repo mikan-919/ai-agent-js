@@ -106,8 +106,9 @@ const stateMutation = `mutation($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success }
 }`;
 
-/** 差し戻し先とみなすworkflow state名。 */
+/** 差し戻し先と、worker起動直後に反映するworkflow state名。 */
 const triageStateName = "Triage";
+const inProgressStateName = "In Progress";
 
 /**
  * 無効になった承認状態をLinearへ反映する境界。
@@ -158,7 +159,11 @@ export function createLinearApprovalStateWriter({
 
       return typeof name === "string" ? name : null;
     },
-    async moveToTriage(linearIssueId: string): Promise<boolean> {
+    /** teamに一意な対象stateがある場合だけ、そのstateへ移す。 */
+    async moveToState(
+      linearIssueId: string,
+      stateName: string,
+    ): Promise<boolean> {
       const data = await graphql(teamStatesQuery, { id: linearIssueId });
       const nodes =
         (
@@ -166,21 +171,31 @@ export function createLinearApprovalStateWriter({
             team?: { states?: { nodes?: { id?: string; name?: string }[] } };
           } | null
         )?.team?.states?.nodes ?? [];
-      const triage = nodes.filter((node) => node.name === triageStateName);
+      const matching = nodes.filter((node) => node.name === stateName);
 
-      // teamに一意なTriage stateがなければ、別のstateで代替しない。
-      if (triage.length !== 1 || typeof triage[0]?.id !== "string") {
+      // 一意な対象stateがなければ、別のstateで代替しない。
+      if (matching.length !== 1 || typeof matching[0]?.id !== "string") {
         return false;
       }
 
       const updated = await graphql(stateMutation, {
         id: linearIssueId,
-        stateId: triage[0].id,
+        stateId: matching[0].id,
       });
 
       return (
         (updated?.issueUpdate as { success?: boolean } | null)?.success === true
       );
+    },
+    moveToTriage(linearIssueId: string): Promise<boolean> {
+      return this.moveToState(linearIssueId, triageStateName);
+    },
+    /**
+     * 承認後の機械的な反映として、TodoからIn Progressへ移す。承認そのものは
+     * 人間のTriage→Todoだけであり、この操作は承認ではない。
+     */
+    moveToInProgress(linearIssueId: string): Promise<boolean> {
+      return this.moveToState(linearIssueId, inProgressStateName);
     },
   };
 }

@@ -4,6 +4,7 @@ import {
   type CheckpointCompletedEvent,
   type CheckpointRejectedEvent,
   type CheckpointRequest,
+  type ImplementationResult,
   type ImplementationStartEvent,
   type ModelStreamRequest,
   type ModelStreamServerMessage,
@@ -25,9 +26,15 @@ export interface ModelStreamOperations {
   abort(requestId: string): void;
 }
 
+/** harnessが明示する実装結果の受け取り。応答は返さない。 */
+export interface ImplementationResultOperations {
+  report(result: ImplementationResult): void;
+}
+
 export interface ImplementationOperations {
   checkpoint: CheckpointOperations;
   model: ModelStreamOperations;
+  result: ImplementationResultOperations;
 }
 
 /**
@@ -62,6 +69,18 @@ export async function serveOwnedHarnessImplementationIpc(
 
       if (request === null) {
         await send(invalid(message));
+        continue;
+      }
+
+      if (request.type === "implementation.result") {
+        // 対象が一致する結果だけを、そのJobの完了判断へ渡す。
+        if (
+          request.jobId === start.jobId &&
+          request.jobLeaseId === start.jobLeaseId
+        ) {
+          operations.result.report(request);
+        }
+
         continue;
       }
 

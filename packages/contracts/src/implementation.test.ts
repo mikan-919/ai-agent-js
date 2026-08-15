@@ -94,4 +94,45 @@ test("the checkpoint outcome events are part of the server messages", () => {
       reason: "not_a_known_reason",
     }),
   ).toThrow();
+
+  // 承認対象を読めない場合は、変わったと確定した場合と別の理由で拒否する。
+  expect(
+    parseImplementationServerMessage({
+      ...rejected,
+      reason: "approval_state_unknown",
+    }),
+  ).toEqual({ ...rejected, reason: "approval_state_unknown" });
+});
+
+test("the harness reports the implementation result explicitly", () => {
+  const result = {
+    type: "implementation.result" as const,
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    stopReason: "stop",
+    acted: true,
+    sourceChanged: true,
+    verified: true,
+  };
+
+  expect(parseImplementationClientMessage(result)).toEqual(result);
+
+  // 停止理由も編集の有無も省略できない。`serve`はprocessの終了だけで決めない。
+  for (const field of [
+    "stopReason",
+    "acted",
+    "sourceChanged",
+    "verified",
+  ] as const) {
+    const without: Record<string, unknown> = { ...result };
+
+    delete without[field];
+
+    expect(() => parseImplementationClientMessage(without)).toThrow();
+  }
+
+  // WHAT/HOWの本文や会話は結果へ載せない。
+  expect(() =>
+    parseImplementationClientMessage({ ...result, transcript: "..." }),
+  ).toThrow();
 });

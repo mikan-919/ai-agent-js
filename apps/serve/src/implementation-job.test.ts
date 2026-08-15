@@ -16,6 +16,7 @@ import type {
 } from "./implementation-admission";
 import { startImplementationJob } from "./implementation-job";
 import type { StartImplementationWorkerOptions } from "./implementation-worker";
+import type { LinearInProgressPorts } from "./linear-progress";
 import { openServeLocalState } from "./local-state";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
@@ -184,7 +185,7 @@ function fakePorts(
   return { ports, calls, refs, configFileReads };
 }
 
-/** Linear stateの現在値と、差し戻しのattemptを記録するfake。 */
+/** Linear stateの現在値と、状態反映のattemptを記録するfake。 */
 function fakeLinearState({
   movable = true,
   stateName = "Todo" as string | null,
@@ -205,6 +206,17 @@ function fakeLinearState({
         }
 
         current = "Triage";
+
+        return true;
+      },
+      moveToInProgress: async (linearIssueId: string) => {
+        moves.push(`in-progress:${linearIssueId}`);
+
+        if (!movable) {
+          return false;
+        }
+
+        current = "In Progress";
 
         return true;
       },
@@ -256,7 +268,8 @@ function options(
   relayOrigin: string,
   ports: ImplementationApprovalPorts,
   startedWorkers: StartImplementationWorkerOptions[] = [],
-  linearApprovalState: LinearApprovalStatePorts = fakeLinearState().ports,
+  linearApprovalState: LinearApprovalStatePorts &
+    LinearInProgressPorts = fakeLinearState().ports,
 ) {
   return {
     model: { provider: "lm-studio", id: "local-model" },
@@ -305,8 +318,9 @@ test("a fully admitted approval seals the branch after ownership and only then s
       expect(relay.openConnections()).toBe(2);
       expect(refs[`refs/heads/${canonicalBranch}`]).toBe(baseOid);
 
-      // 先行read、所有権取得後のread、封印、封印後のreadの順。
-      expect(calls).toEqual(["read:1", "read:2", "seal", "read:3"]);
+      // 先行read、所有権取得後のread、封印、封印後のread、In Progress反映の
+      // 直前の再調停の順。
+      expect(calls).toEqual(["read:1", "read:2", "seal", "read:3", "read:4"]);
 
       await started.finished;
 
@@ -359,12 +373,14 @@ test("the worker starts only after the current acquisition IDs and the fence are
 
     try {
       expect(started.status).toBe("started");
-      // 取得直後の置換隔離、worker開始直前のJob・ブランチ取得IDの再確認と再隔離。
+      // 取得直後の置換隔離、worker開始直前のJob・ブランチ取得IDの再確認と再隔離、
+      // In Progress反映の直前のJob取得IDの確認。
       expect(relay.requests()).toEqual([
         { type: "ownership.inspect", kind: "job" },
         { type: "ownership.confirm", kind: "job" },
         { type: "ownership.confirm", kind: "branch" },
         { type: "ownership.inspect", kind: "job" },
+        { type: "ownership.confirm", kind: "job" },
       ]);
     } finally {
       if (started.status === "started") {
@@ -464,7 +480,7 @@ test("an existing branch of the same fingerprint is adopted without writing any 
       expect(started.adopted).toBe(true);
       expect(started.canonicalOid).toBe(workInProgressOid);
       // 既存Git参照を強制送信、reset、上書きしない。
-      expect(calls).toEqual(["read:1", "read:2", "read:3"]);
+      expect(calls).toEqual(["read:1", "read:2", "read:3", "read:4"]);
       expect(refs[`refs/heads/${canonicalBranch}`]).toBe(workInProgressOid);
     } finally {
       if (started.status === "started") {
@@ -815,6 +831,154 @@ test("an approval that no longer matches is returned from Todo to Triage by the 
 
       expect(relay.openConnections()).toBe(0);
     } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("an approval read that shows a changed target after ownership is returned to Triage", async () => {
+  for (const [reason, ports] of [
+    // 承認そのものが外れた。
+    ["linear_state_not_todo", fakePorts({ stateName: "In Progress" })],
+    // attachmentからGitHub Issueが一意に解決しなくなった。
+    ["github_issue_not_uniquely_attached", fakePorts()],
+    // 対象のWHATが閉じられた。
+    ["github_issue_not_open", fakePorts()],
+  ] as const) {
+    await withWorkspace(async (databasePath) => {
+      const relay = startFakeOwnershipRelay(deviceToken);
+      const linear = fakeLinearState();
+      let reads = 0;
+      // 先行readだけは通し、所有権を取った後の読み直しで観測する。
+      const changing: ImplementationApprovalPorts = {
+        ...ports.ports,
+        readLinearIssue: async (issueId) => {
+          reads += 1;
+          const read = await ports.ports.readLinearIssue(issueId);
+
+          return read === null || reads === 1
+            ? { ...read!, stateName: "Todo" }
+            : read;
+        },
+        resolveGitHubIssueByAttachmentUrl: async (url) => {
+          const issue =
+            await ports.ports.resolveGitHubIssueByAttachmentUrl(url);
+
+          if (issue === null || reads === 1) {
+            return issue;
+          }
+
+          if (reason === "github_issue_not_uniquely_attached") {
+            return null;
+          }
+
+          return reason === "github_issue_not_open"
+            ? { ...issue, state: "closed" }
+            : issue;
+        },
+      };
+
+      try {
+        expect(
+          await startImplementationJob(
+            options(databasePath, relay.origin, changing, [], linear.ports),
+          ),
+        ).toEqual({
+          status: "refused",
+          reason: "approval_changed",
+          returnedToTriage: "returned",
+        });
+        // どの経路でも、同じTodo→Triageの収束へ送る。
+        expect(linear.moves).toEqual([linearIssueId]);
+      } finally {
+        relay.stop();
+      }
+    });
+  }
+});
+
+test("an approval that cannot be read after ownership is refused without any Linear write", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const linear = fakeLinearState();
+    const { ports } = fakePorts();
+    let reads = 0;
+
+    try {
+      expect(
+        await startImplementationJob(
+          options(
+            databasePath,
+            relay.origin,
+            {
+              ...ports,
+              // 二度目の読み直しだけ、HOWの正本へ届かない。
+              readLinearIssue: async (issueId) => {
+                reads += 1;
+
+                return reads === 1 ? ports.readLinearIssue(issueId) : null;
+              },
+            },
+            [],
+            linear.ports,
+          ),
+        ),
+      ).toEqual({ status: "refused", reason: "linear_issue_not_found" });
+
+      // 単なる提供元障害では差し戻さない。
+      expect(linear.moves).toEqual([]);
+      expect(linear.state()).toBe("Todo");
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("the started worker moves the approved Linear issue to In Progress", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const linear = fakeLinearState();
+    const started = await startImplementationJob(
+      options(databasePath, relay.origin, fakePorts().ports, [], linear.ports),
+    );
+
+    try {
+      expect(started.status).toBe("started");
+
+      if (started.status !== "started") {
+        return;
+      }
+
+      expect(started.linearState).toBe("in_progress");
+      expect(linear.moves).toEqual([`in-progress:${linearIssueId}`]);
+      expect(linear.state()).toBe("In Progress");
+
+      // 用途を限った操作記録として、送信前の試行が永続化されている。
+      const database = openServeLocalState(databasePath);
+
+      try {
+        expect(
+          database
+            .query(
+              `SELECT operation, linear_issue_id AS linearIssueId, status
+               FROM linear_progress_outbox`,
+            )
+            .all(),
+        ).toEqual([
+          {
+            operation: "move-to-in-progress",
+            linearIssueId,
+            status: "in_progress",
+          },
+        ]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      if (started.status === "started") {
+        await started.close();
+      }
+
       relay.stop();
     }
   });

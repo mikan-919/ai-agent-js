@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite";
 
 import type { CheckpointPushResult } from "./canonical-worktree";
 import type { GitCredential } from "./git";
+import type { ReconcileApproval } from "./implementation-admission";
 import type { JobOwnershipVerifier } from "./issue-comments";
 
 /** 実装Jobがcheckpointを送ってよい唯一の対象。 */
@@ -168,10 +169,10 @@ export interface CheckpointServiceDependencies {
   binding: CheckpointBinding;
   ownership: BranchOwnershipVerifier;
   /**
-   * 送信直前の再調停。現在値から導いた承認指紋を返す。読めない場合はnullで
-   * fail closedにする。
+   * 送信直前の再調停。現在値から導いた承認指紋を返す。承認が変わった場合と、
+   * 読めずに決められない場合を区別する。
    */
-  reconcileApprovalFingerprint: () => Promise<string | null>;
+  reconcileApproval: ReconcileApproval;
   /** 用途をimplementationへ絞った一回限りのcredential。 */
   resolveCredential: () => Promise<GitCredential | null>;
   push: (input: {
@@ -193,7 +194,7 @@ export function createCheckpointService({
   outbox,
   binding,
   ownership,
-  reconcileApprovalFingerprint,
+  reconcileApproval,
   resolveCredential,
   push,
   newOperationId = randomUUID,
@@ -259,9 +260,19 @@ export function createCheckpointService({
     }
 
     // ADR 0003: 外部操作の直前に現在の承認指紋を再調停する。
-    const current = await reconcileApprovalFingerprint().catch(() => null);
+    const current = await reconcileApproval().catch(
+      () => ({ status: "unknown" }) as const,
+    );
 
-    if (current === null || current !== operation.approvalFingerprint) {
+    // 読めなかっただけの提供元障害を、承認の変更として差し戻さない。
+    if (current.status === "unknown") {
+      return finishRejected(operation, "approval_state_unknown");
+    }
+
+    if (
+      current.status === "changed" ||
+      current.approvalFingerprint !== operation.approvalFingerprint
+    ) {
       return finishRejected(operation, "target_mismatch");
     }
 

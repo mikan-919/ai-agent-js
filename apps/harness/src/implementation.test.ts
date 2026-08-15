@@ -52,11 +52,20 @@ function fakeAgent(
 
 /**
  * worktree内のGitを模す。commitで先端が動き、それ以外は成功として答える。
+ *
+ * `sourceDirty`はAgent loopの直後、`dirty`はHANDOFFを書いた後の作業ツリーを表す。
  */
-function fakeGit(options: { headOids?: string[]; dirty?: boolean } = {}) {
+function fakeGit(
+  options: {
+    headOids?: string[];
+    dirty?: boolean;
+    sourceDirty?: boolean;
+  } = {},
+) {
   const calls: string[][] = [];
   const heads = options.headOids ?? [sealedOid, checkpointOid];
   let revParses = 0;
+  let statuses = 0;
   const git: LocalGit = {
     async run(args) {
       calls.push(args);
@@ -68,9 +77,17 @@ function fakeGit(options: { headOids?: string[]; dirty?: boolean } = {}) {
       }
 
       if (args[0] === "status") {
+        statuses += 1;
+
+        // 一度目はAgentの編集の有無、二度目以降はcommitできる差分の有無。
+        const dirty =
+          statuses === 1
+            ? (options.sourceDirty ?? true)
+            : options.dirty !== false;
+
         return {
           ok: true,
-          stdout: options.dirty === false ? "" : " M HANDOFF.md\n",
+          stdout: dirty ? " M source.ts\n" : "",
           stderr: "",
         };
       }
@@ -165,7 +182,50 @@ test("the worker verifies, commits and checkpoints inside the sealed worktree", 
       headOid: checkpointOid,
       verified: true,
     },
+    // 実装できたかどうかは、processの終了ではなく明示の結果で`serve`へ伝える。
+    {
+      type: "implementation.result",
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      stopReason: "stop",
+      acted: true,
+      sourceChanged: true,
+      verified: true,
+    },
   ]);
+});
+
+test("an Agent that stopped without editing the source says so in the result", async () => {
+  // 停止理由がerrorで、tool実行もsourceの変更もない場合。
+  const { git } = fakeGit({ sourceDirty: false });
+  const { transport, written } = fakeTransport(acceptedThenCompleted());
+
+  const outcome = await runImplementationWorker({
+    start: startEvent(),
+    transport,
+    git,
+    agent: fakeAgent({
+      turns: 1,
+      toolCalls: 0,
+      stopReason: "error",
+      acted: false,
+    }),
+    runCommand: async () => ({ ok: true, output: "" }),
+    writeFile: async () => {},
+  });
+
+  expect(outcome.sourceChanged).toBe(false);
+  // HANDOFFだけのWIP checkpointは残してよいが、実装完了とは言わない。
+  expect(outcome.checkpoint).toBe("completed");
+  expect(written.at(-1)).toEqual({
+    type: "implementation.result",
+    jobId: startEvent().jobId,
+    jobLeaseId: startEvent().jobLeaseId,
+    stopReason: "error",
+    acted: false,
+    sourceChanged: false,
+    verified: true,
+  });
 });
 
 test("a failing verification still checkpoints, marked as unverified work in progress", async () => {
@@ -239,11 +299,19 @@ test("a rejected checkpoint is reported rather than resent", async () => {
 
   expect(outcome.checkpoint).toBe("rejected");
   expect(outcome.checkpointRejection).toBe("remote_diverged");
-  expect(written).toHaveLength(1);
+  // 再送はせず、結果だけを`serve`へ伝える。
+  expect(written.map((message) => message.type)).toEqual([
+    "checkpoint.request",
+    "implementation.result",
+  ]);
 });
 
 test("a worktree with nothing to commit sends no checkpoint", async () => {
-  const { git } = fakeGit({ headOids: [sealedOid], dirty: false });
+  const { git } = fakeGit({
+    headOids: [sealedOid],
+    dirty: false,
+    sourceDirty: false,
+  });
   const { transport, written } = fakeTransport([]);
 
   const outcome = await runImplementationWorker({
@@ -258,5 +326,16 @@ test("a worktree with nothing to commit sends no checkpoint", async () => {
 
   expect(outcome.committed).toBe(false);
   expect(outcome.checkpoint).toBe("skipped");
-  expect(written).toEqual([]);
+  // checkpointは送らないが、実装できなかったことは`serve`へ伝える。
+  expect(written).toEqual([
+    {
+      type: "implementation.result",
+      jobId: startEvent().jobId,
+      jobLeaseId: startEvent().jobLeaseId,
+      stopReason: "stop",
+      acted: true,
+      sourceChanged: false,
+      verified: false,
+    },
+  ]);
 });

@@ -8,10 +8,12 @@ import {
 } from "./execution-config";
 import type { GitCredential } from "./git";
 import {
+  approvalChangedByRead,
   readImplementationApproval,
   sameApproval,
   sealCanonicalBranch,
   workflowIsFenced,
+  type ApprovalReconciliation,
   type ImplementationApproval,
   type ImplementationApprovalPorts,
   type ImplementationRefusalReason,
@@ -22,6 +24,11 @@ import {
   type StartImplementationWorkerOptions,
   type StartImplementationWorkerResult,
 } from "./implementation-worker";
+import {
+  moveApprovalToInProgress,
+  type LinearInProgressPorts,
+  type MoveToInProgressStatus,
+} from "./linear-progress";
 import { openServeLocalState } from "./local-state";
 import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
@@ -62,8 +69,13 @@ export interface StartImplementationJobOptions {
    */
   model: { provider: string; id: string };
   modelProvider: ModelStreamProvider;
-  /** 承認対象の不一致をLinearへ機械的に反映する境界。 */
-  linearApprovalState: LinearApprovalStatePorts;
+  /**
+   * 承認後の状態をLinearへ機械的に反映する境界。
+   *
+   * 承認対象の不一致ではTodoをTriageへ戻し、worker起動直後にはTodoをIn Progress
+   * へ移す。credentialは`serve`の内側だけで解決する。
+   */
+  linearApprovalState: LinearApprovalStatePorts & LinearInProgressPorts;
   startWorker?: (
     options: StartImplementationWorkerOptions,
   ) => Promise<StartImplementationWorkerResult>;
@@ -98,6 +110,8 @@ export type StartImplementationJobResult =
       canonicalOid: string;
       adopted: boolean;
       branchLeaseId: string;
+      /** worker起動直後に反映したLinear状態の結果。 */
+      linearState: MoveToInProgressStatus;
       /** harnessが編集、build、test、commitを行う封印済みworktree。 */
       worktreePath: string;
       finished: Promise<void>;
@@ -189,14 +203,13 @@ export async function startImplementationJob({
    * 差し戻しを終えてからブランチ排他、Job所有権の順に返す。リレー、Agent、
    * harnessはこの経路を持たない。
    */
-  const refuseApprovalChanged = async (
+  const returnToTriage = async (
     jobLeaseId: string,
-  ): Promise<StartImplementationJobRefusal> => {
+  ): Promise<ReturnToTriageStatus> => {
     const database = openServeLocalState(databasePath);
-    let returnedToTriage: ReturnToTriageStatus;
 
     try {
-      returnedToTriage = await returnApprovalToTriage({
+      return await returnApprovalToTriage({
         database,
         ownership,
         ports: linearApprovalState,
@@ -212,11 +225,31 @@ export async function startImplementationJob({
     } finally {
       database.close();
     }
+  };
+
+  const refuseApprovalChanged = async (
+    jobLeaseId: string,
+  ): Promise<StartImplementationJobRefusal> => {
+    const returnedToTriage = await returnToTriage(jobLeaseId);
 
     ownership.release();
 
     return { status: "refused", reason: "approval_changed", returnedToTriage };
   };
+
+  /**
+   * 所有権を取った後の読み直しの拒否。
+   *
+   * 現在値から承認の変更と確定できる観測はTriageへの差し戻しへ送り、読めなかった
+   * だけの提供元障害はそのまま拒否する。
+   */
+  const refuseRead = (
+    reason: ImplementationRefusalReason,
+    jobLeaseId: string,
+  ): Promise<StartImplementationJobRefusal> | StartImplementationJobRefusal =>
+    approvalChangedByRead(reason)
+      ? refuseApprovalChanged(jobLeaseId)
+      : refuse(reason);
 
   // 手順4: ブランチ排他より先に、Workflow全体の置換隔離を事前確認する。
   if (
@@ -240,7 +273,7 @@ export async function startImplementationJob({
   const second = await readImplementationApproval(ports, target);
 
   if (second.status === "refused") {
-    return refuse(second.reason);
+    return refuseRead(second.reason, jobLeaseId);
   }
 
   const canonicalBefore = await ports.readRef(approval.canonicalRef);
@@ -268,7 +301,7 @@ export async function startImplementationJob({
   const third = await readImplementationApproval(ports, target);
 
   if (third.status === "refused") {
-    return refuse(third.reason);
+    return refuseRead(third.reason, jobLeaseId);
   }
 
   if (
@@ -373,9 +406,10 @@ export async function startImplementationJob({
     },
     modelProvider,
     // 送信の直前に、現在値から承認指紋を導き直す。
-    reconcileApprovalFingerprint: () =>
-      currentApprovalFingerprint(ports, target, approval),
+    reconcileApproval: () => reconcileApproval(ports, target, approval),
     resolveCredential,
+    // 実行中に確定した承認の変更も、同じ差し戻し経路へ送る。
+    onApprovalChanged: () => returnToTriage(jobLeaseId),
     release: () => {
       ownership.release();
     },
@@ -388,6 +422,34 @@ export async function startImplementationJob({
       : refuse(worker.reason);
   }
 
+  /**
+   * ADR 0005とROADMAPのとおり、worker起動直後にTodoをIn Progressへ移す。
+   *
+   * 承認後の機械的な反映であり、実行承認そのものではない。現在のJob所有権、
+   * 承認指紋、現在stateを確認した`serve`だけが送り、結果不明は再読で収束させる。
+   */
+  const database = openServeLocalState(databasePath);
+  let linearState: MoveToInProgressStatus;
+
+  try {
+    linearState = await moveApprovalToInProgress({
+      database,
+      ownership,
+      ports: linearApprovalState,
+      reconcileApproval: () => reconcileApproval(ports, target, approval),
+      target: {
+        jobId: approval.jobId,
+        jobLeaseId,
+        repository,
+        issueNumber: approval.githubIssueNumber,
+        linearIssueId: approval.linearIssueId,
+        approvalFingerprint: approval.approvalFingerprint,
+      },
+    });
+  } finally {
+    database.close();
+  }
+
   return {
     status: "started",
     jobId: approval.jobId,
@@ -395,6 +457,7 @@ export async function startImplementationJob({
     canonicalOid: canonical.oid,
     adopted: sealed.status === "adopted",
     branchLeaseId,
+    linearState,
     worktreePath: worker.worktreePath,
     finished: worker.finished,
     jobStatus: worker.jobStatus,
@@ -403,20 +466,31 @@ export async function startImplementationJob({
 }
 
 /**
- * 外部操作直前の再調停。現在値から導いた承認指紋を返す。
+ * 外部操作直前の再調停。
  *
- * 承認対象そのものが変わった場合は、指紋だけでなく対象の一致も確かめる。読めない、
- * または一致しない場合はnullでfail closedにする。
+ * 承認対象そのものが変わった場合は、指紋だけでなく対象の一致も確かめる。現在値
+ * から変更を確定できた場合と、読めずに決められない場合を区別し、後者では差し戻し
+ * も送信もしない。
  */
-async function currentApprovalFingerprint(
+async function reconcileApproval(
   ports: ImplementationApprovalPorts,
   target: { repositoryId: number; linearIssueId: string },
   approval: ImplementationApproval,
-): Promise<string | null> {
+): Promise<ApprovalReconciliation> {
   const current = await readImplementationApproval(ports, target);
 
-  return current.status === "read" &&
-    sameApproval(approval, current.approval, { allowTargetBaseAdvance: true })
-    ? current.approval.approvalFingerprint
-    : null;
+  if (current.status === "refused") {
+    return approvalChangedByRead(current.reason)
+      ? { status: "changed" }
+      : { status: "unknown" };
+  }
+
+  return sameApproval(approval, current.approval, {
+    allowTargetBaseAdvance: true,
+  })
+    ? {
+        status: "current",
+        approvalFingerprint: current.approval.approvalFingerprint,
+      }
+    : { status: "changed" };
 }

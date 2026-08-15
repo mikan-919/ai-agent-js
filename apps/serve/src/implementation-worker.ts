@@ -1,4 +1,7 @@
-import type { ImplementationStartEvent } from "@mikan-919/oriel-contracts";
+import type {
+  ImplementationResult,
+  ImplementationStartEvent,
+} from "@mikan-919/oriel-contracts";
 
 import {
   openCanonicalWorktree,
@@ -12,6 +15,7 @@ import {
   type CheckpointBinding,
 } from "./checkpoint-push";
 import type { GitCredential } from "./git";
+import type { ReconcileApproval } from "./implementation-admission";
 import {
   serveOwnedHarnessImplementationIpc,
   type CheckpointOperations,
@@ -39,8 +43,15 @@ export interface StartImplementationWorkerOptions {
   targetBase: { ref: string; oid: string };
   /** 提供元への接続とcredentialの解決。harnessへは渡さない。 */
   modelProvider: ModelStreamProvider;
-  reconcileApprovalFingerprint: () => Promise<string | null>;
+  reconcileApproval: ReconcileApproval;
   resolveCredential: () => Promise<GitCredential | null>;
+  /**
+   * 実行中に承認の変更を確定した場合の、Todo→Triage差し戻し。
+   *
+   * ADR 0003のとおり、実行できるのは現在のJob所有権を確認した`serve`だけであり、
+   * この関数はworkerが所有権を保ったまま呼ぶ。
+   */
+  onApprovalChanged: () => Promise<unknown>;
   release: () => void;
 }
 
@@ -58,6 +69,8 @@ export type ImplementationWorkerRefusalReason =
   | "canonical_worktree_unavailable"
   | "target_base_not_integrated"
   | "approval_changed"
+  /** 承認対象を読めず、変わったかどうかを決められない。差し戻しもしない。 */
+  | "approval_state_unknown"
   | "ownership_not_current";
 
 export type StartImplementationWorkerResult =
@@ -83,8 +96,9 @@ export async function startImplementationWorker({
   start,
   targetBase,
   modelProvider,
-  reconcileApprovalFingerprint,
+  reconcileApproval,
   resolveCredential,
+  onApprovalChanged,
   release,
 }: StartImplementationWorkerOptions): Promise<StartImplementationWorkerResult> {
   const credential = await resolveCredential();
@@ -130,9 +144,19 @@ export async function startImplementationWorker({
     worktreeOid = integrated.headOid;
 
     // 統合の後にも、承認対象と現在の取得IDをもう一度確かめる。
-    const fingerprint = await reconcileApprovalFingerprint().catch(() => null);
+    const approval = await reconcileApproval().catch(
+      () => ({ status: "unknown" }) as const,
+    );
 
-    if (fingerprint !== binding.approvalFingerprint) {
+    // 読めなかっただけの提供元障害を、承認の変更として差し戻さない。
+    if (approval.status === "unknown") {
+      return refuse("approval_state_unknown");
+    }
+
+    if (
+      approval.status === "changed" ||
+      approval.approvalFingerprint !== binding.approvalFingerprint
+    ) {
       return refuse("approval_changed");
     }
 
@@ -159,7 +183,7 @@ export async function startImplementationWorker({
     outbox: createCheckpointOutbox(database),
     binding,
     ownership,
-    reconcileApprovalFingerprint,
+    reconcileApproval,
     resolveCredential,
     push: (input) =>
       pushCheckpoint({ ...input, worktreePath: worktree.path, remote }),
@@ -206,6 +230,9 @@ export async function startImplementationWorker({
   /** 遠隔から復元できると確認済みの先端。sandboxの削除条件に使う。 */
   const restorable = [start.canonicalOid];
   let checkpointRefused = false;
+  let checkpointCompleted = false;
+  /** harnessが明示した実装結果。受け取れなければ実装完了とみなさない。 */
+  let reported: ImplementationResult | null = null;
 
   const interrupt = () => {
     if (running) {
@@ -240,9 +267,19 @@ export async function startImplementationWorker({
       const event = await checkpoints.deliver(operationId);
 
       if (event.type === "checkpoint.completed") {
+        checkpointCompleted = true;
         restorable.push(event.canonicalOid);
       } else {
         checkpointRefused = true;
+
+        /**
+         * 送信直前の再調停で承認の変更を確定した場合だけ、ADR 0003の差し戻しへ
+         * 送る。読めなかっただけの`approval_state_unknown`では何も書かない。
+         */
+        if (event.reason === "target_mismatch") {
+          await onApprovalChanged().catch(() => {});
+        }
+
         interrupt();
         stopHarness();
       }
@@ -263,7 +300,15 @@ export async function startImplementationWorker({
       },
     }),
     { ...start, worktreePath: worktree.path, worktreeOid },
-    { checkpoint: observed, model: models },
+    {
+      checkpoint: observed,
+      model: models,
+      result: {
+        report(result) {
+          reported = result;
+        },
+      },
+    },
     ownership.stopSignal,
   );
 
@@ -282,10 +327,21 @@ export async function startImplementationWorker({
       }
 
       running = false;
-      // 所有権を保ち、checkpointも拒否されていない正常終了だけを`completed`にする。
+      /**
+       * 実装が完了したと言えるのは、Agentがworktree内のsourceを実際に編集し、
+       * 取り込み先の設定由来の検証を通し、そのcheckpointを遠隔へ送れた場合だけ
+       * とする。Agentがerrorやabortedで止まった、何も編集しなかった、または
+       * 結果を受け取れなかった実行は、HANDOFFだけのWIP checkpointが残っていても
+       * `interrupted`にする。
+       */
       jobState.set(
         binding.jobId,
-        exitCode === 0 && !checkpointRefused ? "completed" : "interrupted",
+        exitCode === 0 &&
+          !checkpointRefused &&
+          checkpointCompleted &&
+          implemented(reported)
+          ? "completed"
+          : "interrupted",
       );
     }),
     jobStatus: () => (closed ? lastJobStatus : jobState.get(binding.jobId)),
@@ -301,8 +357,30 @@ export async function startImplementationWorker({
       // heartbeatと取得IDを持ち続けない。
       release();
       database.close();
-      // 復元可能でcleanなsandboxだけを消す。
-      await worktree.remove(restorable);
+
+      // 完了していないJobのsandboxは、cleanに見えても作業途中成果として残す。
+      if (lastJobStatus === "completed") {
+        await worktree.remove(restorable);
+      }
     },
   };
+}
+
+/**
+ * harnessが明示した結果が、実装完了と言えるか。
+ *
+ * 停止理由がerrorまたはabortedの未完了turn、tool実行のない実行、sourceを変えて
+ * いない実行、検証を通していない実行、結果そのものが届かなかった実行は完了に
+ * しない。
+ */
+function implemented(result: ImplementationResult | null): boolean {
+  return (
+    result !== null &&
+    result.stopReason !== "error" &&
+    result.stopReason !== "aborted" &&
+    result.stopReason !== "unknown" &&
+    result.acted &&
+    result.sourceChanged &&
+    result.verified
+  );
 }

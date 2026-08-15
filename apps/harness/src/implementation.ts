@@ -27,6 +27,8 @@ export interface ImplementationOutcome {
   agent: ImplementationAgentOutcome;
   verification: VerificationRun[];
   verified: boolean;
+  /** Agent loopがworktree内のsourceを実際に変えたか。HANDOFFは数えない。 */
+  sourceChanged: boolean;
   committed: boolean;
   headOid: string;
   checkpoint: "completed" | "rejected" | "skipped";
@@ -76,6 +78,14 @@ export async function runImplementationWorker({
   // 承認済みWHAT/HOWからの実装。commitとcheckpointはこの後でharnessが行う。
   const agentOutcome = await agent.run(start);
 
+  /**
+   * Agentがsourceを実際に編集したか。
+   *
+   * HANDOFFはこの後でharnessが書くため、ここでの差分だけがAgentの成果である。
+   * 検証やHANDOFFだけのWIP checkpointを実装完了と取り違えない。
+   */
+  const sourceChanged = await hasChanges(git, worktree);
+
   // 引き継いだ先端も未検証の作業途中成果として、検証を最初からやり直す。
   const verification: VerificationRun[] = [];
 
@@ -106,16 +116,36 @@ export async function runImplementationWorker({
   const committed = await commitWorkInProgress(git, worktree, verified);
   const headOid = await readHead(git, worktree);
 
-  if (!committed || headOid === start.worktreeOid) {
-    return {
-      agent: agentOutcome,
-      verification,
+  /**
+   * 実装の結果をそのまま`serve`へ伝える。
+   *
+   * `serve`はharness processの終了だけでJobを完了にしない。Agentがsourceを編集
+   * したか、設定由来の検証を通したか、どの理由で止まったかを明示する。
+   */
+  const report = async (
+    outcome: Omit<ImplementationOutcome, "agent" | "verification" | "verified">,
+  ): Promise<ImplementationOutcome> => {
+    await transport.write({
+      type: "implementation.result",
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      stopReason: agentOutcome.stopReason,
+      acted: agentOutcome.acted,
+      sourceChanged,
       verified,
+    });
+
+    return { agent: agentOutcome, verification, verified, ...outcome };
+  };
+
+  if (!committed || headOid === start.worktreeOid) {
+    return report({
+      sourceChanged,
       committed: false,
       headOid,
       checkpoint: "skipped",
       checkpointRejection: null,
-    };
+    });
   }
 
   const request: CheckpointRequest = {
@@ -136,32 +166,39 @@ export async function runImplementationWorker({
   const accepted = parseCheckpointEvent(await transport.read());
 
   if (accepted.type !== "checkpoint.accepted") {
-    return {
-      agent: agentOutcome,
-      verification,
-      verified,
+    return report({
+      sourceChanged,
       committed: true,
       headOid,
       checkpoint: "rejected",
       checkpointRejection:
         accepted.type === "checkpoint.rejected" ? accepted.reason : "unknown",
-    };
+    });
   }
 
   const outcome = parseCheckpointEvent(await transport.read());
 
   // 結果不明の再送はharnessではなく`serve`の収束規則が担う。
-  return {
-    agent: agentOutcome,
-    verification,
-    verified,
+  return report({
+    sourceChanged,
     committed: true,
     headOid,
     checkpoint:
       outcome.type === "checkpoint.completed" ? "completed" : "rejected",
     checkpointRejection:
       outcome.type === "checkpoint.rejected" ? outcome.reason : null,
-  };
+  });
+}
+
+/** 作業ツリーにcommitしていない差分があるか。 */
+async function hasChanges(git: LocalGit, worktree: string): Promise<boolean> {
+  const status = await git.run(["status", "--porcelain"], worktree);
+
+  if (!status.ok) {
+    throw new Error("the worktree status could not be read");
+  }
+
+  return status.stdout.trim() !== "";
 }
 
 async function readHead(git: LocalGit, worktree: string): Promise<string> {
@@ -186,13 +223,7 @@ async function commitWorkInProgress(
     throw new Error("the worktree changes could not be staged");
   }
 
-  const status = await git.run(["status", "--porcelain"], worktree);
-
-  if (!status.ok) {
-    throw new Error("the worktree status could not be read");
-  }
-
-  if (status.stdout.trim() === "") {
+  if (!(await hasChanges(git, worktree))) {
     return false;
   }
 

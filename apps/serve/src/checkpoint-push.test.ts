@@ -12,6 +12,7 @@ import {
   createCheckpointService,
   type CheckpointBinding,
 } from "./checkpoint-push";
+import type { ApprovalReconciliation } from "./implementation-admission";
 import { openServeLocalState } from "./local-state";
 
 const digest = "a".repeat(64);
@@ -50,7 +51,7 @@ function request(
 interface ServiceOptions {
   jobOwned?: boolean;
   branchOwned?: boolean;
-  currentFingerprint?: string | null;
+  approval?: ApprovalReconciliation;
   push?: CheckpointPushResult;
   credential?: { username: string; token: string } | null;
 }
@@ -75,10 +76,8 @@ async function withService<T>(
         hasCurrentJobOwnership: () => options.jobOwned ?? true,
         hasCurrentBranchExclusivity: () => options.branchOwned ?? true,
       },
-      reconcileApprovalFingerprint: async () =>
-        options.currentFingerprint === undefined
-          ? digest
-          : options.currentFingerprint,
+      reconcileApproval: async () =>
+        options.approval ?? { status: "current", approvalFingerprint: digest },
       resolveCredential: async () =>
         options.credential === undefined
           ? { username: "x-access-token", token: "installation" }
@@ -187,7 +186,7 @@ test("a checkpoint aimed at another Job, branch or fingerprint is refused", asyn
 
 test("an approval that no longer matches the current value is not written to Git", async () => {
   await withService(
-    { currentFingerprint: "b".repeat(64) },
+    { approval: { status: "current", approvalFingerprint: "b".repeat(64) } },
     async ({ service, pushes }) => {
       const accepted = await service.accept(request());
 
@@ -204,18 +203,41 @@ test("an approval that no longer matches the current value is not written to Git
     },
   );
 
-  // 現在値を読めない場合もfail closedにする。
-  await withService({ currentFingerprint: null }, async ({ service }) => {
-    const accepted = await service.accept(request());
+  // 承認そのものが変わったと確定できた場合も書き込まない。
+  await withService(
+    { approval: { status: "changed" } },
+    async ({ service }) => {
+      const accepted = await service.accept(request());
 
-    if (accepted.type !== "checkpoint.accepted") {
-      throw new Error("the checkpoint was refused before reconciliation");
-    }
+      if (accepted.type !== "checkpoint.accepted") {
+        throw new Error("the checkpoint was refused before reconciliation");
+      }
 
-    expect(await service.deliver(accepted.operationId)).toMatchObject({
-      reason: "target_mismatch",
-    });
-  });
+      expect(await service.deliver(accepted.operationId)).toMatchObject({
+        reason: "target_mismatch",
+      });
+    },
+  );
+});
+
+test("an approval that cannot be read is refused as unknown, not as a changed target", async () => {
+  await withService(
+    { approval: { status: "unknown" } },
+    async ({ service, pushes }) => {
+      const accepted = await service.accept(request());
+
+      if (accepted.type !== "checkpoint.accepted") {
+        throw new Error("the checkpoint was refused before reconciliation");
+      }
+
+      // 単なる提供元障害を承認の変更と混同せず、書き込みだけを止める。
+      expect(await service.deliver(accepted.operationId)).toMatchObject({
+        type: "checkpoint.rejected",
+        reason: "approval_state_unknown",
+      });
+      expect(pushes).toEqual([]);
+    },
+  );
 });
 
 test("a third remote OID is returned for reconciliation instead of being forced", async () => {

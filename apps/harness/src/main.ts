@@ -56,8 +56,8 @@ function read(): Promise<unknown> {
   return router.read();
 }
 
-function write(message: unknown) {
-  Bun.stdout.write(`${JSON.stringify(message)}\n`);
+function write(message: unknown): number | Promise<number> {
+  return Bun.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 const mode = Bun.argv.includes("--mode") ? argument("mode") : "issue";
@@ -99,8 +99,9 @@ if (mode === "implementation") {
   const outcome = await runImplementationWorker({
     start,
     transport: {
-      write: (message: ImplementationClientMessage) => {
-        write(message);
+      // 結果messageを書き終えるまでprocessを終わらせない。
+      write: async (message: ImplementationClientMessage) => {
+        await write(message);
       },
       read,
     },
@@ -133,7 +134,9 @@ if (owner === undefined || name === undefined) {
 }
 
 const operationClient = createNdjsonIssueCommentOperationClient({
-  write,
+  write: async (message) => {
+    await write(message);
+  },
   read,
 });
 

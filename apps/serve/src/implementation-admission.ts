@@ -86,6 +86,21 @@ export interface ImplementationApproval {
   linearIdentifier: string;
 }
 
+/**
+ * 外部操作の直前に行う承認対象の再調停。
+ *
+ * ADR 0005のとおり、単なる提供元障害と承認の変更を区別する。読めなかった場合は
+ * `unknown`として盲目的な再送も差し戻しもせず、現在値を読み直して収束させる。
+ */
+export type ApprovalReconciliation =
+  | { status: "current"; approvalFingerprint: string }
+  /** 現在値から、承認対象が変わったと確定できた。 */
+  | { status: "changed" }
+  /** 現在値を読めず、変わったかどうかを決められない。 */
+  | { status: "unknown" };
+
+export type ReconcileApproval = () => Promise<ApprovalReconciliation>;
+
 export type ImplementationRefusalReason =
   | "linear_issue_not_found"
   | "linear_state_not_todo"
@@ -189,6 +204,24 @@ export function workflowIsFenced(
         branch === approval.canonicalBranch
       );
     })
+  );
+}
+
+/**
+ * 読み直しの拒否理由が、現在値から承認の変更だと確定できるか。
+ *
+ * ADR 0003の一致判定のうち、Linear stateがTodoでなくなった、attachmentから
+ * GitHub Issueが一意に解決しなくなった、対象Issueが開いていないという観測は、
+ * すべて現在値から読み取れた承認対象の変更である。読めなかった、能力が足りない、
+ * 別のphaseへ進んだという理由はここに含めない。
+ */
+export function approvalChangedByRead(
+  reason: ImplementationRefusalReason,
+): boolean {
+  return (
+    reason === "linear_state_not_todo" ||
+    reason === "github_issue_not_uniquely_attached" ||
+    reason === "github_issue_not_open"
   );
 }
 

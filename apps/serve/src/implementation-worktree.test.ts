@@ -172,7 +172,11 @@ function workerOptions(
     },
     targetBase: { ref: "refs/heads/main", oid: context.canonicalOid },
     modelProvider: implementingModel("greeting.txt", "hello\n"),
-    reconcileApprovalFingerprint: async () => digest,
+    reconcileApproval: async () => ({
+      status: "current",
+      approvalFingerprint: digest,
+    }),
+    onApprovalChanged: async () => {},
     resolveCredential: async () => ({
       username: "x-access-token",
       token: "installation",
@@ -326,10 +330,21 @@ test(
           workerOptions(context, {
             start: { ...workerOptions(context).start, adopted: true },
             targetBase: { ref: "refs/heads/main", oid: advanced },
-            reconcileApprovalFingerprint: async () => "b".repeat(64),
+            reconcileApproval: async () => ({ status: "changed" }),
           }),
         ),
       ).toEqual({ status: "refused", reason: "approval_changed" });
+
+      // 読めなかっただけの提供元障害は、承認の変更と別に扱う。
+      expect(
+        await startImplementationWorker(
+          workerOptions(context, {
+            start: { ...workerOptions(context).start, adopted: true },
+            targetBase: { ref: "refs/heads/main", oid: advanced },
+            reconcileApproval: async () => ({ status: "unknown" }),
+          }),
+        ),
+      ).toEqual({ status: "refused", reason: "approval_state_unknown" });
 
       expect(
         await startImplementationWorker(
@@ -340,6 +355,108 @@ test(
           }),
         ),
       ).toEqual({ status: "refused", reason: "ownership_not_current" });
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
+  "an Agent that changed no source leaves the Job interrupted and keeps the sandbox",
+  async () => {
+    await withSealedRepository(async (context) => {
+      const worker = started(
+        await startImplementationWorker(
+          workerOptions(context, {
+            // 何も編集せずに止まったAgent loop。
+            modelProvider: fauxModelProvider([
+              fauxAssistantMessage(fauxText("I cannot reach the source")),
+            ]),
+          }),
+        ),
+      );
+
+      try {
+        await worker.finished;
+
+        // HANDOFFだけのWIP checkpointは送れても、実装完了とは扱わない。
+        expect(worker.jobStatus()).toBe("interrupted");
+      } finally {
+        await worker.close();
+      }
+
+      // 完了していないJobのsandboxは、cleanでも成功として消さない。
+      expect(
+        await Bun.file(join(worker.worktreePath, "HANDOFF.md")).exists(),
+      ).toBe(true);
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
+  "an approval that changed before the checkpoint is returned from Todo to Triage",
+  async () => {
+    await withSealedRepository(async (context) => {
+      const returned: string[] = [];
+      const worker = started(
+        await startImplementationWorker(
+          workerOptions(context, {
+            // 送信直前の再調停で、承認対象が変わったと確定した場合。
+            reconcileApproval: async () => ({ status: "changed" }),
+            onApprovalChanged: async () => {
+              returned.push("return-to-triage");
+            },
+          }),
+        ),
+      );
+
+      try {
+        await worker.finished;
+
+        expect(returned).toEqual(["return-to-triage"]);
+        expect(worker.jobStatus()).toBe("interrupted");
+        // 承認対象が変わったJobは、遠隔のcanonicalブランチを動かさない。
+        expect(
+          await git(
+            context.repositoryRoot,
+            "ls-remote",
+            context.remote,
+            `refs/heads/${canonicalBranch}`,
+          ),
+        ).toContain(context.canonicalOid);
+      } finally {
+        await worker.close();
+      }
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
+  "an approval that cannot be read before the checkpoint is not returned to Triage",
+  async () => {
+    await withSealedRepository(async (context) => {
+      const returned: string[] = [];
+      const worker = started(
+        await startImplementationWorker(
+          workerOptions(context, {
+            reconcileApproval: async () => ({ status: "unknown" }),
+            onApprovalChanged: async () => {
+              returned.push("return-to-triage");
+            },
+          }),
+        ),
+      );
+
+      try {
+        await worker.finished;
+
+        // 単なる提供元障害で承認を差し戻さない。再読で収束させる。
+        expect(returned).toEqual([]);
+        expect(worker.jobStatus()).toBe("interrupted");
+      } finally {
+        await worker.close();
+      }
     });
   },
   gitTestTimeoutMs,

@@ -43,6 +43,13 @@
       "when": 1786618805000,
       "tag": "0005_return_to_triage_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786618806000,
+      "tag": "0006_linear_progress_outbox",
+      "breakpoints": true
     }
   ]
 }

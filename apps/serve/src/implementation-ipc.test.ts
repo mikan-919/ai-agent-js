@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import type {
   CheckpointRequest,
+  ImplementationResult,
   ImplementationStartEvent,
   ModelStreamRequest,
 } from "@mikan-919/oriel-contracts";
@@ -82,13 +83,20 @@ function fakeService(
   const delivered: string[] = [];
   const modelRequests: ModelStreamRequest[] = [];
   const aborted: string[] = [];
+  const reported: ImplementationResult[] = [];
 
   return {
     accepted,
     delivered,
     modelRequests,
     aborted,
+    reported,
     service: {
+      result: {
+        report: (result: ImplementationResult) => {
+          reported.push(result);
+        },
+      },
       model: {
         // eslint-disable-next-line require-yield
         stream: async function* (request: ModelStreamRequest) {
@@ -186,6 +194,35 @@ test("a refused checkpoint is answered once and never delivered", async () => {
   ]);
 });
 
+test("the explicit implementation result of this Job reaches the completion decision", async () => {
+  const stdin = serveStdin();
+  const { service, reported } = fakeService();
+  const result: ImplementationResult = {
+    type: "implementation.result",
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    stopReason: "error",
+    acted: false,
+    sourceChanged: false,
+    verified: false,
+  };
+
+  await serveOwnedHarnessImplementationIpc(
+    harnessStdout([
+      // 別のJobまたは古い取得IDの結果は、このJobの判断へ入れない。
+      { ...result, jobLeaseId: "job-lease-0" },
+      result,
+    ]),
+    stdin.stream,
+    start,
+    service,
+  );
+
+  expect(reported).toEqual([result]);
+  // 結果には応答を返さない。
+  expect(stdin.written).toEqual([start]);
+});
+
 test("a malformed or credential bearing request is refused without reaching the service", async () => {
   const stdin = serveStdin();
   const { service, accepted } = fakeService();
@@ -256,6 +293,11 @@ test("model requests are streamed back per requestId and stay abortable while ru
     stdin.stream,
     start,
     {
+      result: {
+        report: () => {
+          throw new Error("no result is reported here");
+        },
+      },
       checkpoint: {
         accept: async () => {
           throw new Error("no checkpoint is requested here");

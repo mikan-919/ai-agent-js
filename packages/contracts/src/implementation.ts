@@ -98,7 +98,10 @@ export const checkpointRejectedEventSchema = v.strictObject({
   reason: v.picklist([
     "invalid_request",
     "ownership_not_current",
+    /** 現在値から承認対象が変わったと確定した。 */
     "target_mismatch",
+    /** 承認対象を読めず、変わったかどうかを決められない。 */
+    "approval_state_unknown",
     "remote_diverged",
     "push_failed",
   ]),
@@ -115,6 +118,32 @@ export const checkpointEventSchema = v.variant("type", [
 ]);
 
 export type CheckpointEvent = v.InferOutput<typeof checkpointEventSchema>;
+
+/**
+ * 実装workerの明示的な結果。
+ *
+ * `serve`はharnessのprocess終了だけでJobの完了を決めない。Agent loopがsourceを
+ * 実際に編集したか、設定由来の検証を通したか、どの理由で止まったかをharnessが
+ * 明示し、`serve`がJobを`completed`にしてよいかを判断する。WHAT/HOWの本文や
+ * 会話は載せない。
+ */
+export const implementationResultSchema = v.strictObject({
+  type: v.literal("implementation.result"),
+  jobId: nonEmptyString,
+  jobLeaseId: nonEmptyString,
+  /** 最後のassistant turnの停止理由。`error`と`aborted`は未完了とする。 */
+  stopReason: nonEmptyString,
+  /** Agent loopがtoolを実行したか。 */
+  acted: v.boolean(),
+  /** Agent loopがworktree内のsourceを実際に変えたか。 */
+  sourceChanged: v.boolean(),
+  /** 設定由来の検証commandをすべて通したか。 */
+  verified: v.boolean(),
+});
+
+export type ImplementationResult = v.InferOutput<
+  typeof implementationResultSchema
+>;
 
 /** `serve`からharnessへ流すmessage。 */
 export const implementationServerMessageSchema = v.variant("type", [
@@ -134,6 +163,7 @@ export type ImplementationServerMessage = v.InferOutput<
 /** harnessから`serve`へ流すmessage。用途限定の外部操作要求だけとする。 */
 export const implementationClientMessageSchema = v.variant("type", [
   checkpointRequestSchema,
+  implementationResultSchema,
   modelStreamRequestSchema,
   modelStreamAbortSchema,
 ]);

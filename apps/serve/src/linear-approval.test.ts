@@ -168,3 +168,40 @@ test("the return to Triage resolves the team state by name and never guesses one
   ).toBe(false);
   expect(attempted).toHaveLength(1);
 });
+
+test("the move to In Progress resolves the team state by name and never guesses one", async () => {
+  const sent: Record<string, unknown>[] = [];
+  const states =
+    (nodes: { id: string; name: string }[]) => async (request: Request) => {
+      const body = (await request.json()) as {
+        query: string;
+        variables?: Record<string, unknown>;
+      };
+
+      sent.push(body);
+
+      return body.query.includes("issueUpdate")
+        ? Response.json({ data: { issueUpdate: { success: true } } })
+        : Response.json({ data: { issue: { team: { states: { nodes } } } } });
+    };
+
+  expect(
+    await stateWriter(
+      states([
+        { id: "state-todo", name: "Todo" },
+        { id: "state-progress", name: "In Progress" },
+      ]),
+    ).moveToInProgress(linearIssueId),
+  ).toBe(true);
+  expect(sent[1]?.variables).toEqual({
+    id: linearIssueId,
+    stateId: "state-progress",
+  });
+
+  // In Progress stateを一意に決められないteamでは、別のstateで代替しない。
+  expect(
+    await stateWriter(
+      states([{ id: "state-todo", name: "Todo" }]),
+    ).moveToInProgress(linearIssueId),
+  ).toBe(false);
+});
