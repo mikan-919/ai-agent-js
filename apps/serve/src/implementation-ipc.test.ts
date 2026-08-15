@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type {
   CheckpointRequest,
   ImplementationStartEvent,
+  ModelStreamRequest,
 } from "@mikan-919/oriel-contracts";
 
 import { serveOwnedHarnessImplementationIpc } from "./implementation-ipc";
@@ -20,7 +21,9 @@ const start: ImplementationStartEvent = {
   canonicalBranch: `oriel/ENG-12-gh-28-${digest}`,
   canonicalOid: sealedOid,
   worktreePath: "/worktrees/job",
+  worktreeOid: sealedOid,
   adopted: false,
+  model: { provider: "lm-studio", id: "local-model" },
   what: { title: "WHAT title", body: "WHAT body" },
   how: { title: "HOW title", description: "HOW description" },
   verification: [["bun", "test"]],
@@ -77,41 +80,57 @@ function fakeService(
 ) {
   const accepted: CheckpointRequest[] = [];
   const delivered: string[] = [];
+  const modelRequests: ModelStreamRequest[] = [];
+  const aborted: string[] = [];
 
   return {
     accepted,
     delivered,
+    modelRequests,
+    aborted,
     service: {
-      accept: async (request: CheckpointRequest) => {
-        accepted.push(request);
-
-        return acceptance === "accepted"
-          ? ({
-              type: "checkpoint.accepted",
-              requestId: request.requestId,
-              operationId: "operation-1",
-            } as const)
-          : ({
-              type: "checkpoint.rejected",
-              requestId: request.requestId,
-              reason: "ownership_not_current",
-            } as const);
+      model: {
+        // eslint-disable-next-line require-yield
+        stream: async function* (request: ModelStreamRequest) {
+          modelRequests.push(request);
+          throw new Error("this test does not reach the provider");
+        },
+        abort: (requestId: string) => {
+          aborted.push(requestId);
+        },
       },
-      deliver: async (operationId: string) => {
-        delivered.push(operationId);
+      checkpoint: {
+        accept: async (request: CheckpointRequest) => {
+          accepted.push(request);
 
-        return outcome === "completed"
-          ? ({
-              type: "checkpoint.completed",
-              requestId: "checkpoint-1",
-              operationId,
-              canonicalOid: headOid,
-            } as const)
-          : ({
-              type: "checkpoint.rejected",
-              requestId: "checkpoint-1",
-              reason: "remote_diverged",
-            } as const);
+          return acceptance === "accepted"
+            ? ({
+                type: "checkpoint.accepted",
+                requestId: request.requestId,
+                operationId: "operation-1",
+              } as const)
+            : ({
+                type: "checkpoint.rejected",
+                requestId: request.requestId,
+                reason: "ownership_not_current",
+              } as const);
+        },
+        deliver: async (operationId: string) => {
+          delivered.push(operationId);
+
+          return outcome === "completed"
+            ? ({
+                type: "checkpoint.completed",
+                requestId: "checkpoint-1",
+                operationId,
+                canonicalOid: headOid,
+              } as const)
+            : ({
+                type: "checkpoint.rejected",
+                requestId: "checkpoint-1",
+                reason: "remote_diverged",
+              } as const);
+        },
       },
     },
   };
@@ -213,4 +232,71 @@ test("losing ownership closes the request path before the harness is served", as
 
   expect(accepted).toEqual([]);
   expect(stdin.written).toEqual([start]);
+});
+
+test("model requests are streamed back per requestId and stay abortable while running", async () => {
+  const stdin = serveStdin();
+  const requests: ModelStreamRequest[] = [];
+  const aborted: string[] = [];
+  const modelRequest: ModelStreamRequest = {
+    type: "model.stream.request",
+    requestId: "model-1",
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    provider: "lm-studio",
+    model: "local-model",
+    context: { messages: [] },
+  };
+
+  await serveOwnedHarnessImplementationIpc(
+    harnessStdout([
+      modelRequest,
+      { type: "model.stream.abort", requestId: "model-1" },
+    ]),
+    stdin.stream,
+    start,
+    {
+      checkpoint: {
+        accept: async () => {
+          throw new Error("no checkpoint is requested here");
+        },
+        deliver: async () => {
+          throw new Error("no checkpoint is delivered here");
+        },
+      },
+      model: {
+        stream: async function* (request: ModelStreamRequest) {
+          requests.push(request);
+
+          // provider eventは別形式へ変換せず、そのまま運ぶ。
+          yield {
+            type: "model.stream.event",
+            requestId: request.requestId,
+            event: { type: "start" },
+          } as const;
+          yield {
+            type: "model.stream.end",
+            requestId: request.requestId,
+          } as const;
+        },
+        abort: (requestId: string) => {
+          aborted.push(requestId);
+        },
+      },
+    },
+  );
+
+  // 論理識別子とJob取得IDだけが渡り、credentialは経路に存在しない。
+  expect(requests).toEqual([modelRequest]);
+  // 中止messageはstreamの完了を待たずに届く。
+  expect(aborted).toEqual(["model-1"]);
+  expect(stdin.written).toEqual([
+    start,
+    {
+      type: "model.stream.event",
+      requestId: "model-1",
+      event: { type: "start" },
+    },
+    { type: "model.stream.end", requestId: "model-1" },
+  ]);
 });

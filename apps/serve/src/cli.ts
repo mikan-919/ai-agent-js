@@ -14,9 +14,15 @@ import { startIssueConversationJob } from "./issue-conversation-job";
 import {
   bunSecretsLinearToken,
   createLinearApprovalReader,
+  createLinearApprovalStateWriter,
 } from "./linear-approval";
 import { openServeLocalState } from "./local-state";
 import { createPendingCancellationStore } from "./pending-cancellations";
+import {
+  bunSecretsModelCredential,
+  createPiModelStreamProvider,
+  createServeModels,
+} from "./pi-model-provider";
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
 
@@ -47,6 +53,19 @@ if (Bun.argv[2] === "serve") {
   const canonicalRemote =
     Bun.env[`${identity.environmentPrefix}CANONICAL_REMOTE`] ?? "origin";
   const tokenStore = bunSecretsDeviceTokenStore();
+  /**
+   * Agent loopが使う提供元とmodelの論理識別子。
+   *
+   * 利用者固有のlocal設定であり、repositoryの実行設定には置かない。接続先、
+   * 認証情報、互換性設定は`serve`だけが持ち、harnessへは渡さない。modelを
+   * 利用できない場合は別のmodelへ暗黙に切り替えず実行を止める。
+   */
+  const modelProviderId =
+    Bun.env[`${identity.environmentPrefix}MODEL_PROVIDER`];
+  const modelId = Bun.env[`${identity.environmentPrefix}MODEL_ID`];
+  const models = createServeModels({
+    lmStudioBaseUrl: Bun.env[`${identity.environmentPrefix}LM_STUDIO_BASE_URL`],
+  });
   const relayDeviceClient =
     environment === undefined
       ? undefined
@@ -65,7 +84,10 @@ if (Bun.argv[2] === "serve") {
       repositoryId !== undefined &&
       // worktreeを開けない構成では、実装Jobを始めない。
       repositoryRoot !== undefined &&
-      worktreesRoot !== undefined
+      worktreesRoot !== undefined &&
+      // modelを選べない構成でも、暗黙の既定値を置かずに始めない。
+      modelProviderId !== undefined &&
+      modelId !== undefined
         ? ({ linearIssueId }) =>
             startImplementationJob({
               relayOrigin: environment,
@@ -110,6 +132,37 @@ if (Bun.argv[2] === "serve") {
                 tokenStore,
                 repositoryId,
               }),
+              model: { provider: modelProviderId, id: modelId },
+              // 提供元への接続とcredentialの解決は`serve`の内側だけで行う。
+              modelProvider: createPiModelStreamProvider({
+                models,
+                resolveApiKey: (provider) =>
+                  bunSecretsModelCredential(provider).get(),
+              }),
+              // 承認対象の不一致を、所有権を確認した`serve`だけがLinearへ反映する。
+              linearApprovalState: {
+                readLinearState: async (issueId) => {
+                  const linearToken =
+                    await bunSecretsLinearToken(repositoryId).get();
+
+                  return linearToken === null
+                    ? null
+                    : createLinearApprovalStateWriter({
+                        token: linearToken,
+                      }).readLinearState(issueId);
+                },
+                moveToTriage: async (issueId) => {
+                  const linearToken =
+                    await bunSecretsLinearToken(repositoryId).get();
+
+                  return (
+                    linearToken !== null &&
+                    createLinearApprovalStateWriter({
+                      token: linearToken,
+                    }).moveToTriage(issueId)
+                  );
+                },
+              },
             })
         : undefined,
     startIssueConversation: conversationReady

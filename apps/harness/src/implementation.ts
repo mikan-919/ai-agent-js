@@ -9,6 +9,7 @@ import {
 } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 
+import type { ImplementationAgent, ImplementationAgentOutcome } from "./agent";
 import type { LocalGit } from "./git";
 
 export interface ImplementationTransport {
@@ -23,6 +24,7 @@ export interface VerificationRun {
 }
 
 export interface ImplementationOutcome {
+  agent: ImplementationAgentOutcome;
   verification: VerificationRun[];
   verified: boolean;
   committed: boolean;
@@ -35,6 +37,8 @@ export interface ImplementationWorkerOptions {
   start: ImplementationStartEvent;
   transport: ImplementationTransport;
   git: LocalGit;
+  /** 承認済みWHAT/HOWからworktree内のsourceを実際に編集するAgent loop。 */
+  agent: ImplementationAgent;
   /** worktree内でbuildやtestを走らせる。credentialは渡さない。 */
   runCommand: (
     command: string[],
@@ -46,26 +50,31 @@ export interface ImplementationWorkerOptions {
 /**
  * 実装worker。
  *
- * `serve`が封印したcanonicalブランチのworktreeだけを対象に、検証、HANDOFF、
- * commitをローカルで行い、外部への送信は`serve`のcheckpoint操作としてだけ
- * 要求する。credentialは持たず、遠隔Gitへ直接触れない。
+ * `serve`が封印したcanonicalブランチのworktreeだけを対象に、承認済みWHAT/HOWから
+ * Agent loopでsourceを編集し、そのうえで検証、HANDOFF、commitをローカルで行う。
+ * 外部への送信は`serve`のcheckpoint操作としてだけ要求する。credentialは持たず、
+ * 遠隔Gitへ直接触れない。
  */
 export async function runImplementationWorker({
   start,
   transport,
   git,
+  agent,
   runCommand,
   writeFile = (path, content) => writeFileToDisk(path, content),
 }: ImplementationWorkerOptions): Promise<ImplementationOutcome> {
   const worktree = start.worktreePath;
-  const sealedHead = await readHead(git, worktree);
+  const startingHead = await readHead(git, worktree);
 
-  // 封印または引き継ぎで確認した先端でなければ、何も始めない。
-  if (sealedHead !== start.canonicalOid) {
+  // 封印、引き継ぎ、または取り込み先の統合で確認した先端でなければ何も始めない。
+  if (startingHead !== start.worktreeOid) {
     throw new Error(
       "the worktree is not at the canonical tip the approval sealed",
     );
   }
+
+  // 承認済みWHAT/HOWからの実装。commitとcheckpointはこの後でharnessが行う。
+  const agentOutcome = await agent.run(start);
 
   // 引き継いだ先端も未検証の作業途中成果として、検証を最初からやり直す。
   const verification: VerificationRun[] = [];
@@ -80,17 +89,26 @@ export async function runImplementationWorker({
     }
   }
 
+  /**
+   * 検証commandは取り込み先branchの`.oriel.yaml`だけを正本にする。一つも実行
+   * していない状態をverified扱いにしない。
+   */
   const verified =
+    start.verification.length > 0 &&
     verification.length === start.verification.length &&
     verification.every((run) => run.ok);
 
-  await writeFile(join(worktree, "HANDOFF.md"), handoff(start, verification));
+  await writeFile(
+    join(worktree, "HANDOFF.md"),
+    handoff(start, verification, agentOutcome),
+  );
 
   const committed = await commitWorkInProgress(git, worktree, verified);
   const headOid = await readHead(git, worktree);
 
-  if (!committed || headOid === start.canonicalOid) {
+  if (!committed || headOid === start.worktreeOid) {
     return {
+      agent: agentOutcome,
       verification,
       verified,
       committed: false,
@@ -119,6 +137,7 @@ export async function runImplementationWorker({
 
   if (accepted.type !== "checkpoint.accepted") {
     return {
+      agent: agentOutcome,
       verification,
       verified,
       committed: true,
@@ -133,6 +152,7 @@ export async function runImplementationWorker({
 
   // 結果不明の再送はharnessではなく`serve`の収束規則が担う。
   return {
+    agent: agentOutcome,
     verification,
     verified,
     committed: true,
@@ -207,10 +227,14 @@ async function commitWorkInProgress(
 function handoff(
   start: ImplementationStartEvent,
   verification: VerificationRun[],
+  agent: ImplementationAgentOutcome,
 ): string {
   const failing = verification.filter((run) => !run.ok);
   const pending = start.verification.slice(verification.length);
   const unresolved = [
+    ...(agent.stopReason === "stop"
+      ? []
+      : [`- 未完了のAgent turn: 停止理由は\`${agent.stopReason}\``]),
     ...failing.map((run) => `- 失敗中の検証: \`${run.command.join(" ")}\``),
     ...pending.map((run) => `- 未実行の検証: \`${run.join(" ")}\``),
   ];

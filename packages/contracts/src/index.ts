@@ -96,5 +96,7 @@ export function parseIssueCommentEvent(value: unknown): IssueCommentEvent {
 }
 
 export * from "./device-registration";
+export * from "./execution-config";
 export * from "./github";
 export * from "./implementation";
+export * from "./model-stream";

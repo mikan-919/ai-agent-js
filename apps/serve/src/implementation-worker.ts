@@ -12,9 +12,17 @@ import {
   type CheckpointBinding,
 } from "./checkpoint-push";
 import type { GitCredential } from "./git";
-import { serveOwnedHarnessImplementationIpc } from "./implementation-ipc";
+import {
+  serveOwnedHarnessImplementationIpc,
+  type CheckpointOperations,
+} from "./implementation-ipc";
 import { createJobStateStore } from "./job-state";
 import { openServeLocalState } from "./local-state";
+import {
+  createModelStreamService,
+  type ModelStreamProvider,
+} from "./model-stream";
+import { integrateTargetBase } from "./target-base-integration";
 
 export interface StartImplementationWorkerOptions {
   databasePath: string;
@@ -26,26 +34,43 @@ export interface StartImplementationWorkerOptions {
   ownership: BranchOwnershipVerifier & { readonly stopSignal?: AbortSignal };
   binding: CheckpointBinding;
   /** worktreeを開いた後にharnessへ渡すstart event。 */
-  start: Omit<ImplementationStartEvent, "worktreePath">;
+  start: Omit<ImplementationStartEvent, "worktreePath" | "worktreeOid">;
+  /** 引き継ぎで統合する取り込み先Git参照と、承認で確認したその現在OID。 */
+  targetBase: { ref: string; oid: string };
+  /** 提供元への接続とcredentialの解決。harnessへは渡さない。 */
+  modelProvider: ModelStreamProvider;
   reconcileApprovalFingerprint: () => Promise<string | null>;
   resolveCredential: () => Promise<GitCredential | null>;
   release: () => void;
 }
 
 export interface ImplementationWorker {
+  status: "started";
   worktreePath: string;
+  /** worktreeの現在の先端。統合した場合は遠隔のcanonical先端より進む。 */
+  worktreeOid: string;
   finished: Promise<void>;
   jobStatus(): string | null;
   close(): Promise<void>;
 }
 
+export type ImplementationWorkerRefusalReason =
+  | "canonical_worktree_unavailable"
+  | "target_base_not_integrated"
+  | "approval_changed"
+  | "ownership_not_current";
+
+export type StartImplementationWorkerResult =
+  | ImplementationWorker
+  | { status: "refused"; reason: ImplementationWorkerRefusalReason };
+
 /**
  * 実装Jobのworker。
  *
- * 封印済みcanonicalブランチのworktreeを開き、credentialを持たないharness
- * processへその一つのworktreeと承認済みWHAT/HOWだけを渡す。遠隔Gitへの送信は
- * `serve`のcheckpoint操作としてだけ通し、所有権を失えばworkerを止める。
- * worktreeを開けない場合はworkerを起動せずnullを返す。
+ * 封印済みcanonicalブランチのworktreeを開き、引き継ぎでは最新の取り込み先を統合
+ * してから承認と所有権を確認し直す。そのうえで、credentialを持たないharness
+ * processへその一つのworktreeと承認済みWHAT/HOWだけを渡す。modelへの要求も遠隔
+ * Gitへの送信も`serve`の用途限定操作としてだけ通し、所有権を失えばworkerを止める。
  */
 export async function startImplementationWorker({
   databasePath,
@@ -56,10 +81,13 @@ export async function startImplementationWorker({
   ownership,
   binding,
   start,
+  targetBase,
+  modelProvider,
   reconcileApprovalFingerprint,
   resolveCredential,
   release,
-}: StartImplementationWorkerOptions): Promise<ImplementationWorker | null> {
+}: StartImplementationWorkerOptions): Promise<StartImplementationWorkerResult> {
+  const credential = await resolveCredential();
   const worktree: CanonicalWorktree | null = await openCanonicalWorktree({
     repositoryRoot,
     worktreesRoot,
@@ -67,16 +95,67 @@ export async function startImplementationWorker({
     canonicalBranch: start.canonicalBranch,
     canonicalOid: start.canonicalOid,
     remote,
-    credential: await resolveCredential(),
+    credential,
   });
 
   if (worktree === null) {
-    return null;
+    return { status: "refused", reason: "canonical_worktree_unavailable" };
+  }
+
+  const refuse = async (
+    reason: ImplementationWorkerRefusalReason,
+  ): Promise<StartImplementationWorkerResult> => {
+    // 統合や再確認に失敗したsandboxは、復元可能でcleanなときだけ消える。
+    await worktree.remove([start.canonicalOid]);
+
+    return { status: "refused", reason };
+  };
+
+  let worktreeOid = start.canonicalOid;
+
+  if (start.adopted) {
+    // ADR 0004: 取り込み先の前進は承認を失効させない。統合して再検証する。
+    const integrated = await integrateTargetBase({
+      worktreePath: worktree.path,
+      remote,
+      targetBaseRef: targetBase.ref,
+      targetBaseOid: targetBase.oid,
+      credential,
+    });
+
+    if (integrated.status !== "integrated") {
+      return refuse("target_base_not_integrated");
+    }
+
+    worktreeOid = integrated.headOid;
+
+    // 統合の後にも、承認対象と現在の取得IDをもう一度確かめる。
+    const fingerprint = await reconcileApprovalFingerprint().catch(() => null);
+
+    if (fingerprint !== binding.approvalFingerprint) {
+      return refuse("approval_changed");
+    }
+
+    const current =
+      (await ownership.hasCurrentJobOwnership({
+        jobId: binding.jobId,
+        jobLeaseId: binding.jobLeaseId,
+        repository: binding.repository,
+        issueNumber: binding.issueNumber,
+      })) &&
+      (await ownership.hasCurrentBranchExclusivity(
+        binding.branchKey,
+        binding.branchLeaseId,
+      ));
+
+    if (!current) {
+      return refuse("ownership_not_current");
+    }
   }
 
   const database = openServeLocalState(databasePath);
   const jobState = createJobStateStore(database);
-  const service = createCheckpointService({
+  const checkpoints = createCheckpointService({
     outbox: createCheckpointOutbox(database),
     binding,
     ownership,
@@ -84,6 +163,17 @@ export async function startImplementationWorker({
     resolveCredential,
     push: (input) =>
       pushCheckpoint({ ...input, worktreePath: worktree.path, remote }),
+  });
+  const models = createModelStreamService({
+    binding: {
+      jobId: binding.jobId,
+      jobLeaseId: binding.jobLeaseId,
+      model: start.model,
+      repository: binding.repository,
+      issueNumber: binding.issueNumber,
+    },
+    ownership,
+    provider: modelProvider,
   });
 
   // harnessへはcredentialを渡さない。承認済みの対象だけをstdinのstart eventで渡す。
@@ -113,15 +203,53 @@ export async function startImplementationWorker({
   );
   const stopHarness = () => harness.kill();
   let running = !(ownership.stopSignal?.aborted ?? false);
+  /** 遠隔から復元できると確認済みの先端。sandboxの削除条件に使う。 */
+  const restorable = [start.canonicalOid];
+  let checkpointRefused = false;
 
-  jobState.set(binding.jobId, running ? "running" : "interrupted");
-  ownership.stopSignal?.addEventListener("abort", stopHarness, { once: true });
-  ownership.stopSignal?.addEventListener("abort", () => {
+  const interrupt = () => {
     if (running) {
       running = false;
       jobState.set(binding.jobId, "interrupted");
     }
-  });
+  };
+
+  jobState.set(binding.jobId, running ? "running" : "interrupted");
+  ownership.stopSignal?.addEventListener("abort", stopHarness, { once: true });
+  ownership.stopSignal?.addEventListener("abort", interrupt);
+
+  /**
+   * checkpointの結果を観測する。
+   *
+   * 拒否、送信失敗、所有権喪失ではJobを完了にせず、workerを止めて未検証の
+   * 作業途中成果をworktreeへ残す。
+   */
+  const observed: CheckpointOperations = {
+    async accept(request) {
+      const event = await checkpoints.accept(request);
+
+      if (event.type === "checkpoint.rejected") {
+        checkpointRefused = true;
+        interrupt();
+        stopHarness();
+      }
+
+      return event;
+    },
+    async deliver(operationId) {
+      const event = await checkpoints.deliver(operationId);
+
+      if (event.type === "checkpoint.completed") {
+        restorable.push(event.canonicalOid);
+      } else {
+        checkpointRefused = true;
+        interrupt();
+        stopHarness();
+      }
+
+      return event;
+    },
+  };
 
   const serving = serveOwnedHarnessImplementationIpc(
     harness.stdout,
@@ -134,8 +262,8 @@ export async function startImplementationWorker({
         harness.stdin.end();
       },
     }),
-    { ...start, worktreePath: worktree.path },
-    service,
+    { ...start, worktreePath: worktree.path, worktreeOid },
+    { checkpoint: observed, model: models },
     ownership.stopSignal,
   );
 
@@ -143,15 +271,22 @@ export async function startImplementationWorker({
   let closed = false;
 
   return {
+    status: "started",
     worktreePath: worktree.path,
+    worktreeOid,
     finished: serving.then(async () => {
       const exitCode = await harness.exited;
 
-      // 所有権を失っていない正常終了だけを`completed`にする。
-      if (running && exitCode === 0) {
-        running = false;
-        jobState.set(binding.jobId, "completed");
+      if (!running) {
+        return;
       }
+
+      running = false;
+      // 所有権を保ち、checkpointも拒否されていない正常終了だけを`completed`にする。
+      jobState.set(
+        binding.jobId,
+        exitCode === 0 && !checkpointRefused ? "completed" : "interrupted",
+      );
     }),
     jobStatus: () => (closed ? lastJobStatus : jobState.get(binding.jobId)),
     async close() {
@@ -167,7 +302,7 @@ export async function startImplementationWorker({
       release();
       database.close();
       // 復元可能でcleanなsandboxだけを消す。
-      await worktree.remove();
+      await worktree.remove(restorable);
     },
   };
 }

@@ -16,8 +16,10 @@ import type {
 } from "./implementation-admission";
 import { startImplementationJob } from "./implementation-job";
 import type { StartImplementationWorkerOptions } from "./implementation-worker";
+import { openServeLocalState } from "./local-state";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
+import type { LinearApprovalStatePorts } from "./return-to-triage";
 
 const deviceToken = "7.11.device-token";
 const repositoryId = 11;
@@ -70,10 +72,22 @@ function fakeOctokit(published: { bodies: string[] }) {
   } as unknown as Octokit;
 }
 
+/** 取り込み先branchに置かれた、自立Jobを許可する実行設定。 */
+const autonomousConfig = `schemaVersion: 1
+execution:
+  backend: worktree
+  autonomous: true
+  verification:
+    - ["bun", "run", "typecheck"]
+    - ["bun", "test"]
+`;
+
 /** 読み直しのたびに現在値を差し替えられるports。呼び出し順も記録する。 */
 function fakePorts(
   options: {
     githubTitleByRead?: (read: number) => string;
+    /** 取り込み先branchの`.oriel.yaml`。読めない場合を不存在と区別する。 */
+    executionConfig?: string | "absent" | "unreadable";
     targetBaseOidByRead?: (read: number) => string;
     stateName?: string;
     seal?: SealOutcome;
@@ -96,7 +110,21 @@ function fakePorts(
     refs[`refs/heads/${canonicalBranch}`] = options.existingCanonicalOid;
   }
 
+  const configFileReads: { oid: string; path: string }[] = [];
   const ports: ImplementationApprovalPorts = {
+    readTargetBaseFile: async (oid, path) => {
+      configFileReads.push({ oid, path });
+
+      const configured = options.executionConfig ?? autonomousConfig;
+
+      if (configured === "absent") {
+        return { status: "absent" };
+      }
+
+      return configured === "unreadable"
+        ? { status: "unknown" }
+        : { status: "present", content: configured };
+    },
     readLinearIssue: async () => {
       reads += 1;
       calls.push(`read:${reads}`);
@@ -153,7 +181,35 @@ function fakePorts(
     },
   };
 
-  return { ports, calls, refs };
+  return { ports, calls, refs, configFileReads };
+}
+
+/** Linear stateの現在値と、差し戻しのattemptを記録するfake。 */
+function fakeLinearState({
+  movable = true,
+  stateName = "Todo" as string | null,
+} = {}) {
+  const moves: string[] = [];
+  let current = stateName;
+
+  return {
+    moves,
+    state: () => current,
+    ports: {
+      readLinearState: async () => current,
+      moveToTriage: async (linearIssueId: string) => {
+        moves.push(linearIssueId);
+
+        if (!movable) {
+          return false;
+        }
+
+        current = "Triage";
+
+        return true;
+      },
+    },
+  };
 }
 
 async function withWorkspace<T>(run: (databasePath: string) => Promise<T>) {
@@ -175,7 +231,9 @@ function fakeWorker(started: StartImplementationWorkerOptions[]) {
     started.push(workerOptions);
 
     return {
+      status: "started" as const,
       worktreePath: "/worktrees/job",
+      worktreeOid: workerOptions.start.canonicalOid,
       finished: Promise.resolve(),
       jobStatus: () => "running",
       close: async () => {
@@ -185,13 +243,25 @@ function fakeWorker(started: StartImplementationWorkerOptions[]) {
   };
 }
 
+/** `serve`だけが持つ提供元への接続。harnessへは渡らない。 */
+const modelProvider = {
+  // eslint-disable-next-line require-yield
+  stream: async function* () {
+    throw new Error("no model is reachable in this test");
+  },
+};
+
 function options(
   databasePath: string,
   relayOrigin: string,
   ports: ImplementationApprovalPorts,
   startedWorkers: StartImplementationWorkerOptions[] = [],
+  linearApprovalState: LinearApprovalStatePorts = fakeLinearState().ports,
 ) {
   return {
+    model: { provider: "lm-studio", id: "local-model" },
+    modelProvider,
+    linearApprovalState,
     relayOrigin,
     tokenStore: tokenStore(deviceToken),
     createOctokit: async () => fakeOctokit({ bodies: [] }),
@@ -251,9 +321,19 @@ test("a fully admitted approval seals the branch after ownership and only then s
         canonicalBranch,
         canonicalOid: baseOid,
         adopted: false,
+        model: { provider: "lm-studio", id: "local-model" },
         what: { title: "WHAT title", body: "WHAT body" },
         how: { title: "HOW title", description: "HOW description" },
-        verification: [],
+        // 検証commandはtarget branch版の`.oriel.yaml`だけを正本とする。
+        verification: [
+          ["bun", "run", "typecheck"],
+          ["bun", "test"],
+        ],
+      });
+      // 統合と再検証のために、確認した取り込み先の参照とOIDもworkerへ渡す。
+      expect(startedWorkers[0]!.targetBase).toEqual({
+        ref: "refs/heads/main",
+        oid: baseOid,
       });
       expect(startedWorkers[0]!.binding).toMatchObject({
         branchKey: `${repositoryId}/${canonicalBranch}`,
@@ -432,7 +512,12 @@ test("a WHAT that changed after ownership seals nothing and starts no worker", a
         await startImplementationJob(
           options(databasePath, relay.origin, ports),
         ),
-      ).toEqual({ status: "refused", reason: "approval_changed" });
+      ).toEqual({
+        status: "refused",
+        reason: "approval_changed",
+        // 承認対象の不一致は、所有権を確認した`serve`がLinearへ反映する。
+        returnedToTriage: "returned",
+      });
       expect(calls).toEqual(["read:1", "read:2"]);
 
       await Bun.sleep(50);
@@ -457,7 +542,11 @@ test("a WHAT that changed after the seal starts no worker either", async () => {
         await startImplementationJob(
           options(databasePath, relay.origin, ports),
         ),
-      ).toEqual({ status: "refused", reason: "approval_changed" });
+      ).toEqual({
+        status: "refused",
+        reason: "approval_changed",
+        returnedToTriage: "returned",
+      });
       expect(calls).toEqual(["read:1", "read:2", "seal", "read:3"]);
 
       await Bun.sleep(50);
@@ -588,6 +677,198 @@ test("a second implementation Job for the same canonical branch is refused", asy
         first.close();
       }
 
+      relay.stop();
+    }
+  });
+});
+
+test("the execution config is read from the confirmed target base and is the only source of verification", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const advancedBase = "3".repeat(40);
+    // 引き継ぎでは、承認の読み直しで確認した最新の取り込み先の版を読む。
+    const { ports, configFileReads } = fakePorts({
+      existingCanonicalOid: "2".repeat(40),
+      targetBaseOidByRead: (read) => (read < 2 ? baseOid : advancedBase),
+    });
+    const startedWorkers: StartImplementationWorkerOptions[] = [];
+    const started = await startImplementationJob(
+      options(databasePath, relay.origin, ports, startedWorkers),
+    );
+
+    try {
+      expect(started.status).toBe("started");
+      expect(configFileReads).toEqual([
+        { oid: advancedBase, path: ".oriel.yaml" },
+      ]);
+      expect(startedWorkers[0]!.targetBase).toEqual({
+        ref: "refs/heads/main",
+        oid: advancedBase,
+      });
+    } finally {
+      if (started.status === "started") {
+        await started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
+test("a target base without a usable execution config starts no worker", async () => {
+  await withWorkspace(async (databasePath) => {
+    for (const [executionConfig, reason] of [
+      ["absent", "execution_config_missing"],
+      ["unreadable", "execution_config_unreadable"],
+      // backendもautonomousも明示しない設定は既定値で埋めない。
+      ["schemaVersion: 1\n", "execution_config_invalid"],
+      // 自立Jobを明示的に許可していない。
+      [
+        'schemaVersion: 1\nexecution:\n  backend: worktree\n  autonomous: false\n  verification: [["bun", "test"]]\n',
+        "execution_config_invalid",
+      ],
+      // 未知のbackendへfallbackしない。
+      [
+        'schemaVersion: 1\nexecution:\n  backend: docker\n  autonomous: true\n  verification: [["bun", "test"]]\n',
+        "execution_config_invalid",
+      ],
+      // 検証commandが空なら、検証済みになりようがない。
+      [
+        "schemaVersion: 1\nexecution:\n  backend: worktree\n  autonomous: true\n  verification: []\n",
+        "execution_config_invalid",
+      ],
+      // 未知のfieldも既定値で無視しない。
+      [
+        'schemaVersion: 1\nexecution:\n  backend: worktree\n  autonomous: true\n  verification: [["bun", "test"]]\n  network: open\n',
+        "execution_config_invalid",
+      ],
+    ] as const) {
+      const relay = startFakeOwnershipRelay(deviceToken);
+      const { ports } = fakePorts({ executionConfig });
+      const startedWorkers: StartImplementationWorkerOptions[] = [];
+
+      try {
+        expect(
+          await startImplementationJob(
+            options(databasePath, relay.origin, ports, startedWorkers),
+          ),
+        ).toEqual({ status: "refused", reason });
+        expect(startedWorkers).toHaveLength(0);
+
+        await Bun.sleep(50);
+
+        // ブランチ排他、Job所有権の順に返し、接続を残さない。
+        expect(relay.openConnections()).toBe(0);
+      } finally {
+        relay.stop();
+      }
+    }
+  });
+});
+
+test("an approval that no longer matches is returned from Todo to Triage by the owning serve", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const linear = fakeLinearState();
+    const { ports } = fakePorts({
+      githubTitleByRead: (read) => (read === 1 ? "WHAT title" : "changed"),
+    });
+
+    try {
+      expect(
+        await startImplementationJob(
+          options(databasePath, relay.origin, ports, [], linear.ports),
+        ),
+      ).toEqual({
+        status: "refused",
+        reason: "approval_changed",
+        returnedToTriage: "returned",
+      });
+
+      // 差し戻すのは、現在の所有権を確認した`serve`だけである。
+      expect(linear.moves).toEqual([linearIssueId]);
+      expect(linear.state()).toBe("Triage");
+
+      // 送信前の試行が、内部の冪等性キーとして永続化されている。
+      const database = openServeLocalState(databasePath);
+
+      try {
+        expect(
+          database
+            .query(
+              `SELECT operation, linear_issue_id AS linearIssueId, status
+               FROM return_to_triage_outbox`,
+            )
+            .all(),
+        ).toEqual([
+          {
+            operation: "return-to-triage",
+            linearIssueId,
+            status: "returned",
+          },
+        ]);
+      } finally {
+        database.close();
+      }
+
+      await Bun.sleep(50);
+
+      expect(relay.openConnections()).toBe(0);
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("a return to Triage that stays Todo is reported instead of being resent", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const linear = fakeLinearState({ movable: false });
+    const { ports } = fakePorts({
+      githubTitleByRead: (read) => (read === 3 ? "changed" : "WHAT title"),
+    });
+
+    try {
+      expect(
+        await startImplementationJob(
+          options(databasePath, relay.origin, ports, [], linear.ports),
+        ),
+      ).toEqual({
+        status: "refused",
+        reason: "approval_changed",
+        returnedToTriage: "still_todo",
+      });
+      // 自動再送はしない。attemptは一度だけ送る。
+      expect(linear.moves).toEqual([linearIssueId]);
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("a worker that refuses to start releases the ownership and starts nothing", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const { ports } = fakePorts();
+
+    try {
+      expect(
+        await startImplementationJob({
+          ...options(databasePath, relay.origin, ports),
+          startWorker: async () => ({
+            status: "refused" as const,
+            reason: "target_base_not_integrated" as const,
+          }),
+        }),
+      ).toEqual({
+        status: "refused",
+        reason: "target_base_not_integrated",
+      });
+
+      await Bun.sleep(50);
+
+      expect(relay.openConnections()).toBe(0);
+    } finally {
       relay.stop();
     }
   });

@@ -20,7 +20,9 @@ const start = {
   canonicalBranch: `oriel/ENG-12-gh-28-${digest}`,
   canonicalOid: oid,
   worktreePath: "/home/serve/worktrees/implementation-11-28",
+  worktreeOid: oid,
   adopted: false,
+  model: { provider: "lm-studio", id: "local-model" },
   what: { title: "WHAT title", body: "WHAT body" },
   how: { title: "HOW title", description: "HOW description" },
   verification: [

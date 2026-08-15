@@ -4,6 +4,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "valibot": "1.2.0"
+    "valibot": "1.2.0",
+    "yaml": "2.9.0"
   }
 }

@@ -2,6 +2,10 @@ import type { GitHubRepository } from "@mikan-919/oriel-contracts";
 import type { Octokit } from "@octokit/rest";
 
 import type { DeviceTokenStore } from "./device-registration";
+import {
+  loadTargetBaseExecutionConfig,
+  type ExecutionConfigRefusalReason,
+} from "./execution-config";
 import type { GitCredential } from "./git";
 import {
   readImplementationApproval,
@@ -14,10 +18,18 @@ import {
 } from "./implementation-admission";
 import {
   startImplementationWorker,
-  type ImplementationWorker,
+  type ImplementationWorkerRefusalReason,
   type StartImplementationWorkerOptions,
+  type StartImplementationWorkerResult,
 } from "./implementation-worker";
+import { openServeLocalState } from "./local-state";
+import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
+import {
+  returnApprovalToTriage,
+  type LinearApprovalStatePorts,
+  type ReturnToTriageStatus,
+} from "./return-to-triage";
 
 export interface StartImplementationJobOptions {
   relayOrigin: URL | string;
@@ -45,25 +57,36 @@ export interface StartImplementationJobOptions {
   /** canonicalブランチへの送信に使う、実装用途へ絞ったcredentialの解決。 */
   resolveCredential: () => Promise<GitCredential | null>;
   /**
-   * worktree内で順に実行する検証command。repositoryの実行設定はまだ正本を
-   * 持たないため、呼び出し側が明示した分だけを渡す。
+   * `serve`が選んだ提供元とmodelの論理識別子。接続先、認証情報、互換性設定は
+   * `serve`だけが持ち、harnessへは渡さない。
    */
-  verification?: string[][];
+  model: { provider: string; id: string };
+  modelProvider: ModelStreamProvider;
+  /** 承認対象の不一致をLinearへ機械的に反映する境界。 */
+  linearApprovalState: LinearApprovalStatePorts;
   startWorker?: (
     options: StartImplementationWorkerOptions,
-  ) => Promise<ImplementationWorker | null>;
+  ) => Promise<StartImplementationWorkerResult>;
 }
 
 export interface StartImplementationJobRefusal {
   status: "refused";
   reason:
     | ImplementationRefusalReason
+    | ExecutionConfigRefusalReason
+    | ImplementationWorkerRefusalReason
     | "device_not_registered"
     | "github_credentials_unavailable"
     | "linear_credentials_unavailable"
     | "job_ownership_not_acquired"
-    | "branch_not_exclusive"
-    | "canonical_worktree_unavailable";
+    | "branch_not_exclusive";
+  /**
+   * 承認対象の不一致で行った差し戻しの結果。
+   *
+   * `still_todo`はTodoのまま残ったことを表し、自動再送はしない。人間が明示した
+   * 場合だけ、同じ`serve`が新しい試行IDで再試行する。
+   */
+  returnedToTriage?: ReturnToTriageStatus;
 }
 
 export type StartImplementationJobResult =
@@ -107,7 +130,9 @@ export async function startImplementationJob({
   worktreesRoot,
   remote,
   resolveCredential,
-  verification = [],
+  model,
+  modelProvider,
+  linearApprovalState,
   startWorker = startImplementationWorker,
 }: StartImplementationJobOptions): Promise<StartImplementationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
@@ -157,6 +182,42 @@ export async function startImplementationJob({
     return { status: "refused", reason };
   };
 
+  /**
+   * 承認対象の不一致でのTriage差し戻し。
+   *
+   * ADR 0003のとおり、差し戻せるのは現在のJob所有権を確認した`serve`だけであり、
+   * 差し戻しを終えてからブランチ排他、Job所有権の順に返す。リレー、Agent、
+   * harnessはこの経路を持たない。
+   */
+  const refuseApprovalChanged = async (
+    jobLeaseId: string,
+  ): Promise<StartImplementationJobRefusal> => {
+    const database = openServeLocalState(databasePath);
+    let returnedToTriage: ReturnToTriageStatus;
+
+    try {
+      returnedToTriage = await returnApprovalToTriage({
+        database,
+        ownership,
+        ports: linearApprovalState,
+        target: {
+          jobId: approval.jobId,
+          jobLeaseId,
+          repository,
+          issueNumber: approval.githubIssueNumber,
+          linearIssueId: approval.linearIssueId,
+          approvalFingerprint: approval.approvalFingerprint,
+        },
+      });
+    } finally {
+      database.close();
+    }
+
+    ownership.release();
+
+    return { status: "refused", reason: "approval_changed", returnedToTriage };
+  };
+
   // 手順4: ブランチ排他より先に、Workflow全体の置換隔離を事前確認する。
   if (
     !workflowIsFenced(
@@ -191,14 +252,16 @@ export async function startImplementationJob({
       allowTargetBaseAdvance: adopting,
     })
   ) {
-    return refuse("approval_changed");
+    return refuseApprovalChanged(jobLeaseId);
   }
 
   // 手順6と7: 不存在なら比較条件付き作成、既存なら同じ承認指紋の引き継ぎ。
   const sealed = await sealCanonicalBranch(ports, approval, canonicalBefore);
 
   if (sealed.status === "refused") {
-    return refuse(sealed.reason);
+    return sealed.reason === "approval_changed"
+      ? refuseApprovalChanged(jobLeaseId)
+      : refuse(sealed.reason);
   }
 
   // 手順8: 封印後にもう一度読み、すべて一致したときだけworkerを開始する。
@@ -213,7 +276,7 @@ export async function startImplementationJob({
       allowTargetBaseAdvance: adopting,
     })
   ) {
-    return refuse("approval_changed");
+    return refuseApprovalChanged(jobLeaseId);
   }
 
   const canonical = await ports.readRef(approval.canonicalRef);
@@ -223,6 +286,23 @@ export async function startImplementationJob({
     return refuse(
       adopting ? "branch_adoption_unavailable" : "branch_seal_result_unknown",
     );
+  }
+
+  /**
+   * 実行設定は、封印後の読み直しで確認した取り込み先の版だけを信頼する。
+   *
+   * ROADMAPのとおり、`schemaVersion: 1`、`execution.backend: worktree`、
+   * `execution.autonomous: true`を明示した場合だけ自立Jobを開始でき、検証command
+   * もこの設定だけを正本とする。欠落、未知field、未知version、読取不能はすべて
+   * worker開始前にfail closedにする。
+   */
+  const execution = await loadTargetBaseExecutionConfig(
+    ports,
+    third.approval.targetBaseOid,
+  );
+
+  if (execution.status === "refused") {
+    return refuse(execution.reason);
   }
 
   // worker開始直前に、現在のJob・ブランチ取得IDと置換隔離を明示して再確認する。
@@ -275,14 +355,23 @@ export async function startImplementationJob({
       canonicalBranch: approval.canonicalBranch,
       canonicalOid: canonical.oid,
       adopted: sealed.status === "adopted",
+      model,
       // 封印後の読みで一致したWHAT/HOWだけをworkerへ渡す。保存はしない。
       what: { title: third.content.whatTitle, body: third.content.whatBody },
       how: {
         title: third.content.howTitle,
         description: third.content.howDescription,
       },
-      verification,
+      verification: execution.config.execution.verification.map((command) => [
+        ...command,
+      ]),
     },
+    // 引き継ぎで統合する取り込み先と、封印後の読みで確認したその現在OID。
+    targetBase: {
+      ref: third.approval.targetBaseRef,
+      oid: third.approval.targetBaseOid,
+    },
+    modelProvider,
     // 送信の直前に、現在値から承認指紋を導き直す。
     reconcileApprovalFingerprint: () =>
       currentApprovalFingerprint(ports, target, approval),
@@ -292,8 +381,11 @@ export async function startImplementationJob({
     },
   });
 
-  if (worker === null) {
-    return refuse("canonical_worktree_unavailable");
+  // workerが統合または再確認で止まった場合も、同じ規則で所有権を返す。
+  if (worker.status === "refused") {
+    return worker.reason === "approval_changed"
+      ? refuseApprovalChanged(jobLeaseId)
+      : refuse(worker.reason);
   }
 
   return {

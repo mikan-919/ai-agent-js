@@ -213,6 +213,43 @@ export function createGitHubApprovalPorts({
         return { status: "unknown" };
       }
     },
+    /**
+     * 実行設定は取り込み先branchの版だけを信頼する。
+     *
+     * ROADMAPのとおり、Agentが作業branchで変更した設定はそのJobへ適用しない。
+     * 承認の読み直しで確認した取り込み先のcommit OIDから直接読み、読めない場合を
+     * 不存在と区別する。
+     */
+    async readTargetBaseFile(oid, path) {
+      try {
+        const read = (await octokit.graphql(
+          `query($owner: String!, $name: String!, $expression: String!) {
+             repository(owner: $owner, name: $name) {
+               object(expression: $expression) {
+                 ... on Blob { text isBinary }
+               }
+             }
+           }`,
+          { owner, name, expression: `${oid}:${path}` },
+        )) as {
+          repository?: {
+            object?: { text?: string | null; isBinary?: boolean | null } | null;
+          } | null;
+        };
+        const object = read.repository?.object;
+
+        if (object === null || object === undefined) {
+          return { status: "absent" };
+        }
+
+        // blobでない、またはtextとして読めないものを設定として解釈しない。
+        return typeof object.text === "string" && object.isBinary !== true
+          ? { status: "present", content: object.text }
+          : { status: "unknown" };
+      } catch {
+        return { status: "unknown" };
+      }
+    },
     async listOpenPullRequestHeadRefs() {
       try {
         const pulls = (await octokit.paginate(

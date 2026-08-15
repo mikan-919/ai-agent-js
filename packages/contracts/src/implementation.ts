@@ -1,5 +1,13 @@
 import * as v from "valibot";
 
+import {
+  modelStreamAbortSchema,
+  modelStreamEndSchema,
+  modelStreamEventSchema,
+  modelStreamRejectedSchema,
+  modelStreamRequestSchema,
+} from "./model-stream";
+
 const nonEmptyString = v.pipe(v.string(), v.minLength(1));
 const objectId = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/));
 const approvalFingerprint = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/));
@@ -17,12 +25,22 @@ export const implementationStartEventSchema = v.strictObject({
   jobLeaseId: nonEmptyString,
   branchLeaseId: nonEmptyString,
   approvalFingerprint,
-  /** 封印済みcanonicalブランチと、その現在の先端。 */
+  /** 封印済みcanonicalブランチと、遠隔にある現在の先端。 */
   canonicalBranch: nonEmptyString,
   canonicalOid: objectId,
   worktreePath: nonEmptyString,
+  /**
+   * worktreeの現在の先端。引き継ぎで最新の取り込み先を統合した場合、遠隔の
+   * `canonicalOid`より進む。harnessはこの先端から検証をやり直す。
+   */
+  worktreeOid: objectId,
   /** 既存ブランチの引き継ぎでは、先端を未検証の作業途中成果として扱う。 */
   adopted: v.boolean(),
+  /**
+   * `serve`が選んだ提供元とmodelの論理識別子。接続先、認証情報、互換性設定は
+   * `serve`が正本として持ち、harnessへは渡さない。
+   */
+  model: v.strictObject({ provider: nonEmptyString, id: nonEmptyString }),
   what: v.strictObject({ title: nonEmptyString, body: v.string() }),
   how: v.strictObject({ title: nonEmptyString, description: v.string() }),
   /**
@@ -104,6 +122,9 @@ export const implementationServerMessageSchema = v.variant("type", [
   checkpointAcceptedEventSchema,
   checkpointCompletedEventSchema,
   checkpointRejectedEventSchema,
+  modelStreamEventSchema,
+  modelStreamEndSchema,
+  modelStreamRejectedSchema,
 ]);
 
 export type ImplementationServerMessage = v.InferOutput<
@@ -113,6 +134,8 @@ export type ImplementationServerMessage = v.InferOutput<
 /** harnessから`serve`へ流すmessage。用途限定の外部操作要求だけとする。 */
 export const implementationClientMessageSchema = v.variant("type", [
   checkpointRequestSchema,
+  modelStreamRequestSchema,
+  modelStreamAbortSchema,
 ]);
 
 export type ImplementationClientMessage = v.InferOutput<

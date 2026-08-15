@@ -147,3 +147,43 @@ test("the atomic seal reports what happened without any weaker fallback", async 
     }).updateRefsAtomically(sealInput),
   ).toBe("unknown");
 });
+
+test("the execution config is read from the confirmed target base commit only", async () => {
+  const expressions: unknown[] = [];
+  const reader = ports(async (_query, variables) => {
+    expressions.push(variables.expression);
+
+    return {
+      repository: {
+        object: { text: "schemaVersion: 1\n", isBinary: false },
+      },
+    };
+  });
+
+  expect(await reader.readTargetBaseFile(baseOid, ".oriel.yaml")).toEqual({
+    status: "present",
+    content: "schemaVersion: 1\n",
+  });
+  // 作業branchの版ではなく、承認で確認した取り込み先のcommitだけを読む。
+  expect(expressions).toEqual([`${baseOid}:.oriel.yaml`]);
+
+  // 設定が置かれていないrepositoryは不存在として扱う。
+  expect(
+    await ports(async () => ({
+      repository: { object: null },
+    })).readTargetBaseFile(baseOid, ".oriel.yaml"),
+  ).toEqual({ status: "absent" });
+
+  // blobでない、textを読めない、または読み取り自体が失敗した場合は不存在にしない。
+  expect(
+    await ports(async () => ({
+      repository: { object: { isBinary: true } },
+    })).readTargetBaseFile(baseOid, ".oriel.yaml"),
+  ).toEqual({ status: "unknown" });
+
+  expect(
+    await ports(async () => {
+      throw new Error("fetch failed");
+    }).readTargetBaseFile(baseOid, ".oriel.yaml"),
+  ).toEqual({ status: "unknown" });
+});

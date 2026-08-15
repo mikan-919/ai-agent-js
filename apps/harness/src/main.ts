@@ -3,12 +3,16 @@ import {
   type ImplementationClientMessage,
 } from "@mikan-919/oriel-contracts";
 
+import { createImplementationAgent } from "./agent";
 import { systemLocalGit } from "./git";
 import { runImplementationWorker } from "./implementation";
+import { createHarnessMessageRouter } from "./ipc";
 import {
   createNdjsonIssueCommentOperationClient,
   postIssueConversationReply,
 } from "./issue-conversation";
+import { createProxyStreamFn, type ModelStreamChannel } from "./model-channel";
+import { createWorktreeTools } from "./worktree-tools";
 
 /**
  * Job単位のharness process。credentialを持たず、`serve`が与えた対象と取得IDの
@@ -28,8 +32,7 @@ function argument(name: string): string {
 
 const decoder = new TextDecoder();
 let buffer = "";
-const pending: ((value: unknown) => void)[] = [];
-const received: unknown[] = [];
+const router = createHarnessMessageRouter();
 
 // stdinのNDJSONを読み、要求の対応付けだけをここで行う。
 void (async () => {
@@ -39,28 +42,18 @@ void (async () => {
     buffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      if (line === "") {
-        continue;
-      }
-
-      const event = JSON.parse(line) as unknown;
-      const resolve = pending.shift();
-
-      if (resolve === undefined) {
-        received.push(event);
-      } else {
-        resolve(event);
+      if (line !== "") {
+        router.deliver(JSON.parse(line) as unknown);
       }
     }
   }
+
+  // 切断は待ち続けるturnを残さない。
+  router.close();
 })();
 
 function read(): Promise<unknown> {
-  const buffered = received.shift();
-
-  return buffered === undefined
-    ? new Promise<unknown>((resolve) => pending.push(resolve))
-    : Promise.resolve(buffered);
+  return router.read();
 }
 
 function write(message: unknown) {
@@ -69,9 +62,40 @@ function write(message: unknown) {
 
 const mode = Bun.argv.includes("--mode") ? argument("mode") : "issue";
 
+const runCommand = async (command: string[], cwd: string) => {
+  const [executable, ...args] = command;
+  const spawned = Bun.spawn([executable!, ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    // `serve`がharnessへ渡した時点でcredentialは含まれていない。
+    env: { ...Bun.env },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(spawned.stdout).text(),
+    new Response(spawned.stderr).text(),
+    spawned.exited,
+  ]);
+
+  return { ok: exitCode === 0, output: `${stdout}${stderr}` };
+};
+
 if (mode === "implementation") {
   // 封印済みworktreeと承認済みWHAT/HOWだけをstart eventとして受け取る。
   const start = parseImplementationStartEvent(await read());
+  // modelへの要求は`serve`のmodel stream操作へ中継する。credentialは持たない。
+  const channel: ModelStreamChannel = {
+    open(request) {
+      const stream = router.open(request.requestId);
+
+      write(request);
+
+      return stream;
+    },
+    abort(requestId) {
+      write({ type: "model.stream.abort", requestId });
+    },
+  };
   const outcome = await runImplementationWorker({
     start,
     transport: {
@@ -81,27 +105,23 @@ if (mode === "implementation") {
       read,
     },
     git: systemLocalGit,
-    runCommand: async (command, cwd) => {
-      const [executable, ...args] = command;
-      const spawned = Bun.spawn([executable!, ...args], {
-        cwd,
-        stdout: "pipe",
-        stderr: "pipe",
-        // `serve`がharnessへ渡した時点でcredentialは含まれていない。
-        env: { ...Bun.env },
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(spawned.stdout).text(),
-        new Response(spawned.stderr).text(),
-        spawned.exited,
-      ]);
-
-      return { ok: exitCode === 0, output: `${stdout}${stderr}` };
-    },
+    agent: createImplementationAgent({
+      streamFn: createProxyStreamFn({
+        jobId: start.jobId,
+        jobLeaseId: start.jobLeaseId,
+        model: start.model,
+        channel,
+      }),
+      tools: createWorktreeTools({
+        worktreePath: start.worktreePath,
+        runCommand,
+      }),
+    }),
+    runCommand,
   });
 
   process.stderr.write(
-    `implementation ${outcome.checkpoint} verified=${outcome.verified}\n`,
+    `implementation ${outcome.checkpoint} verified=${outcome.verified} agent=${outcome.agent.stopReason}\n`,
   );
   process.exit(outcome.checkpoint === "rejected" ? 1 : 0);
 }

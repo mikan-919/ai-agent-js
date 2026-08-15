@@ -22,6 +22,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p apps/relay",
     "test:relay": "node node_modules/vitest/vitest.mjs run --root apps/relay"
   },
+  "overrides": {
+    "@earendil-works/pi-ai": "0.84.1"
+  },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.3",
     "@cloudflare/workers-types": "4.20251117.0",

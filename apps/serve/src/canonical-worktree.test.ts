@@ -137,7 +137,7 @@ test(
           ),
         ).toContain(headOid);
       } finally {
-        await worktree.remove();
+        await worktree.remove([context.canonicalOid]);
       }
     });
   },
@@ -234,8 +234,52 @@ test(
           }),
         ).toEqual({ status: "diverged", canonicalOid: otherOid });
       } finally {
-        await worktree.remove();
+        await worktree.remove([context.canonicalOid]);
       }
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
+  "only a restorable and clean sandbox is removed, and never with --force",
+  async () => {
+    await withRepositories(async (context) => {
+      const open = () =>
+        openCanonicalWorktree({
+          ...context,
+          jobId: "implementation:11:28:digest",
+          canonicalBranch,
+        });
+      const uncommitted = await open();
+
+      expect(uncommitted).not.toBeNull();
+
+      if (uncommitted === null) {
+        return;
+      }
+
+      // 未commitの差分は、まだどこからも復元できない。
+      await writeFile(join(uncommitted.path, "in-progress.txt"), "wip\n");
+
+      expect(await uncommitted.remove([context.canonicalOid])).toBe("kept");
+      expect(
+        await Bun.file(join(uncommitted.path, "in-progress.txt")).text(),
+      ).toBe("wip\n");
+
+      // cleanでも、遠隔から復元できると確認できない先端は残す。
+      await rm(join(uncommitted.path, "in-progress.txt"));
+
+      expect(await uncommitted.remove(["9".repeat(40)])).toBe("kept");
+      expect(await git(uncommitted.path, "rev-parse", "HEAD")).toBe(
+        context.canonicalOid,
+      );
+
+      // 復元可能でcleanな場合だけ消える。
+      expect(await uncommitted.remove([context.canonicalOid])).toBe("removed");
+      expect(await Bun.file(join(uncommitted.path, "README.md")).exists()).toBe(
+        false,
+      );
     });
   },
   gitTestTimeoutMs,

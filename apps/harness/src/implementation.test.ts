@@ -5,6 +5,7 @@ import type {
   ImplementationStartEvent,
 } from "@mikan-919/oriel-contracts";
 
+import type { ImplementationAgent, ImplementationAgentOutcome } from "./agent";
 import type { LocalGit } from "./git";
 import { runImplementationWorker } from "./implementation";
 
@@ -24,11 +25,28 @@ function startEvent(
     canonicalBranch: `oriel/ENG-12-gh-28-${digest}`,
     canonicalOid: sealedOid,
     worktreePath: "/worktrees/job",
+    worktreeOid: sealedOid,
     adopted: false,
+    model: { provider: "lm-studio", id: "local-model" },
     what: { title: "WHAT title", body: "WHAT body" },
     how: { title: "HOW title", description: "HOW description" },
     verification: [["bun", "run", "typecheck"]],
     ...overrides,
+  };
+}
+
+/** worktree内のsourceを編集するAgent loopを模す。 */
+function fakeAgent(
+  outcome: Partial<ImplementationAgentOutcome> = {},
+): ImplementationAgent {
+  return {
+    run: async () => ({
+      turns: 2,
+      toolCalls: 1,
+      stopReason: "stop",
+      acted: true,
+      ...outcome,
+    }),
   };
 }
 
@@ -102,6 +120,7 @@ test("the worker verifies, commits and checkpoints inside the sealed worktree", 
     start,
     transport,
     git,
+    agent: fakeAgent(),
     runCommand: async (command, cwd) => {
       commands.push({ command, cwd });
       return { ok: true, output: "" };
@@ -163,6 +182,7 @@ test("a failing verification still checkpoints, marked as unverified work in pro
     }),
     transport,
     git,
+    agent: fakeAgent(),
     runCommand: async (command) => ({
       ok: command[1] !== "test",
       output: "1 failing test",
@@ -188,6 +208,7 @@ test("the worker refuses a worktree that is not at the sealed tip", async () => 
       start: startEvent(),
       transport,
       git,
+      agent: fakeAgent(),
       runCommand: async () => ({ ok: true, output: "" }),
       writeFile: async () => {},
     }),
@@ -211,6 +232,7 @@ test("a rejected checkpoint is reported rather than resent", async () => {
     start: startEvent(),
     transport,
     git,
+    agent: fakeAgent(),
     runCommand: async () => ({ ok: true, output: "" }),
     writeFile: async () => {},
   });
@@ -228,6 +250,7 @@ test("a worktree with nothing to commit sends no checkpoint", async () => {
     start: startEvent({ verification: [] }),
     transport,
     git,
+    agent: fakeAgent(),
     runCommand: async () => ({ ok: true, output: "" }),
     // HANDOFFの内容が現在の作業ツリーと同じで、差分が出ない場合。
     writeFile: async () => {},

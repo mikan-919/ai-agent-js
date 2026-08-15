@@ -18,7 +18,14 @@ export interface CanonicalWorktreeOptions {
 
 export interface CanonicalWorktree {
   path: string;
-  remove(): Promise<void>;
+  /**
+   * sandboxの削除。
+   *
+   * ADR 0005のとおり、削除してよいのは復元可能でcleanなsandboxだけとする。
+   * `restorableOids`は遠隔から復元できると確認済みの先端であり、作業ツリーに
+   * 差分がある、先端がそのいずれでもない、または読めない場合は削除しない。
+   */
+  remove(restorableOids: readonly string[]): Promise<"removed" | "kept">;
 }
 
 /** worktree pathへJob識別子をそのまま使わず、pathとして安全な形にする。 */
@@ -76,11 +83,34 @@ export async function openCanonicalWorktree({
 
   return {
     path,
-    async remove() {
-      await runGit(["worktree", "remove", "--force", path], {
+    async remove(restorableOids) {
+      const [status, head] = await Promise.all([
+        runGit(["status", "--porcelain"], { cwd: path }),
+        runGit(["rev-parse", "HEAD"], { cwd: path }),
+      ]);
+
+      // 未commitの差分、復元できない先端、読めない状態はそのまま残す。
+      if (
+        !status.ok ||
+        status.stdout.trim() !== "" ||
+        !head.ok ||
+        !restorableOids.includes(head.stdout.trim())
+      ) {
+        return "kept";
+      }
+
+      // `--force`を使わない。Gitがcleanと認めた場合だけ消える。
+      const removed = await runGit(["worktree", "remove", path], {
         cwd: repositoryRoot,
       });
+
+      if (!removed.ok) {
+        return "kept";
+      }
+
       await rm(path, { force: true, recursive: true });
+
+      return "removed";
     },
   };
 }

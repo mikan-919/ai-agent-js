@@ -107,6 +107,7 @@ function fakePorts(state: FakeState): ImplementationApprovalPorts & {
 
   return {
     calls,
+    readTargetBaseFile: async () => ({ status: "unknown" as const }),
     readLinearIssue: async (id) =>
       state.linear?.issueId === id ? state.linear : null,
     resolveGitHubIssueByAttachmentUrl: async (url) => state.issues[url] ?? null,

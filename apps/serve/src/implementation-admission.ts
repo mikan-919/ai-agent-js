@@ -3,6 +3,7 @@ import {
   canonicalBranchName,
   canonicalRefName,
 } from "./approval-fingerprint";
+import type { ExecutionConfigPort } from "./execution-config";
 
 /**
  * 実装Jobの正式なadmission。
@@ -48,7 +49,7 @@ export type SealOutcome =
   /** timeout、切断、曖昧な応答。送ったかどうかを決めない。 */
   | "unknown";
 
-export interface ImplementationApprovalPorts {
+export interface ImplementationApprovalPorts extends ExecutionConfigPort {
   readLinearIssue(
     linearIssueId: string,
   ): Promise<LinearApprovalSnapshot | null>;
