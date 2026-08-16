@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@mikan-919/oriel-contracts": "workspace:*"
+    "@earendil-works/pi-agent-core": "0.84.1",
+    "@earendil-works/pi-ai": "0.84.1",
+    "@mikan-919/oriel-contracts": "workspace:*",
+    "@mikan-919/oriel-identity": "workspace:*"
   }
 }

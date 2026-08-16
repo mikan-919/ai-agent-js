@@ -1,0 +1,10 @@
+{
+  "name": "@mikan-919/oriel-relay",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mikan-919/oriel-contracts": "workspace:*",
+    "hono": "4.13.1",
+    "@mikan-919/oriel-identity": "workspace:*"
+  }
+}

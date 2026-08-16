@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
     "@hono/standard-validator": "0.4.0",
     "@mikan-919/oriel-contracts": "workspace:*",
     "@mikan-919/oriel-identity": "workspace:*",

@@ -15,6 +15,41 @@
       "when": 1786618801000,
       "tag": "0001_issue_comment_actor_and_digest",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786618802000,
+      "tag": "0002_job_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786618803000,
+      "tag": "0003_pending_device_cancellations",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786618804000,
+      "tag": "0004_checkpoint_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786618805000,
+      "tag": "0005_return_to_triage_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786618806000,
+      "tag": "0006_linear_progress_outbox",
+      "breakpoints": true
     }
   ]
 }

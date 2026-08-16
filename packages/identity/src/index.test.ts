@@ -11,6 +11,8 @@ test("exposes the approved runtime identifiers", () => {
     npmPackageName: "@mikan-919/oriel",
     environmentPrefix: "ORIEL_",
     proposalLabel: "oriel:proposed",
+    executionConfigFileName: ".oriel.yaml",
+    checkpointAuthor: { name: "Oriel", email: "oriel@oriel.invalid" },
     workspaceDocuments: [
       "CONCEPT.md",
       "ROADMAP.md",

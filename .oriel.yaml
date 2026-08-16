@@ -1,0 +1,10 @@
+schemaVersion: 1
+execution:
+  backend: worktree
+  autonomous: true
+  verification:
+    - ["bun", "install", "--frozen-lockfile"]
+    - ["bun", "run", "lint"]
+    - ["bun", "run", "format:check"]
+    - ["bun", "run", "typecheck"]
+    - ["bun", "run", "test"]
