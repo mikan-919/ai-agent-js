@@ -2,10 +2,12 @@ import {
   parseDeviceCancellationRequest,
   parseDeviceTokenExchangeRequest,
   parseInstallationTokenRequest,
+  parseLinearRoutingRequest,
   type DeviceRegistrationPurpose,
   type DeviceTokenExchangeResponse,
   type GitHubInstallation,
   type InstallationTokenResponse,
+  type LinearRoutingResponse,
 } from "@mikan-919/oriel-contracts";
 import { Hono } from "hono";
 
@@ -14,6 +16,7 @@ import {
   sha256Base64Url,
   sha256Hex,
   signPayload,
+  verifyHmacSha256Hex,
   verifyPayload,
 } from "./crypto";
 import type { DeviceRegistryObject } from "./device-registry-object";
@@ -40,6 +43,12 @@ export interface RelayOptions {
    * 越える権限はrelayが受け付けない。
    */
   installationTokenPermissions: Record<string, string>;
+  /** GitHub Appのwebhook secret。`X-Hub-Signature-256`の検証に使う。 */
+  githubWebhookSecret: string;
+  /** Linear webhookのsigning secret。`Linear-Signature`の検証に使う。 */
+  linearWebhookSecret: string;
+  /** Linearの`webhookTimestamp`が許容する現在時刻からのずれ。replay対策。 */
+  linearWebhookMaxSkewMs: number;
   now?: () => number;
 }
 
@@ -116,6 +125,9 @@ export function createRelayApp({
   ownershipHeartbeatExpiryMs,
   ownershipAuditIntervalMs,
   installationTokenPermissions,
+  githubWebhookSecret,
+  linearWebhookSecret,
+  linearWebhookMaxSkewMs,
   now = Date.now,
 }: RelayOptions) {
   // 広い権限のまま起動しない。設定の誤りはtoken発行より前にfail closedにする。
@@ -496,6 +508,186 @@ export function createRelayApp({
       installationId: device.installationId,
       repositoryId: device.repositoryId,
     } satisfies InstallationTokenResponse);
+  });
+
+  /**
+   * `serve`が自分のLinear teamをrelayへ登録する。ADR 0001のとおりrelayが
+   * 永続化してよいのは「routingに使うLinear workspace IDとteam ID」だけで、
+   * Linear tokenは保持しない。登録先は常にrepositoryに紐付かない共有
+   * `discovery`インスタンスとする。
+   */
+  app.post("/device/linear-routing", async (context) => {
+    const device = await authenticateDevice(
+      context.req.header("authorization"),
+    );
+
+    if (device === null) {
+      return context.text("Unauthorized", 401);
+    }
+
+    let request;
+
+    try {
+      request = parseLinearRoutingRequest(await context.req.json());
+    } catch {
+      return context.text("Bad Request", 400);
+    }
+
+    await registryFor(0, 0).registerLinearRoute({
+      linearTeamId: request.linearTeamId,
+      installationId: device.installationId,
+      repositoryId: device.repositoryId,
+      registeredAt: now(),
+    });
+
+    return context.json({
+      linearTeamId: request.linearTeamId,
+      installationId: device.installationId,
+      repositoryId: device.repositoryId,
+    } satisfies LinearRoutingResponse);
+  });
+
+  /**
+   * webhookの起床通知だけを購読する接続。ADR 0001のとおりwebhookは起床通知に
+   * 過ぎないため、この接続にlease、取得ID、heartbeatは持たせない。
+   */
+  app.get("/notifications", async (context) => {
+    if (context.req.header("upgrade")?.toLowerCase() !== "websocket") {
+      return context.text("Upgrade Required", 426);
+    }
+
+    const authorization = context.req.header("authorization") ?? "";
+    const deviceToken = authorization.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
+    const route = routeOf(deviceToken);
+
+    if (route === null || route.installationId === 0) {
+      return context.text("Unauthorized", 401);
+    }
+
+    return registryFor(route.installationId, route.repositoryId).fetch(
+      new Request(context.req.url, {
+        headers: {
+          upgrade: "websocket",
+          "x-device-token-hash": await sha256Hex(deviceToken),
+          "x-notification-channel": "1",
+        },
+      }),
+    );
+  });
+
+  /**
+   * GitHub Appのwebhook。固定URLで、`installation.id`/`repository.id`から
+   * 動的にrouting先を決める。payload内容は保存・転送せず、routing先へ最小限の
+   * 起床合図だけを送る。
+   */
+  app.post("/webhooks/github", async (context) => {
+    const rawBody = await context.req.text();
+    const signatureHeader = context.req.header("x-hub-signature-256") ?? "";
+    const signatureHex = signatureHeader.startsWith("sha256=")
+      ? signatureHeader.slice(7)
+      : "";
+
+    if (
+      !(await verifyHmacSha256Hex(githubWebhookSecret, rawBody, signatureHex))
+    ) {
+      return context.text("Unauthorized", 401);
+    }
+
+    // Issue本体とcommentだけが起床対象。ADR 0006のとおりcontentは読まない。
+    const githubEvent = context.req.header("x-github-event");
+
+    if (githubEvent !== "issues" && githubEvent !== "issue_comment") {
+      return context.text("", 202);
+    }
+
+    let payload: {
+      installation?: { id?: unknown };
+      repository?: { id?: unknown };
+    };
+
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return context.text("", 202);
+    }
+
+    const installationId = payload.installation?.id;
+    const repositoryId = payload.repository?.id;
+
+    if (
+      typeof installationId !== "number" ||
+      typeof repositoryId !== "number" ||
+      installationId <= 0 ||
+      repositoryId <= 0
+    ) {
+      return context.text("", 202);
+    }
+
+    await registryFor(installationId, repositoryId).broadcastWake({
+      source: "github",
+    });
+
+    return context.text("", 202);
+  });
+
+  /**
+   * Linearのwebhook。固定URLで、事前に登録されたteam→repositoryのroutingを
+   * 引く。`webhookTimestamp`が新しいことも確認し、replayを防ぐ
+   * （Linear公式ドキュメントの推奨方式）。
+   */
+  app.post("/webhooks/linear", async (context) => {
+    const rawBody = await context.req.text();
+    const signatureHex = context.req.header("linear-signature") ?? "";
+
+    if (
+      !(await verifyHmacSha256Hex(linearWebhookSecret, rawBody, signatureHex))
+    ) {
+      return context.text("Unauthorized", 401);
+    }
+
+    let payload: {
+      type?: unknown;
+      webhookTimestamp?: unknown;
+      data?: { teamId?: unknown };
+    };
+
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return context.text("", 202);
+    }
+
+    if (
+      typeof payload.webhookTimestamp !== "number" ||
+      Math.abs(now() - payload.webhookTimestamp) > linearWebhookMaxSkewMs
+    ) {
+      return context.text("Unauthorized", 401);
+    }
+
+    // Issue以外のentity typeは、この製品のadmission対象を早める必要がない。
+    if (payload.type !== "Issue") {
+      return context.text("", 202);
+    }
+
+    const teamId = payload.data?.teamId;
+
+    if (typeof teamId !== "string" || teamId === "") {
+      return context.text("", 202);
+    }
+
+    const routes = await registryFor(0, 0).linearRoutesFor(teamId);
+
+    await Promise.all(
+      routes.map((route) =>
+        registryFor(route.installationId, route.repositoryId).broadcastWake({
+          source: "linear",
+        }),
+      ),
+    );
+
+    return context.text("", 202);
   });
 
   // 所有権接続。device bearer tokenはAuthorization headerだけで受け取る。

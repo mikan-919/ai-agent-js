@@ -31,6 +31,28 @@ let currentTime = 1_700_000_000_000;
 let administrable = true;
 // 生存確認の運用値はtestが与える。既定値は持たない。
 let heartbeatExpiryMs = 60_000;
+const githubWebhookSecret = "github-webhook-secret";
+const linearWebhookSecret = "linear-webhook-secret";
+const linearWebhookMaxSkewMs = 60_000;
+
+async function hmacHex(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(body),
+  );
+
+  return [...new Uint8Array(signature)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 const github: RelayGitHubClient = {
   authorizeUrl: ({ state, redirectUri: callback }) =>
@@ -83,6 +105,9 @@ function relay(
     ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
     ownershipAuditIntervalMs: 5_000,
     installationTokenPermissions,
+    githubWebhookSecret,
+    linearWebhookSecret,
+    linearWebhookMaxSkewMs,
     now: () => currentTime,
   });
 }
@@ -999,6 +1024,9 @@ describe("short lived installation tokens", () => {
           issues: "write",
           administration: "write",
         },
+        githubWebhookSecret,
+        linearWebhookSecret,
+        linearWebhookMaxSkewMs,
         now: () => currentTime,
       }),
     ).toThrow();
@@ -1072,5 +1100,323 @@ describe("short lived installation tokens", () => {
     expect(
       (await requestInstallationToken(app, registered.deviceToken)).status,
     ).toBe(502);
+  });
+});
+
+function discoveryStub() {
+  return env.DEVICE_REGISTRY.get(env.DEVICE_REGISTRY.idFromName("discovery"));
+}
+
+function openNotifications(app: ReturnType<typeof relay>, deviceToken: string) {
+  return app.fetch(
+    new Request("https://relay.test/notifications", {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${deviceToken}`,
+      },
+    }),
+  );
+}
+
+async function sendGithubWebhook(
+  app: ReturnType<typeof relay>,
+  event: string,
+  payload: unknown,
+) {
+  const body = JSON.stringify(payload);
+
+  return app.fetch(
+    new Request("https://relay.test/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-event": event,
+        "x-hub-signature-256": `sha256=${await hmacHex(githubWebhookSecret, body)}`,
+        "content-type": "application/json",
+      },
+      body,
+    }),
+  );
+}
+
+async function sendLinearWebhook(
+  app: ReturnType<typeof relay>,
+  payload: unknown,
+) {
+  const body = JSON.stringify(payload);
+
+  return app.fetch(
+    new Request("https://relay.test/webhooks/linear", {
+      method: "POST",
+      headers: {
+        "linear-signature": await hmacHex(linearWebhookSecret, body),
+        "content-type": "application/json",
+      },
+      body,
+    }),
+  );
+}
+
+describe("webhook wake notifications", () => {
+  it("wakes a subscribed connection on a signed GitHub issues webhook", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    const wake = nextMessage(socket);
+    const response = await sendGithubWebhook(app, "issues", {
+      action: "opened",
+      installation: { id: installationId },
+      repository: { id: repository.id },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await wake).toEqual({ type: "notification.wake", source: "github" });
+  });
+
+  it("wakes a subscribed connection on a signed GitHub issue_comment webhook", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    const wake = nextMessage(socket);
+    const response = await sendGithubWebhook(app, "issue_comment", {
+      action: "created",
+      installation: { id: installationId },
+      repository: { id: repository.id },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await wake).toEqual({ type: "notification.wake", source: "github" });
+  });
+
+  it("refuses a GitHub webhook with an invalid signature", async () => {
+    const app = relay();
+    const body = JSON.stringify({
+      installation: { id: installationId },
+      repository: { id: repository.id },
+    });
+    const response = await app.fetch(
+      new Request("https://relay.test/webhooks/github", {
+        method: "POST",
+        headers: {
+          "x-github-event": "issues",
+          "x-hub-signature-256": "sha256=deadbeef",
+          "content-type": "application/json",
+        },
+        body,
+      }),
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it("ignores GitHub events other than issues and unregistered repositories", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    expect(
+      (
+        await sendGithubWebhook(app, "push", {
+          installation: { id: installationId },
+          repository: { id: repository.id },
+        })
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await sendGithubWebhook(app, "issues", {
+          installation: { id: installationId },
+          repository: { id: 999_999 },
+        })
+      ).status,
+    ).toBe(202);
+
+    // 無視されるwebhookはwakeを送らないため、次に届く一件目は
+    // このあと送る有効なwebhookのwakeのはずである。
+    const wake = nextMessage(socket);
+
+    await sendGithubWebhook(app, "issues", {
+      installation: { id: installationId },
+      repository: { id: repository.id },
+    });
+
+    expect(await wake).toEqual({ type: "notification.wake", source: "github" });
+  });
+
+  it("wakes routes registered for a Linear team on a signed, fresh Issue webhook", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    await app.fetch(
+      new Request("https://relay.test/device/linear-routing", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${registered.deviceToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ linearTeamId: "TEAM-1" }),
+      }),
+    );
+
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    const wake = nextMessage(socket);
+    const response = await sendLinearWebhook(app, {
+      type: "Issue",
+      webhookTimestamp: currentTime,
+      data: { teamId: "TEAM-1" },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await wake).toEqual({ type: "notification.wake", source: "linear" });
+  });
+
+  it("refuses a Linear webhook with an invalid signature or a stale timestamp", async () => {
+    const app = relay();
+
+    expect(
+      (
+        await app.fetch(
+          new Request("https://relay.test/webhooks/linear", {
+            method: "POST",
+            headers: {
+              "linear-signature": "deadbeef",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              type: "Issue",
+              webhookTimestamp: currentTime,
+              data: { teamId: "TEAM-1" },
+            }),
+          }),
+        )
+      ).status,
+    ).toBe(401);
+
+    expect(
+      (
+        await sendLinearWebhook(app, {
+          type: "Issue",
+          webhookTimestamp: currentTime - linearWebhookMaxSkewMs - 1,
+          data: { teamId: "TEAM-1" },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  it("ignores an unregistered team and non-Issue payload types", async () => {
+    const app = relay();
+
+    expect(
+      (
+        await sendLinearWebhook(app, {
+          type: "Issue",
+          webhookTimestamp: currentTime,
+          data: { teamId: "UNKNOWN-TEAM" },
+        })
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await sendLinearWebhook(app, {
+          type: "Comment",
+          webhookTimestamp: currentTime,
+          data: { teamId: "TEAM-1" },
+        })
+      ).status,
+    ).toBe(202);
+  });
+
+  it("registers and re-registers a Linear team route idempotently", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const register = () =>
+      app.fetch(
+        new Request("https://relay.test/device/linear-routing", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${registered.deviceToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ linearTeamId: "TEAM-IDEMPOTENT" }),
+        }),
+      );
+
+    expect((await register()).status).toBe(200);
+    expect((await register()).status).toBe(200);
+
+    const routes = await runInDurableObject(
+      discoveryStub(),
+      (instance: DeviceRegistryObject) =>
+        instance.linearRoutesFor("TEAM-IDEMPOTENT"),
+    );
+
+    expect(routes).toEqual([{ installationId, repositoryId: repository.id }]);
+  });
+
+  it("refuses linear routing registration without a valid device bearer token", async () => {
+    const app = relay();
+    const response = await app.fetch(
+      new Request("https://relay.test/device/linear-routing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ linearTeamId: "TEAM-1" }),
+      }),
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it("upgrades a notification subscription only for a valid device bearer token", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    expect((await openNotifications(app, registered.deviceToken)).status).toBe(
+      101,
+    );
+    expect(
+      (
+        await openNotifications(
+          app,
+          `${installationId}.${repository.id}.forged`,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (await app.fetch(new Request("https://relay.test/notifications"))).status,
+    ).toBe(426);
+  });
+
+  it("never carries webhook payload content, only a type and a source", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    const wake = nextMessage(socket);
+
+    await sendGithubWebhook(app, "issues", {
+      action: "opened",
+      installation: { id: installationId },
+      repository: { id: repository.id },
+      issue: { title: "should never be forwarded", body: "secret body" },
+    });
+
+    expect(Object.keys(await wake).sort()).toEqual(["source", "type"]);
   });
 });

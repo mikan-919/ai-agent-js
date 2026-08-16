@@ -1,5 +1,6 @@
 import {
   parseImplementationStartEvent,
+  parseWhatConfirmationStartEvent,
   type ImplementationClientMessage,
 } from "@mikan-919/oriel-contracts";
 
@@ -12,6 +13,8 @@ import {
   postIssueConversationReply,
 } from "./issue-conversation";
 import { createProxyStreamFn, type ModelStreamChannel } from "./model-channel";
+import { createWhatConfirmationAgent } from "./what-confirmation-agent";
+import { createWhatConfirmationTools } from "./what-confirmation-tools";
 import { createWorktreeTools } from "./worktree-tools";
 
 /**
@@ -125,6 +128,72 @@ if (mode === "implementation") {
     `implementation ${outcome.checkpoint} verified=${outcome.verified} agent=${outcome.agent.stopReason}\n`,
   );
   process.exit(outcome.checkpoint === "rejected" ? 1 : 0);
+}
+
+if (mode === "what") {
+  const start = parseWhatConfirmationStartEvent(await read());
+  const channel: ModelStreamChannel = {
+    open(request) {
+      const stream = router.open(request.requestId);
+
+      write(request);
+
+      return stream;
+    },
+    abort(requestId) {
+      write({ type: "model.stream.abort", requestId });
+    },
+  };
+  const toolset = createWhatConfirmationTools({
+    transport: {
+      write: async (message) => {
+        await write(message);
+      },
+      read,
+    },
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    repository: start.repository,
+    issueNumber: start.issueNumber,
+    allowLinearTriageLink: start.trigger.command,
+  });
+  const agent = createWhatConfirmationAgent({
+    streamFn: createProxyStreamFn({
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      model: start.model,
+      channel,
+    }),
+    tools: toolset.tools,
+    ensureCommentPosted: async () => {
+      if (toolset.commentPosted()) {
+        return;
+      }
+
+      const postComment = toolset.tools.find(
+        (tool) => tool.name === "post_comment",
+      );
+
+      await postComment?.execute("fallback-ack", {
+        body: "Noted — no further action needed right now.",
+      });
+    },
+  });
+
+  const outcome = await agent.run(start);
+
+  await write({
+    type: "what_confirmation.result",
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    stopReason: outcome.stopReason,
+    acted: outcome.acted,
+  });
+
+  process.stderr.write(
+    `what_confirmation acted=${outcome.acted} agent=${outcome.stopReason}\n`,
+  );
+  process.exit(0);
 }
 
 const [owner, name] = argument("repository").split("/");

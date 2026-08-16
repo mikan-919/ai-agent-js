@@ -96,6 +96,82 @@ export function createLinearApprovalReader({
   };
 }
 
+const attachmentsForUrlQuery = `query($url: String!) {
+  attachmentsForURL(url: $url) { nodes { issue { id } } }
+}`;
+
+export interface LinearDiscoveryReader {
+  /**
+   * GitHub Issue URLをLinearのattachment検索へ渡し、対応するLinear issueを
+   * 逆引きする。複数見つかった場合もそのまま返し、選ぶかどうかは呼び出し側
+   * (discoveryのadmission判断)が決める。読めなければnullでfail closedにする。
+   */
+  findIssuesByAttachmentUrl(url: string): Promise<{ issueId: string }[] | null>;
+}
+
+/**
+ * GitHub Issue起点でLinear issueを発見する境界。承認指紋やHOWの本文は扱わず、
+ * `attachmentsForURL`が返すissue IDの集合だけを返す。
+ */
+export function createLinearDiscoveryReader({
+  token,
+  fetchImpl = (request) => fetch(request),
+}: LinearApprovalReaderOptions): LinearDiscoveryReader {
+  return {
+    async findIssuesByAttachmentUrl(url) {
+      let payload;
+
+      try {
+        const response = await fetchImpl(
+          new Request(linearApi, {
+            method: "POST",
+            headers: {
+              authorization: token,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              query: attachmentsForUrlQuery,
+              variables: { url },
+            }),
+          }),
+        );
+
+        if (!response.ok) {
+          return null;
+        }
+
+        payload = (await response.json()) as {
+          data?: {
+            attachmentsForURL?: {
+              nodes?: { issue?: { id?: string } | null }[];
+            } | null;
+          };
+          errors?: unknown[];
+        };
+      } catch {
+        return null;
+      }
+
+      if ((payload.errors ?? []).length > 0) {
+        return null;
+      }
+
+      const nodes = payload.data?.attachmentsForURL?.nodes ?? [];
+      const issueIds = new Set<string>();
+
+      for (const node of nodes) {
+        const issueId = node.issue?.id;
+
+        if (typeof issueId === "string" && issueId !== "") {
+          issueIds.add(issueId);
+        }
+      }
+
+      return [...issueIds].map((issueId) => ({ issueId }));
+    },
+  };
+}
+
 const stateQuery = `query($id: String!) {
   issue(id: $id) { state { name } }
 }`;
@@ -107,7 +183,7 @@ const stateMutation = `mutation($id: String!, $stateId: String!) {
 }`;
 
 /** 差し戻し先と、worker起動直後に反映するworkflow state名。 */
-const triageStateName = "Triage";
+export const triageStateName = "Triage";
 const inProgressStateName = "In Progress";
 
 /**

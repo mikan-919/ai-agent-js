@@ -3,6 +3,7 @@ import {
   ownershipHeartbeatResponse,
   parseOwnershipClientMessage,
   type DeviceRecord,
+  type NotificationServerMessage,
   type OwnershipServerMessage,
 } from "@mikan-919/oriel-contracts";
 import { DurableObject } from "cloudflare:workers";
@@ -57,6 +58,17 @@ interface OwnershipAttachment {
   acceptedAt: number;
   audit: OwnershipAuditConfig;
   valid: boolean;
+}
+
+/**
+ * webhookの起床通知を購読するだけの軽量な接続付随情報。
+ *
+ * ADR 0001のとおりwebhookは起床通知に過ぎないため、この接続には取得ID、
+ * lease、生存確認を持たせない。欠落・遅延しても定期ポーリングが必ず後追いする。
+ */
+interface NotificationAttachment {
+  deviceId: string;
+  channel: "notification";
 }
 
 /**
@@ -162,6 +174,13 @@ export class DeviceRegistryObject extends DurableObject {
           device_id TEXT PRIMARY KEY,
           cancellation_token_hash TEXT NOT NULL,
           expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS linear_team_routes (
+          linear_team_id TEXT NOT NULL,
+          installation_id INTEGER NOT NULL,
+          repository_id INTEGER NOT NULL,
+          registered_at INTEGER NOT NULL,
+          PRIMARY KEY (linear_team_id, installation_id, repository_id)
         );
       `);
     });
@@ -304,6 +323,7 @@ export class DeviceRegistryObject extends DurableObject {
     );
     // 登録簿を失効させた後で、そのdeviceの所有権接続とブランチ排他を閉じる。
     this.closeOwnershipOf(deviceId);
+    this.closeNotificationOf(deviceId);
 
     return toDeviceRecord(row);
   }
@@ -365,10 +385,56 @@ export class DeviceRegistryObject extends DurableObject {
   }
 
   /**
+   * Linear webhookのrouting先を登録する。ADR 0001のとおり、relayが永続化して
+   * よいのは「routingに使うLinear workspace IDとteam ID」だけであり、Linear
+   * tokenは保持しない。実際に問い合わせるのはinstallationId===0の共有
+   * `discovery`インスタンスだけだが、`installation_choices`と同じ前例に倣い
+   * class自体は分けない。
+   */
+  registerLinearRoute(input: {
+    linearTeamId: string;
+    installationId: number;
+    repositoryId: number;
+    registeredAt: number;
+  }): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO linear_team_routes
+       (linear_team_id, installation_id, repository_id, registered_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (linear_team_id, installation_id, repository_id)
+       DO UPDATE SET registered_at = excluded.registered_at`,
+      input.linearTeamId,
+      input.installationId,
+      input.repositoryId,
+      input.registeredAt,
+    );
+  }
+
+  linearRoutesFor(
+    linearTeamId: string,
+  ): { installationId: number; repositoryId: number }[] {
+    return this.ctx.storage.sql
+      .exec<{ installation_id: number; repository_id: number }>(
+        `SELECT installation_id, repository_id FROM linear_team_routes
+         WHERE linear_team_id = ?`,
+        linearTeamId,
+      )
+      .toArray()
+      .map((row) => ({
+        installationId: row.installation_id,
+        repositoryId: row.repository_id,
+      }));
+  }
+
+  /**
    * 所有権接続のupgrade。取得IDと対象キーは接続付随情報だけに置き、
    * Durable Objectsストレージへ所有権recordも履歴も保存しない。
    */
   override fetch(request: Request): Response {
+    if (request.headers.get("x-notification-channel") === "1") {
+      return this.upgradeNotification(request);
+    }
+
     const url = new URL(request.url);
     const deviceTokenHash = request.headers.get("x-device-token-hash") ?? "";
     const kind = url.searchParams.get("kind") === "branch" ? "branch" : "job";
@@ -424,6 +490,76 @@ export class DeviceRegistryObject extends DurableObject {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
+  /**
+   * webhookの起床通知だけを購読する軽量なWebSocket。lease、取得ID、heartbeatは
+   * 持たない。所有権接続と混同しないよう、別の接続付随情報の形を使う。
+   */
+  private upgradeNotification(request: Request): Response {
+    const deviceTokenHash = request.headers.get("x-device-token-hash") ?? "";
+    const device = this.authenticateDevice(deviceTokenHash);
+
+    if (
+      request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
+      device === null
+    ) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const pair = new WebSocketPair();
+
+    this.ctx.acceptWebSocket(pair[1]);
+    pair[1].serializeAttachment({
+      deviceId: device.deviceId,
+      channel: "notification",
+    } satisfies NotificationAttachment);
+
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** 接続中の通知socket全てへ起床の合図を送る。payload内容は運ばない。 */
+  broadcastWake(input: { source: "github" | "linear" }): void {
+    const message: NotificationServerMessage = {
+      type: "notification.wake",
+      source: input.source,
+    };
+
+    for (const ws of this.activeNotificationSockets()) {
+      ws.send(JSON.stringify(message));
+    }
+  }
+
+  private activeNotificationSockets(): WebSocket[] {
+    return this.ctx.getWebSockets().filter((ws) => {
+      const attachment = ws.deserializeAttachment() as
+        NotificationAttachment | OwnershipAttachment | null;
+
+      return (
+        attachment !== null &&
+        "channel" in attachment &&
+        attachment.channel === "notification"
+      );
+    });
+  }
+
+  /** 失効したdeviceの通知購読も閉じる。所有権接続の失効とは別処理にする。 */
+  private closeNotificationOf(deviceId: string): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as
+        NotificationAttachment | OwnershipAttachment | null;
+
+      if (
+        attachment === null ||
+        !("channel" in attachment) ||
+        attachment.channel !== "notification" ||
+        attachment.deviceId !== deviceId
+      ) {
+        continue;
+      }
+
+      ws.close(4003, "device revoked");
+    }
+  }
+
   private admitOwnership(input: {
     deviceId: string;
     kind: "job" | "branch";
@@ -467,13 +603,12 @@ export class DeviceRegistryObject extends DurableObject {
     this.expireStaleOwnership();
 
     const next = Math.min(
-      ...this.ctx
-        .getWebSockets()
-        .map(
-          (ws) =>
-            (ws.deserializeAttachment() as OwnershipAttachment | null)?.audit
-              .auditIntervalMs ?? Number.POSITIVE_INFINITY,
-        ),
+      ...this.ctx.getWebSockets().map(
+        (ws) =>
+          // 通知接続にはauditが無い。所有権接続だけがAlarmの間隔対象になる。
+          (ws.deserializeAttachment() as OwnershipAttachment | null)?.audit
+            ?.auditIntervalMs ?? Number.POSITIVE_INFINITY,
+      ),
     );
 
     if (Number.isFinite(next)) {
