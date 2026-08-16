@@ -9,6 +9,8 @@ import {
 import { createDiscoveryLoop } from "./discovery";
 import { createGitHubApprovalPorts } from "./github-approval-ports";
 import { createGitHubOpenIssuePort } from "./github-discovery-ports";
+import { startHowConfirmationJob } from "./how-confirmation-job";
+import { createHowTriggerLoop } from "./how-trigger-discovery";
 import { createOctokitIssueCommentPublisher } from "./issue-comments";
 import { startImplementationJob } from "./implementation-job";
 import { createInstallationGitCredentialResolver } from "./installation-credential";
@@ -20,6 +22,8 @@ import {
   createLinearApprovalStateWriter,
   createLinearDiscoveryReader,
 } from "./linear-approval";
+import { createLinearGraphqlCommentPublisher } from "./linear-comments";
+import { createLinearGraphqlDescriptionPublisher } from "./linear-description";
 import { createLinearTriageWriter } from "./linear-triage-writer";
 import { openServeLocalState } from "./local-state";
 import { createNotificationConnection } from "./notification-connection";
@@ -250,6 +254,66 @@ if (Bun.argv[2] === "serve") {
           })
       : undefined;
 
+  /**
+   * mention/commandトリガーからHOW確定Jobを始める、唯一の入口。
+   *
+   * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。GitHub
+   * credentialは使わない(この対話はLinear issueだけを読み書きする)。
+   */
+  const howConfirmationReady =
+    conversationReady && modelProviderId !== undefined && modelId !== undefined;
+  const startHowConfirmation =
+    howConfirmationReady && relayDeviceClient !== undefined
+      ? ({
+          issueNumber,
+          linearIssueId,
+          trigger,
+        }: {
+          issueNumber: number;
+          linearIssueId: string;
+          trigger: { commentId: string; command: boolean };
+        }) =>
+          startHowConfirmationJob({
+            relayOrigin: environment,
+            tokenStore,
+            databasePath: statePath,
+            harnessEntry: new URL("./harness.js", import.meta.url),
+            repositoryId,
+            repository: { owner: repositoryOwner, name: repositoryName },
+            issueNumber,
+            linearIssueId,
+            trigger,
+            model: { provider: modelProviderId, id: modelId },
+            modelProvider: createPiModelStreamProvider({
+              models,
+              resolveApiKey: (provider) =>
+                bunSecretsModelCredential(provider).get(),
+            }),
+            createLinearPorts: async () => {
+              const linearToken =
+                await bunSecretsLinearToken(repositoryId).get();
+
+              if (linearToken === null) {
+                return null;
+              }
+
+              const reader = createLinearApprovalReader({ token: linearToken });
+
+              return {
+                reader,
+                commentPublisher: createLinearGraphqlCommentPublisher({
+                  token: linearToken,
+                }),
+                descriptionPublisher: createLinearGraphqlDescriptionPublisher({
+                  token: linearToken,
+                  reader,
+                }),
+              };
+            },
+            heartbeatStopMs,
+          })
+      : undefined;
+
   const httpServer = startServeHttpServer({
     startImplementationJob: startImplementation,
     startIssueConversation: conversationReady
@@ -402,9 +466,62 @@ if (Bun.argv[2] === "serve") {
           pollIntervalMs: discoveryPollIntervalMs,
         })
       : undefined;
+  const howTriggerLoop =
+    howConfirmationReady &&
+    startHowConfirmation !== undefined &&
+    relayDeviceClient !== undefined &&
+    discoveryPollIntervalMs !== undefined
+      ? createHowTriggerLoop({
+          createPorts: async () => {
+            const octokit = await createInstallationOctokitResolver({
+              relay: relayDeviceClient,
+              tokenStore,
+              repositoryId,
+              purpose: "admission",
+            })();
+
+            if (octokit === null) {
+              return null;
+            }
+
+            const linearToken = await bunSecretsLinearToken(repositoryId).get();
+
+            if (linearToken === null) {
+              return null;
+            }
+
+            const openIssues = createGitHubOpenIssuePort({
+              octokit,
+              repository: { owner: repositoryOwner, name: repositoryName },
+            });
+            const discoveryReader = createLinearDiscoveryReader({
+              token: linearToken,
+            });
+            const reader = createLinearApprovalReader({ token: linearToken });
+            const comments = createLinearGraphqlCommentPublisher({
+              token: linearToken,
+            });
+
+            return {
+              listOpenIssues: () => openIssues.listOpenIssues(),
+              findLinearIssuesByGitHubIssueUrl: (url) =>
+                discoveryReader.findIssuesByAttachmentUrl(url),
+              readLinearIssue: (linearIssueId) =>
+                reader.readIssue(linearIssueId),
+              listLinearComments: (linearIssueId) =>
+                comments.listComments({ linearIssueId }).catch(() => null),
+              getLinearViewerId: () => comments.getViewerId().catch(() => null),
+            };
+          },
+          startHowConfirmationJob: startHowConfirmation,
+          pollIntervalMs: discoveryPollIntervalMs,
+        })
+      : undefined;
 
   if (
-    (discoveryLoop !== undefined || whatTriggerLoop !== undefined) &&
+    (discoveryLoop !== undefined ||
+      whatTriggerLoop !== undefined ||
+      howTriggerLoop !== undefined) &&
     repositoryId !== undefined &&
     environment !== undefined
   ) {
@@ -423,12 +540,14 @@ if (Bun.argv[2] === "serve") {
 
     discoveryLoop?.start();
     whatTriggerLoop?.start();
+    howTriggerLoop?.start();
     createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
       onWake: (source) => {
         void discoveryLoop?.wake(source);
         void whatTriggerLoop?.wake(source);
+        void howTriggerLoop?.wake(source);
       },
     });
   }

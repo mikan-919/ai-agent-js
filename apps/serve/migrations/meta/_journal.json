@@ -64,6 +64,20 @@
       "when": 1786618808000,
       "tag": "0008_linear_triage_link_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786618809000,
+      "tag": "0009_linear_comment_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786618810000,
+      "tag": "0010_linear_description_outbox",
+      "breakpoints": true
     }
   ]
 }

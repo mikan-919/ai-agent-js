@@ -1,4 +1,5 @@
 import {
+  parseHowConfirmationStartEvent,
   parseImplementationStartEvent,
   parseWhatConfirmationStartEvent,
   type ImplementationClientMessage,
@@ -6,6 +7,8 @@ import {
 
 import { createImplementationAgent } from "./agent";
 import { systemLocalGit } from "./git";
+import { createHowConfirmationAgent } from "./how-confirmation-agent";
+import { createHowConfirmationTools } from "./how-confirmation-tools";
 import { runImplementationWorker } from "./implementation";
 import { createHarnessMessageRouter } from "./ipc";
 import {
@@ -192,6 +195,73 @@ if (mode === "what") {
 
   process.stderr.write(
     `what_confirmation acted=${outcome.acted} agent=${outcome.stopReason}\n`,
+  );
+  process.exit(0);
+}
+
+if (mode === "how") {
+  const start = parseHowConfirmationStartEvent(await read());
+  const channel: ModelStreamChannel = {
+    open(request) {
+      const stream = router.open(request.requestId);
+
+      write(request);
+
+      return stream;
+    },
+    abort(requestId) {
+      write({ type: "model.stream.abort", requestId });
+    },
+  };
+  const toolset = createHowConfirmationTools({
+    transport: {
+      write: async (message) => {
+        await write(message);
+      },
+      read,
+    },
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    repository: start.repository,
+    issueNumber: start.issueNumber,
+    linearIssueId: start.linearIssueId,
+    initialDescription: start.linearIssue.description,
+  });
+  const agent = createHowConfirmationAgent({
+    streamFn: createProxyStreamFn({
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      model: start.model,
+      channel,
+    }),
+    tools: toolset.tools,
+    ensureCommentPosted: async () => {
+      if (toolset.commentPosted()) {
+        return;
+      }
+
+      const postComment = toolset.tools.find(
+        (tool) => tool.name === "post_comment",
+      );
+
+      await postComment?.execute("fallback-ack", {
+        body: "Noted — no further action needed right now.",
+      });
+    },
+  });
+
+  const outcome = await agent.run(start);
+
+  await write({
+    type: "how_confirmation.result",
+    jobId: start.jobId,
+    jobLeaseId: start.jobLeaseId,
+    stopReason: outcome.stopReason,
+    acted: outcome.acted,
+  });
+
+  process.stderr.write(
+    `how_confirmation acted=${outcome.acted} agent=${outcome.stopReason}\n`,
   );
   process.exit(0);
 }
