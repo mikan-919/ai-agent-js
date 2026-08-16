@@ -105,6 +105,45 @@ async function importPkcs8(privateKeyPem: string): Promise<CryptoKey> {
   );
 }
 
+function hexToBytes(hex: string): Uint8Array | null {
+  if (hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) {
+    return null;
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+
+  return bytes;
+}
+
+/**
+ * webhookのraw bodyへのHMAC-SHA256を検証する。GitHubの`X-Hub-Signature-256`
+ * (`sha256=`prefixを剥がした値)とLinearの`Linear-Signature`はどちらもこの形式。
+ * `crypto.subtle.verify`はconstant-time比較を行うため、`signPayload`/
+ * `verifyPayload`の`!==`比較より安全なprimitiveとして使い分ける。
+ */
+export async function verifyHmacSha256Hex(
+  secret: string,
+  rawBody: string,
+  signatureHex: string,
+): Promise<boolean> {
+  const signature = hexToBytes(signatureHex);
+
+  if (signature === null) {
+    return false;
+  }
+
+  return crypto.subtle.verify(
+    "HMAC",
+    await signingKey(secret),
+    signature as BufferSource,
+    encoder.encode(rawBody),
+  );
+}
+
 /**
  * GitHub AppのJWT。秘密鍵はrelayのsecretから読み、署名だけに使って保存しない。
  */

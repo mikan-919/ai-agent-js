@@ -95,7 +95,7 @@ packages/identity
 
 ### Workflowの発見とJobの取得
 
-- GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。
+- GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。webhook署名検証、起床通知プロトコル、Linear webhookのrouting方式は[ADR 0006](./docs/adr/0006-webhook-verification-and-wake-notification.md)を正本とする。
 - 対応するLinear issueが一つだけでTodoの場合に、[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)の現在値確認を通ったWorkflowだけからJobの実行候補を導出する。
 - すべてのJobは公開リレーへの専用WebSocketでJob所有権を取得し、コードを変更するJobだけがcanonicalブランチの接続排他も取得する。必要な接続が失われた場合はworkerと外部操作を停止する。
 - activeなcanonical branchとPull RequestはWorkflowごとに一つだけとする。

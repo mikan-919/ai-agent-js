@@ -31,6 +31,11 @@ export interface RelayEnv {
    * 与えた場合もallowlistを越える権限は受け付けない。
    */
   INSTALLATION_TOKEN_PERMISSIONS?: string;
+  /** GitHub Appのwebhook secret。`X-Hub-Signature-256`の検証に使う。 */
+  GITHUB_APP_WEBHOOK_SECRET: string;
+  /** Linear webhookのsigning secret。`Linear-Signature`の検証に使う。 */
+  LINEAR_WEBHOOK_SECRET: string;
+  LINEAR_WEBHOOK_MAX_SKEW_MS: string;
 }
 
 function requiredPositiveInteger(value: string, name: string): number {
@@ -41,6 +46,14 @@ function requiredPositiveInteger(value: string, name: string): number {
   }
 
   return parsed;
+}
+
+function requiredSecret(value: string, name: string): string {
+  if (value === "") {
+    throw new Error(`${identity.environmentPrefix}${name} is not configured`);
+  }
+
+  return value;
 }
 
 export default {
@@ -86,6 +99,18 @@ export default {
           : parseInstallationTokenPermissions(
               env.INSTALLATION_TOKEN_PERMISSIONS,
             ),
+      githubWebhookSecret: requiredSecret(
+        env.GITHUB_APP_WEBHOOK_SECRET,
+        "GITHUB_APP_WEBHOOK_SECRET",
+      ),
+      linearWebhookSecret: requiredSecret(
+        env.LINEAR_WEBHOOK_SECRET,
+        "LINEAR_WEBHOOK_SECRET",
+      ),
+      linearWebhookMaxSkewMs: requiredPositiveInteger(
+        env.LINEAR_WEBHOOK_MAX_SKEW_MS,
+        "LINEAR_WEBHOOK_MAX_SKEW_MS",
+      ),
     });
 
     return app.fetch(request, env, context);

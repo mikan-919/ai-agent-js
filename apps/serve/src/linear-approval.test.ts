@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   createLinearApprovalReader,
   createLinearApprovalStateWriter,
+  createLinearDiscoveryReader,
 } from "./linear-approval";
 
 const linearIssueId = "0f6f6a0c-1c1e-4a0a-9f6e-2f5f1f3f4f5f";
@@ -114,6 +115,77 @@ test("the current Linear state is read as a plain name and is null when unusable
       throw new Error("fetch failed");
     }).readLinearState(linearIssueId),
   ).toBeNull();
+});
+
+function discoveryReader(respond: (request: Request) => Promise<Response>) {
+  return createLinearDiscoveryReader({
+    token: "linear-token",
+    fetchImpl: respond,
+  });
+}
+
+test("attachment URL lookup dedupes multiple nodes pointing at the same issue", async () => {
+  const found = await discoveryReader(async () =>
+    Response.json({
+      data: {
+        attachmentsForURL: {
+          nodes: [{ issue: { id: "issue-1" } }, { issue: { id: "issue-1" } }],
+        },
+      },
+    }),
+  ).findIssuesByAttachmentUrl("https://github.com/mikan-919/oriel/issues/28");
+
+  expect(found).toEqual([{ issueId: "issue-1" }]);
+});
+
+test("attachment URL lookup can report multiple distinct issues, letting the caller decide", async () => {
+  const found = await discoveryReader(async () =>
+    Response.json({
+      data: {
+        attachmentsForURL: {
+          nodes: [{ issue: { id: "issue-1" } }, { issue: { id: "issue-2" } }],
+        },
+      },
+    }),
+  ).findIssuesByAttachmentUrl("https://github.com/mikan-919/oriel/issues/28");
+
+  expect(found).toHaveLength(2);
+  expect(found?.map((entry) => entry.issueId).sort()).toEqual([
+    "issue-1",
+    "issue-2",
+  ]);
+});
+
+test("attachment URL lookup fails closed on GraphQL errors or a network failure", async () => {
+  expect(
+    await discoveryReader(async () =>
+      Response.json({
+        errors: [{ message: "forbidden" }],
+        data: { attachmentsForURL: null },
+      }),
+    ).findIssuesByAttachmentUrl("https://github.com/mikan-919/oriel/issues/28"),
+  ).toBeNull();
+
+  expect(
+    await discoveryReader(
+      async () => new Response("", { status: 500 }),
+    ).findIssuesByAttachmentUrl("https://github.com/mikan-919/oriel/issues/28"),
+  ).toBeNull();
+
+  expect(
+    await discoveryReader(async () => {
+      throw new Error("network");
+    }).findIssuesByAttachmentUrl(
+      "https://github.com/mikan-919/oriel/issues/28",
+    ),
+  ).toBeNull();
+
+  // attachmentが無い(0件)は空配列。fail closedのnullとは区別する。
+  expect(
+    await discoveryReader(async () =>
+      Response.json({ data: { attachmentsForURL: { nodes: [] } } }),
+    ).findIssuesByAttachmentUrl("https://github.com/mikan-919/oriel/issues/28"),
+  ).toEqual([]);
 });
 
 test("the return to Triage resolves the team state by name and never guesses one", async () => {

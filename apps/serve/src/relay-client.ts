@@ -1,6 +1,7 @@
 import {
   parseInstallationTokenResponse,
   parseDeviceTokenExchangeResponse,
+  parseLinearRoutingResponse,
   type DeviceCancellationRequest,
   type DeviceTokenExchangeRequest,
   type DeviceTokenExchangeResponse,
@@ -25,6 +26,15 @@ export interface RelayDeviceClient {
     deviceToken: string,
     purpose: InstallationTokenPurpose,
   ): Promise<InstallationTokenResponse | null>;
+  /**
+   * `serve`が自分のLinear teamをrelayへ登録する。ADR 0001のとおりrelayが
+   * 永続化してよいのは「routingに使うLinear workspace IDとteam ID」だけで、
+   * Linear tokenは保持しない。
+   */
+  registerLinearRouting(
+    deviceToken: string,
+    linearTeamId: string,
+  ): Promise<boolean>;
 }
 
 /** testと製品経路で同じ形を使うための最小のfetch。 */
@@ -91,6 +101,24 @@ export function createRelayDeviceClient({
       }
 
       refusedOrThrow(response, "/device/cancellation");
+      return false;
+    },
+    async registerLinearRouting(deviceToken, linearTeamId) {
+      const response = await fetchImpl(endpoint("/device/linear-routing"), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${deviceToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ linearTeamId }),
+      });
+
+      if (response.ok) {
+        parseLinearRoutingResponse(await response.json());
+        return true;
+      }
+
+      refusedOrThrow(response, "/device/linear-routing");
       return false;
     },
   };

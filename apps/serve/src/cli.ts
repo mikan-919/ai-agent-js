@@ -6,7 +6,9 @@ import {
   bunSecretsDeviceTokenStore,
   createDeviceRegistrationFlow,
 } from "./device-registration";
+import { createDiscoveryLoop } from "./discovery";
 import { createGitHubApprovalPorts } from "./github-approval-ports";
+import { createGitHubOpenIssuePort } from "./github-discovery-ports";
 import { startImplementationJob } from "./implementation-job";
 import { createInstallationGitCredentialResolver } from "./installation-credential";
 import { createInstallationOctokitResolver } from "./installation-octokit";
@@ -15,8 +17,10 @@ import {
   bunSecretsLinearToken,
   createLinearApprovalReader,
   createLinearApprovalStateWriter,
+  createLinearDiscoveryReader,
 } from "./linear-approval";
 import { openServeLocalState } from "./local-state";
+import { createNotificationConnection } from "./notification-connection";
 import { createPendingCancellationStore } from "./pending-cancellations";
 import {
   bunSecretsModelCredential,
@@ -53,6 +57,11 @@ if (Bun.argv[2] === "serve") {
     Bun.env[`${identity.environmentPrefix}REPOSITORY_NAME`];
   // client側停止期限。relayが伝えるserver側失効期限より短い場合だけ所有権を持つ。
   const heartbeatStopMs = requiredNumber("OWNERSHIP_HEARTBEAT_STOP_MS");
+  // discoveryの定期再読の間隔。運用値は測定と検証専用環境から決めるため既定値を持たない。
+  const discoveryPollIntervalMs = requiredNumber("DISCOVERY_POLL_INTERVAL_MS");
+  // Linear webhookのrouting先をrelayへ登録するteam ID。Linear OAuth完了フローが
+  // 実装されるまでの暫定策であり、運用者がLinear側の設定と合わせて指定する。
+  const linearTeamId = Bun.env[`${identity.environmentPrefix}LINEAR_TEAM_ID`];
   // `serve`が担当するrepositoryのcloneと、Jobごとのworktreeを置く領域。
   const repositoryRoot =
     Bun.env[`${identity.environmentPrefix}REPOSITORY_ROOT`];
@@ -85,92 +94,100 @@ if (Bun.argv[2] === "serve") {
     repositoryOwner !== undefined &&
     repositoryName !== undefined &&
     heartbeatStopMs !== undefined;
+  const implementationReady =
+    conversationReady &&
+    repositoryId !== undefined &&
+    // worktreeを開けない構成では、実装Jobを始めない。
+    repositoryRoot !== undefined &&
+    worktreesRoot !== undefined &&
+    // modelを選べない構成でも、暗黙の既定値を置かずに始めない。
+    modelProviderId !== undefined &&
+    modelId !== undefined;
+
+  /**
+   * 承認されたHOWのLinear Issueからserveが実装Jobを始める、唯一の入口。
+   *
+   * `/api/implementation-jobs`からの手動起動と、discoveryが発見した候補からの
+   * 自動起動の両方がこの同じ関数を呼ぶ。承認、所有権、canonicalブランチ封印の
+   * 判断はすべて`startImplementationJob`が現在値から一貫して行う。
+   */
+  const startImplementation = implementationReady
+    ? ({ linearIssueId }: { linearIssueId: string }) =>
+        startImplementationJob({
+          relayOrigin: environment,
+          tokenStore,
+          // admissionの現在値確認は読み取り権限だけで行う。
+          createOctokit: createInstallationOctokitResolver({
+            relay: relayDeviceClient,
+            tokenStore,
+            repositoryId,
+            purpose: "admission",
+          }),
+          // HOWの正本へ届かないなら、実装Jobを始めない。
+          createPorts: async (octokit) => {
+            const linearToken = await bunSecretsLinearToken(repositoryId).get();
+
+            return linearToken === null
+              ? null
+              : createGitHubApprovalPorts({
+                  octokit,
+                  repository: {
+                    owner: repositoryOwner,
+                    name: repositoryName,
+                  },
+                  linear: createLinearApprovalReader({
+                    token: linearToken,
+                  }),
+                });
+          },
+          databasePath: statePath,
+          harnessEntry: new URL("./harness.js", import.meta.url),
+          repositoryId,
+          repository: { owner: repositoryOwner, name: repositoryName },
+          linearIssueId,
+          heartbeatStopMs,
+          repositoryRoot,
+          worktreesRoot,
+          remote: canonicalRemote,
+          // canonicalブランチへの送信だけに使う一回限りのcredential。
+          resolveCredential: createInstallationGitCredentialResolver({
+            relay: relayDeviceClient,
+            tokenStore,
+            repositoryId,
+          }),
+          model: { provider: modelProviderId, id: modelId },
+          // 提供元への接続とcredentialの解決は`serve`の内側だけで行う。
+          modelProvider: createPiModelStreamProvider({
+            models,
+            resolveApiKey: (provider) =>
+              bunSecretsModelCredential(provider).get(),
+          }),
+          /**
+           * 承認後の状態反映は、所有権を確認した`serve`だけがLinearへ行う。
+           * tokenはこの内側だけで解決し、harnessへも引数へも渡さない。
+           */
+          linearApprovalState: {
+            readLinearState: async (issueId) => {
+              const writer = await linearStateWriter(repositoryId);
+
+              return writer === null ? null : writer.readLinearState(issueId);
+            },
+            moveToTriage: async (issueId) => {
+              const writer = await linearStateWriter(repositoryId);
+
+              return writer !== null && writer.moveToTriage(issueId);
+            },
+            moveToInProgress: async (issueId) => {
+              const writer = await linearStateWriter(repositoryId);
+
+              return writer !== null && writer.moveToInProgress(issueId);
+            },
+          },
+        })
+    : undefined;
+
   const httpServer = startServeHttpServer({
-    startImplementationJob:
-      conversationReady &&
-      repositoryId !== undefined &&
-      // worktreeを開けない構成では、実装Jobを始めない。
-      repositoryRoot !== undefined &&
-      worktreesRoot !== undefined &&
-      // modelを選べない構成でも、暗黙の既定値を置かずに始めない。
-      modelProviderId !== undefined &&
-      modelId !== undefined
-        ? ({ linearIssueId }) =>
-            startImplementationJob({
-              relayOrigin: environment,
-              tokenStore,
-              // admissionの現在値確認は読み取り権限だけで行う。
-              createOctokit: createInstallationOctokitResolver({
-                relay: relayDeviceClient,
-                tokenStore,
-                repositoryId,
-                purpose: "admission",
-              }),
-              // HOWの正本へ届かないなら、実装Jobを始めない。
-              createPorts: async (octokit) => {
-                const linearToken =
-                  await bunSecretsLinearToken(repositoryId).get();
-
-                return linearToken === null
-                  ? null
-                  : createGitHubApprovalPorts({
-                      octokit,
-                      repository: {
-                        owner: repositoryOwner,
-                        name: repositoryName,
-                      },
-                      linear: createLinearApprovalReader({
-                        token: linearToken,
-                      }),
-                    });
-              },
-              databasePath: statePath,
-              harnessEntry: new URL("./harness.js", import.meta.url),
-              repositoryId,
-              repository: { owner: repositoryOwner, name: repositoryName },
-              linearIssueId,
-              heartbeatStopMs,
-              repositoryRoot,
-              worktreesRoot,
-              remote: canonicalRemote,
-              // canonicalブランチへの送信だけに使う一回限りのcredential。
-              resolveCredential: createInstallationGitCredentialResolver({
-                relay: relayDeviceClient,
-                tokenStore,
-                repositoryId,
-              }),
-              model: { provider: modelProviderId, id: modelId },
-              // 提供元への接続とcredentialの解決は`serve`の内側だけで行う。
-              modelProvider: createPiModelStreamProvider({
-                models,
-                resolveApiKey: (provider) =>
-                  bunSecretsModelCredential(provider).get(),
-              }),
-              /**
-               * 承認後の状態反映は、所有権を確認した`serve`だけがLinearへ行う。
-               * tokenはこの内側だけで解決し、harnessへも引数へも渡さない。
-               */
-              linearApprovalState: {
-                readLinearState: async (issueId) => {
-                  const writer = await linearStateWriter(repositoryId);
-
-                  return writer === null
-                    ? null
-                    : writer.readLinearState(issueId);
-                },
-                moveToTriage: async (issueId) => {
-                  const writer = await linearStateWriter(repositoryId);
-
-                  return writer !== null && writer.moveToTriage(issueId);
-                },
-                moveToInProgress: async (issueId) => {
-                  const writer = await linearStateWriter(repositoryId);
-
-                  return writer !== null && writer.moveToInProgress(issueId);
-                },
-              },
-            })
-        : undefined,
+    startImplementationJob: startImplementation,
     startIssueConversation: conversationReady
       ? ({ issueNumber, body }) =>
           startIssueConversationJob({
@@ -215,6 +232,76 @@ if (Bun.argv[2] === "serve") {
             return flow;
           },
   });
+
+  /**
+   * webhook通知と定期ポーリングからJob候補を発見する。実装Jobを始められる構成
+   * (`implementationReady`)に加え、discoveryのpoll間隔とLinear teamの両方を
+   * 明示した場合だけ配線する。どちらか欠けていれば自動発見を始めない。
+   */
+  if (
+    implementationReady &&
+    startImplementation !== undefined &&
+    relayDeviceClient !== undefined &&
+    discoveryPollIntervalMs !== undefined &&
+    linearTeamId !== undefined
+  ) {
+    void (async () => {
+      const deviceToken = await tokenStore.get(repositoryId);
+
+      if (deviceToken !== null) {
+        await relayDeviceClient.registerLinearRouting(
+          deviceToken,
+          linearTeamId,
+        );
+      }
+    })();
+
+    const discoveryLoop = createDiscoveryLoop({
+      createPorts: async () => {
+        const octokit = await createInstallationOctokitResolver({
+          relay: relayDeviceClient,
+          tokenStore,
+          repositoryId,
+          purpose: "admission",
+        })();
+
+        if (octokit === null) {
+          return null;
+        }
+
+        const linearToken = await bunSecretsLinearToken(repositoryId).get();
+
+        if (linearToken === null) {
+          return null;
+        }
+
+        const openIssues = createGitHubOpenIssuePort({
+          octokit,
+          repository: { owner: repositoryOwner, name: repositoryName },
+        });
+        const discoveryReader = createLinearDiscoveryReader({
+          token: linearToken,
+        });
+
+        return {
+          listOpenIssues: () => openIssues.listOpenIssues(),
+          findLinearIssuesByGitHubIssueUrl: (url) =>
+            discoveryReader.findIssuesByAttachmentUrl(url),
+        };
+      },
+      startImplementationJob: startImplementation,
+      pollIntervalMs: discoveryPollIntervalMs,
+    });
+
+    discoveryLoop.start();
+    createNotificationConnection({
+      relayOrigin: environment,
+      resolveDeviceToken: () => tokenStore.get(repositoryId),
+      onWake: (source) => {
+        void discoveryLoop.wake(source);
+      },
+    });
+  }
 
   console.log(httpServer.readinessUrl.toString());
 }
