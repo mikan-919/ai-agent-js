@@ -9,6 +9,10 @@ import {
 import { createDiscoveryLoop } from "./discovery";
 import { createGitHubApprovalPorts } from "./github-approval-ports";
 import { createGitHubOpenIssuePort } from "./github-discovery-ports";
+import {
+  createGitHubPullRequestMergeCheck,
+  createGitHubPullRequestPorts,
+} from "./github-pull-request-ports";
 import { startHowConfirmationJob } from "./how-confirmation-job";
 import { createHowTriggerLoop } from "./how-trigger-discovery";
 import { createOctokitIssueCommentPublisher } from "./issue-comments";
@@ -28,6 +32,8 @@ import { createLinearTriageWriter } from "./linear-triage-writer";
 import { openServeLocalState } from "./local-state";
 import { createNotificationConnection } from "./notification-connection";
 import { createPendingCancellationStore } from "./pending-cancellations";
+import { createPrMergeDiscoveryLoop } from "./pr-merge-discovery";
+import { createPullRequestWatchStore } from "./pull-request-watch";
 import {
   bunSecretsModelCredential,
   createPiModelStreamProvider,
@@ -190,7 +196,31 @@ if (Bun.argv[2] === "serve") {
 
               return writer !== null && writer.moveToInProgress(issueId);
             },
+            readReviewStateCandidate: async (issueId) => {
+              const writer = await linearStateWriter(repositoryId);
+
+              return writer === null
+                ? null
+                : writer.readReviewStateCandidate(issueId);
+            },
+            moveToStateId: async (issueId, stateId) => {
+              const writer = await linearStateWriter(repositoryId);
+
+              return writer !== null && writer.moveToStateId(issueId, stateId);
+            },
           },
+          // Pull Request作成には契約のcontents:write/pull_requests:writeへ絞る。
+          createPullRequestOctokit: createInstallationOctokitResolver({
+            relay: relayDeviceClient,
+            tokenStore,
+            repositoryId,
+            purpose: "pull_request",
+          }),
+          createPullRequestPorts: (octokit) =>
+            createGitHubPullRequestPorts({
+              octokit,
+              repository: { owner: repositoryOwner, name: repositoryName },
+            }),
         })
     : undefined;
 
@@ -518,10 +548,61 @@ if (Bun.argv[2] === "serve") {
         })
       : undefined;
 
+  /**
+   * ADR 0005「Linear状態」のとおり、mergeを現在値から確認した後にLinearを
+   * Doneへ反映する。webhookは起床通知に過ぎず、pollingが最終的な正しさを担う。
+   */
+  const prMergeLoop =
+    implementationReady &&
+    relayDeviceClient !== undefined &&
+    discoveryPollIntervalMs !== undefined &&
+    statePath !== undefined
+      ? (() => {
+          const database = openServeLocalState(statePath);
+
+          return createPrMergeDiscoveryLoop({
+            createPorts: async () => {
+              const octokit = await createInstallationOctokitResolver({
+                relay: relayDeviceClient,
+                tokenStore,
+                repositoryId,
+                purpose: "pull_request",
+              })();
+
+              if (octokit === null) {
+                return null;
+              }
+
+              const writer = await linearStateWriter(repositoryId);
+
+              if (writer === null) {
+                return null;
+              }
+
+              const merges = createGitHubPullRequestMergeCheck({
+                octokit,
+                repository: { owner: repositoryOwner, name: repositoryName },
+              });
+
+              return {
+                isPullRequestMerged: (prNumber) =>
+                  merges.isPullRequestMerged(prNumber),
+                readLinearState: (issueId) => writer.readLinearState(issueId),
+                moveToDone: (issueId) => writer.moveToDone(issueId),
+              };
+            },
+            database,
+            watchStore: createPullRequestWatchStore(database),
+            pollIntervalMs: discoveryPollIntervalMs,
+          });
+        })()
+      : undefined;
+
   if (
     (discoveryLoop !== undefined ||
       whatTriggerLoop !== undefined ||
-      howTriggerLoop !== undefined) &&
+      howTriggerLoop !== undefined ||
+      prMergeLoop !== undefined) &&
     repositoryId !== undefined &&
     environment !== undefined
   ) {
@@ -541,6 +622,7 @@ if (Bun.argv[2] === "serve") {
     discoveryLoop?.start();
     whatTriggerLoop?.start();
     howTriggerLoop?.start();
+    prMergeLoop?.start();
     createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
@@ -548,6 +630,7 @@ if (Bun.argv[2] === "serve") {
         void discoveryLoop?.wake(source);
         void whatTriggerLoop?.wake(source);
         void howTriggerLoop?.wake(source);
+        void prMergeLoop?.wake(source);
       },
     });
   }

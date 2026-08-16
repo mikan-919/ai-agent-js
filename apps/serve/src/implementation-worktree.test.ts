@@ -228,7 +228,7 @@ test(
           remoteTip,
         );
 
-        // checkpointには、編集結果と引き継ぎ用のHANDOFFの両方が入っている。
+        // 全検証を通した完了checkpointは、最終差分からHANDOFFを消している。
         const files = await git(
           worker.worktreePath,
           "show",
@@ -237,8 +237,11 @@ test(
           "HEAD",
         );
 
-        expect(files).toContain("HANDOFF.md");
+        expect(files).not.toContain("HANDOFF.md");
         expect(files).toContain("greeting.txt");
+        expect(
+          await Bun.file(join(worker.worktreePath, "HANDOFF.md")).exists(),
+        ).toBe(false);
         expect(worker.jobStatus()).toBe("completed");
       } finally {
         await worker.close();

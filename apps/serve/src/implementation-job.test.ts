@@ -17,6 +17,7 @@ import type {
 import { startImplementationJob } from "./implementation-job";
 import type { StartImplementationWorkerOptions } from "./implementation-worker";
 import type { LinearInProgressPorts } from "./linear-progress";
+import type { LinearReviewStatePorts } from "./linear-review-state";
 import { openServeLocalState } from "./local-state";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
@@ -220,6 +221,10 @@ function fakeLinearState({
 
         return true;
       },
+      // teamに一意なレビュー用stateが無い既定値。実際の反映は
+      // linear-review-state.test.tsが確かめる。
+      readReviewStateCandidate: async () => "none" as const,
+      moveToStateId: async () => false,
     },
   };
 }
@@ -269,7 +274,8 @@ function options(
   ports: ImplementationApprovalPorts,
   startedWorkers: StartImplementationWorkerOptions[] = [],
   linearApprovalState: LinearApprovalStatePorts &
-    LinearInProgressPorts = fakeLinearState().ports,
+    LinearInProgressPorts &
+    LinearReviewStatePorts = fakeLinearState().ports,
 ) {
   return {
     model: { provider: "lm-studio", id: "local-model" },
@@ -290,6 +296,10 @@ function options(
     remote: "origin",
     resolveCredential: async () => null,
     startWorker: fakeWorker(startedWorkers),
+    // このtest群のfake workerは"completed"を報告しないため、Pull Request作成は
+    // 呼ばれない。型合わせのためだけの既定値。
+    createPullRequestOctokit: async () => null,
+    createPullRequestPorts: () => null,
   };
 }
 
@@ -353,6 +363,97 @@ test("a fully admitted approval seals the branch after ownership and only then s
         branchKey: `${repositoryId}/${canonicalBranch}`,
         approvalFingerprint: fingerprintOf("WHAT title"),
       });
+    } finally {
+      if (started.status === "started") {
+        await started.close();
+      }
+
+      relay.stop();
+    }
+  });
+});
+
+test("a completed worker creates a Pull Request and reflects the review state", async () => {
+  await withWorkspace(async (databasePath) => {
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const { ports } = fakePorts();
+    const reviewLinear = fakeLinearState();
+    const base = options(
+      databasePath,
+      relay.origin,
+      ports,
+      [],
+      reviewLinear.ports,
+    );
+    const ensureCalls: unknown[] = [];
+
+    const started = await startImplementationJob({
+      ...base,
+      startWorker: async (workerOptions) => ({
+        status: "started" as const,
+        worktreePath: "/worktrees/job",
+        worktreeOid: workerOptions.start.canonicalOid,
+        finished: Promise.resolve(),
+        jobStatus: () => "completed",
+        close: async () => {
+          workerOptions.release();
+        },
+      }),
+      createPullRequestOctokit: async () => fakeOctokit({ bodies: [] }),
+      createPullRequestPorts: () => ({
+        listOpenPullRequestsByHeadBase: async (input) => {
+          ensureCalls.push({ op: "list", input });
+
+          return [];
+        },
+        createPullRequest: async (input) => {
+          ensureCalls.push({ op: "create", input });
+
+          return { number: 7 };
+        },
+        closeDuplicatePullRequest: async () => true,
+      }),
+    });
+
+    try {
+      expect(started.status).toBe("started");
+
+      if (started.status !== "started") {
+        return;
+      }
+
+      await started.finished;
+
+      // headはcanonical branch、baseはtarget baseの表示branch名だけを渡す。
+      expect(ensureCalls).toEqual([
+        { op: "list", input: { head: canonicalBranch, base: "main" } },
+        {
+          op: "create",
+          input: {
+            head: canonicalBranch,
+            base: "main",
+            title: "WHAT title",
+            body: "Closes #28",
+          },
+        },
+      ]);
+      // worker起動直後のIn Progress反映は変わらず行われる。
+      expect(reviewLinear.moves).toEqual([`in-progress:${linearIssueId}`]);
+
+      const database = openServeLocalState(databasePath);
+
+      try {
+        expect(
+          database
+            .query(
+              `SELECT job_id AS jobId, pr_number AS prNumber, status
+               FROM pull_request_watch`,
+            )
+            .all(),
+        ).toEqual([{ jobId: started.jobId, prNumber: 7, status: "watching" }]);
+      } finally {
+        database.close();
+      }
     } finally {
       if (started.status === "started") {
         await started.close();

@@ -155,12 +155,9 @@ test("the worker verifies, commits and checkpoints inside the sealed worktree", 
   expect(outcome.checkpoint).toBe("completed");
   expect(outcome.headOid).toBe(checkpointOid);
 
-  // 別のworkerが再開できるHANDOFFを、checkpointへ含める。
-  const handoff = files.get("/worktrees/job/HANDOFF.md") ?? "";
-
-  expect(handoff).toContain("HOW title");
-  expect(handoff).toContain(start.canonicalBranch);
-  expect(handoff).not.toContain(start.jobLeaseId);
+  // 全検証を通した完了checkpointは、最終差分からHANDOFFを消す。
+  expect(files.has("/worktrees/job/HANDOFF.md")).toBe(false);
+  expect(calls).toContainEqual(["rm", "--ignore-unmatch", "-f", "HANDOFF.md"]);
 
   // commitは人間のGit設定を継承せず、固定の著者で行う。
   const commit = calls.find((args) => args.includes("commit")) ?? [];

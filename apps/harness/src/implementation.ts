@@ -108,10 +108,22 @@ export async function runImplementationWorker({
     verification.length === start.verification.length &&
     verification.every((run) => run.ok);
 
-  await writeFile(
-    join(worktree, "HANDOFF.md"),
-    handoff(start, verification, agentOutcome),
-  );
+  const failing = verification.filter((run) => !run.ok);
+  const pending = start.verification.slice(verification.length);
+  const unresolved = [
+    ...(agentOutcome.stopReason === "stop"
+      ? []
+      : [`- 未完了のAgent turn: 停止理由は\`${agentOutcome.stopReason}\``]),
+    ...failing.map((run) => `- 失敗中の検証: \`${run.command.join(" ")}\``),
+    ...pending.map((run) => `- 未実行の検証: \`${run.join(" ")}\``),
+  ];
+
+  if (verified && sourceChanged && unresolved.length === 0) {
+    // ADR 0004/0005: 実装完了後はHANDOFFを最終差分から削除する。
+    await git.run(["rm", "--ignore-unmatch", "-f", "HANDOFF.md"], worktree);
+  } else {
+    await writeFile(join(worktree, "HANDOFF.md"), handoff(start, unresolved));
+  }
 
   const committed = await commitWorkInProgress(git, worktree, verified);
   const headOid = await readHead(git, worktree);
@@ -257,19 +269,8 @@ async function commitWorkInProgress(
  */
 function handoff(
   start: ImplementationStartEvent,
-  verification: VerificationRun[],
-  agent: ImplementationAgentOutcome,
+  unresolved: string[],
 ): string {
-  const failing = verification.filter((run) => !run.ok);
-  const pending = start.verification.slice(verification.length);
-  const unresolved = [
-    ...(agent.stopReason === "stop"
-      ? []
-      : [`- 未完了のAgent turn: 停止理由は\`${agent.stopReason}\``]),
-    ...failing.map((run) => `- 失敗中の検証: \`${run.command.join(" ")}\``),
-    ...pending.map((run) => `- 未実行の検証: \`${run.join(" ")}\``),
-  ];
-
   return `# HANDOFF
 
 このcheckpointは未検証の作業途中成果として引き継ぐ。引き継ぎ先は差分を読み、
@@ -296,14 +297,10 @@ ${start.how.description}
 
 ## 未解決点
 
-${unresolved.length === 0 ? "- なし。全ての検証を通した。" : unresolved.join("\n")}
+${unresolved.join("\n")}
 
 ## 次の一手
 
-${
-  unresolved.length === 0
-    ? "- HOWの残りを実装し、検証を通してからHANDOFF.mdを消す。"
-    : "- 上の検証を通してから次の区切りへ進む。"
-}
+- 上の検証を通してから次の区切りへ進む。
 `;
 }

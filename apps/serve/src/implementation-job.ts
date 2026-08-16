@@ -15,16 +15,20 @@ import {
   sealCanonicalBranch,
   workflowIsFenced,
   type ApprovalReconciliation,
+  type ApprovedContent,
   type ImplementationApproval,
   type ImplementationApprovalPorts,
   type ImplementationRefusalReason,
+  type ReconcileApproval,
 } from "./implementation-admission";
 import {
   startImplementationWorker,
+  type ImplementationWorker,
   type ImplementationWorkerRefusalReason,
   type StartImplementationWorkerOptions,
   type StartImplementationWorkerResult,
 } from "./implementation-worker";
+import type { JobOwnershipVerifier } from "./issue-comments";
 import {
   moveApprovalToInProgress,
   type LinearInProgressPorts,
@@ -33,6 +37,12 @@ import {
 import { openServeLocalState } from "./local-state";
 import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
+import { ensurePullRequest, type PullRequestPorts } from "./pull-request";
+import { createPullRequestWatchStore } from "./pull-request-watch";
+import {
+  reflectReviewState,
+  type LinearReviewStatePorts,
+} from "./linear-review-state";
 import {
   returnApprovalToTriage,
   type LinearApprovalStatePorts,
@@ -74,9 +84,17 @@ export interface StartImplementationJobOptions {
    * 承認後の状態をLinearへ機械的に反映する境界。
    *
    * 承認対象の不一致ではTodoをTriageへ戻し、worker起動直後にはTodoをIn Progress
-   * へ移す。credentialは`serve`の内側だけで解決する。
+   * へ移し、Pull Request作成直後にはレビュー用stateへ反映する。credentialは
+   * `serve`の内側だけで解決する。
    */
-  linearApprovalState: LinearApprovalStatePorts & LinearInProgressPorts;
+  linearApprovalState: LinearApprovalStatePorts &
+    LinearInProgressPorts &
+    LinearReviewStatePorts;
+  /** Pull Request作成に用途を絞ったOctokitの解決。取れない場合は作成を諦める。 */
+  createPullRequestOctokit: () => Promise<Octokit | null>;
+  createPullRequestPorts: (
+    octokit: Octokit,
+  ) => PullRequestPorts | null | Promise<PullRequestPorts | null>;
   startWorker?: (
     options: StartImplementationWorkerOptions,
   ) => Promise<StartImplementationWorkerResult>;
@@ -148,6 +166,8 @@ export async function startImplementationJob({
   model,
   modelProvider,
   linearApprovalState,
+  createPullRequestOctokit,
+  createPullRequestPorts,
   startWorker = startImplementationWorker,
 }: StartImplementationJobOptions): Promise<StartImplementationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
@@ -460,10 +480,133 @@ export async function startImplementationJob({
     branchLeaseId,
     linearState,
     worktreePath: worker.worktreePath,
-    finished: worker.finished,
+    finished: worker.finished.then(() =>
+      afterCompletion({
+        worker,
+        approval,
+        jobLeaseId,
+        repository,
+        databasePath,
+        linearApprovalState,
+        createPullRequestOctokit,
+        createPullRequestPorts,
+        reconcileApproval: () => reconcileApproval(ports, target, approval),
+        ownership,
+        what: third.content,
+      }),
+    ),
     jobStatus: worker.jobStatus,
     close: worker.close,
   };
+}
+
+/**
+ * worker終了後、実装が完了していればPull Requestを一意に作る。
+ *
+ * ADR 0004/0005のとおり、実装中はPull Requestを作らず、Job所有権接続がまだ
+ * 生きている間だけ行う。ここで確定しなかった場合の再試行は、PR対応Job(将来の
+ * issue)の範囲とする。
+ *
+ * ponytail: 失敗時の自動リトライは持たない。ownership接続はこのJobの寿命でだけ
+ * 有効なため、ここで確定できなければ人間による再実行を待つ。
+ */
+async function afterCompletion({
+  worker,
+  approval,
+  jobLeaseId,
+  repository,
+  databasePath,
+  linearApprovalState,
+  createPullRequestOctokit,
+  createPullRequestPorts,
+  reconcileApproval,
+  ownership,
+  what,
+}: {
+  worker: ImplementationWorker;
+  approval: ImplementationApproval;
+  jobLeaseId: string;
+  repository: GitHubRepository;
+  databasePath: string;
+  linearApprovalState: LinearApprovalStatePorts &
+    LinearInProgressPorts &
+    LinearReviewStatePorts;
+  createPullRequestOctokit: () => Promise<Octokit | null>;
+  createPullRequestPorts: (
+    octokit: Octokit,
+  ) => PullRequestPorts | null | Promise<PullRequestPorts | null>;
+  reconcileApproval: ReconcileApproval;
+  ownership: JobOwnershipVerifier;
+  what: ApprovedContent;
+}): Promise<void> {
+  if (worker.jobStatus() !== "completed") {
+    return;
+  }
+
+  const octokit = await createPullRequestOctokit().catch(() => null);
+
+  if (octokit === null) {
+    return;
+  }
+
+  const pullRequestPorts = await Promise.resolve(
+    createPullRequestPorts(octokit),
+  ).catch(() => null);
+
+  if (pullRequestPorts === null) {
+    return;
+  }
+
+  const ensured = await ensurePullRequest({
+    ownership,
+    ports: pullRequestPorts,
+    reconcileApproval,
+    target: {
+      jobId: approval.jobId,
+      jobLeaseId,
+      repository,
+      issueNumber: approval.githubIssueNumber,
+      approvalFingerprint: approval.approvalFingerprint,
+      head: approval.canonicalBranch,
+      base: approval.targetBaseRef.replace(/^refs\/heads\//, ""),
+      title: what.whatTitle,
+      body: `Closes #${approval.githubIssueNumber}`,
+    },
+  });
+
+  if (ensured.number === null) {
+    return;
+  }
+
+  const database = openServeLocalState(databasePath);
+
+  try {
+    await reflectReviewState({
+      database,
+      ownership,
+      ports: linearApprovalState,
+      reconcileApproval,
+      target: {
+        jobId: approval.jobId,
+        jobLeaseId,
+        repository,
+        issueNumber: approval.githubIssueNumber,
+        linearIssueId: approval.linearIssueId,
+        approvalFingerprint: approval.approvalFingerprint,
+      },
+    });
+
+    createPullRequestWatchStore(database).upsert({
+      jobId: approval.jobId,
+      repositoryOwner: repository.owner,
+      repositoryName: repository.name,
+      prNumber: ensured.number,
+      linearIssueId: approval.linearIssueId,
+      status: "watching",
+    });
+  } finally {
+    database.close();
+  }
 }
 
 /**

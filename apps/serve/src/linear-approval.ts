@@ -176,15 +176,27 @@ const stateQuery = `query($id: String!) {
   issue(id: $id) { state { name } }
 }`;
 const teamStatesQuery = `query($id: String!) {
-  issue(id: $id) { team { states(first: 100) { nodes { id name } } } }
+  issue(id: $id) { team { states(first: 100) { nodes { id name type } } } }
 }`;
 const stateMutation = `mutation($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success }
 }`;
 
-/** 差し戻し先と、worker起動直後に反映するworkflow state名。 */
+/** 差し戻し先と、worker起動直後・merge確認後に反映するworkflow state名。 */
 export const triageStateName = "Triage";
 const inProgressStateName = "In Progress";
+export const doneStateName = "Done";
+
+/**
+ * teamに一意な「レビュー用state」の判定規則。
+ *
+ * ADR 0005はこの詳細規則を明示的に対象外としているため、type"started"
+ * (In Progress系)のうち名前に"review"を含むものを候補とする。
+ */
+const reviewStateNamePattern = /review/i;
+
+export type ReviewStateCandidate =
+  { id: string; name: string } | "none" | "ambiguous";
 
 /**
  * 無効になった承認状態をLinearへ反映する境界。
@@ -272,6 +284,59 @@ export function createLinearApprovalStateWriter({
      */
     moveToInProgress(linearIssueId: string): Promise<boolean> {
       return this.moveToState(linearIssueId, inProgressStateName);
+    },
+    /** teamのtype"started"かつ名前が/review/iに一致する一意なstateを探す。 */
+    async readReviewStateCandidate(
+      linearIssueId: string,
+    ): Promise<ReviewStateCandidate | null> {
+      const data = await graphql(teamStatesQuery, { id: linearIssueId });
+      const nodes =
+        (
+          data?.issue as {
+            team?: {
+              states?: {
+                nodes?: { id?: string; name?: string; type?: string }[];
+              };
+            };
+          } | null
+        )?.team?.states?.nodes ?? [];
+      const matching = nodes.filter(
+        (node) =>
+          node.type === "started" &&
+          typeof node.name === "string" &&
+          reviewStateNamePattern.test(node.name),
+      );
+
+      if (matching.length === 0) {
+        return "none";
+      }
+
+      if (matching.length !== 1) {
+        return "ambiguous";
+      }
+
+      const [state] = matching;
+
+      return typeof state?.id === "string" && typeof state.name === "string"
+        ? { id: state.id, name: state.name }
+        : null;
+    },
+    async moveToStateId(
+      linearIssueId: string,
+      stateId: string,
+    ): Promise<boolean> {
+      const updated = await graphql(stateMutation, {
+        id: linearIssueId,
+        stateId,
+      });
+
+      return (
+        (updated?.issueUpdate as { success?: boolean } | null)?.success === true
+      );
+    },
+    /** mergeを現在値から確認した後の機械的な反映として、Doneへ移す。 */
+    moveToDone(linearIssueId: string): Promise<boolean> {
+      return this.moveToState(linearIssueId, doneStateName);
     },
   };
 }
