@@ -9,6 +9,7 @@ import {
 import { createDiscoveryLoop } from "./discovery";
 import { createGitHubApprovalPorts } from "./github-approval-ports";
 import { createGitHubOpenIssuePort } from "./github-discovery-ports";
+import { createOctokitIssueCommentPublisher } from "./issue-comments";
 import { startImplementationJob } from "./implementation-job";
 import { createInstallationGitCredentialResolver } from "./installation-credential";
 import { createInstallationOctokitResolver } from "./installation-octokit";
@@ -19,6 +20,7 @@ import {
   createLinearApprovalStateWriter,
   createLinearDiscoveryReader,
 } from "./linear-approval";
+import { createLinearTriageWriter } from "./linear-triage-writer";
 import { openServeLocalState } from "./local-state";
 import { createNotificationConnection } from "./notification-connection";
 import { createPendingCancellationStore } from "./pending-cancellations";
@@ -29,6 +31,8 @@ import {
 } from "./pi-model-provider";
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
+import { startWhatConfirmationJob } from "./what-confirmation-job";
+import { createWhatTriggerLoop } from "./what-trigger-discovery";
 
 if (Bun.argv[2] === "--version") {
   console.log(packageManifest.version);
@@ -186,6 +190,66 @@ if (Bun.argv[2] === "serve") {
         })
     : undefined;
 
+  /**
+   * mention/commandトリガーからWHAT確定Jobを始める、唯一の入口。
+   *
+   * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。
+   */
+  const whatConfirmationReady =
+    conversationReady &&
+    modelProviderId !== undefined &&
+    modelId !== undefined &&
+    linearTeamId !== undefined;
+  const startWhatConfirmation =
+    whatConfirmationReady && relayDeviceClient !== undefined
+      ? ({
+          issueNumber,
+          trigger,
+        }: {
+          issueNumber: number;
+          trigger: { commentId: number; command: boolean };
+        }) =>
+          startWhatConfirmationJob({
+            relayOrigin: environment,
+            tokenStore,
+            createOctokit: createInstallationOctokitResolver({
+              relay: relayDeviceClient,
+              tokenStore,
+              repositoryId,
+              purpose: "issue_conversation",
+            }),
+            databasePath: statePath,
+            harnessEntry: new URL("./harness.js", import.meta.url),
+            repositoryId,
+            repository: { owner: repositoryOwner, name: repositoryName },
+            issueNumber,
+            trigger,
+            model: { provider: modelProviderId, id: modelId },
+            modelProvider: createPiModelStreamProvider({
+              models,
+              resolveApiKey: (provider) =>
+                bunSecretsModelCredential(provider).get(),
+            }),
+            linearTeamId,
+            createLinearPorts: async () => {
+              const linearToken =
+                await bunSecretsLinearToken(repositoryId).get();
+
+              return linearToken === null
+                ? null
+                : {
+                    linearDiscovery: createLinearDiscoveryReader({
+                      token: linearToken,
+                    }),
+                    linearTriageWriter: createLinearTriageWriter({
+                      token: linearToken,
+                    }),
+                  };
+            },
+            heartbeatStopMs,
+          })
+      : undefined;
+
   const httpServer = startServeHttpServer({
     startImplementationJob: startImplementation,
     startIssueConversation: conversationReady
@@ -234,71 +298,137 @@ if (Bun.argv[2] === "serve") {
   });
 
   /**
-   * webhook通知と定期ポーリングからJob候補を発見する。実装Jobを始められる構成
-   * (`implementationReady`)に加え、discoveryのpoll間隔とLinear teamの両方を
-   * 明示した場合だけ配線する。どちらか欠けていれば自動発見を始めない。
+   * webhook通知と定期ポーリングから、実装JobとWHAT確定Jobの両方の候補を発見する。
+   * 実装Jobを始められる構成(`implementationReady`)とWHAT確定Jobを始められる
+   * 構成(`whatConfirmationReady`)は独立に、discoveryのpoll間隔とLinear team両方
+   * を明示した場合だけそれぞれ配線する。wake通知は一本のnotification connection
+   * から両方のloopへ配る。
    */
-  if (
+  const discoveryLoop =
     implementationReady &&
     startImplementation !== undefined &&
     relayDeviceClient !== undefined &&
     discoveryPollIntervalMs !== undefined &&
     linearTeamId !== undefined
+      ? createDiscoveryLoop({
+          createPorts: async () => {
+            const octokit = await createInstallationOctokitResolver({
+              relay: relayDeviceClient,
+              tokenStore,
+              repositoryId,
+              purpose: "admission",
+            })();
+
+            if (octokit === null) {
+              return null;
+            }
+
+            const linearToken = await bunSecretsLinearToken(repositoryId).get();
+
+            if (linearToken === null) {
+              return null;
+            }
+
+            const openIssues = createGitHubOpenIssuePort({
+              octokit,
+              repository: { owner: repositoryOwner, name: repositoryName },
+            });
+            const discoveryReader = createLinearDiscoveryReader({
+              token: linearToken,
+            });
+
+            return {
+              listOpenIssues: () => openIssues.listOpenIssues(),
+              findLinearIssuesByGitHubIssueUrl: (url) =>
+                discoveryReader.findIssuesByAttachmentUrl(url),
+            };
+          },
+          startImplementationJob: startImplementation,
+          pollIntervalMs: discoveryPollIntervalMs,
+        })
+      : undefined;
+  const whatTriggerLoop =
+    whatConfirmationReady &&
+    startWhatConfirmation !== undefined &&
+    relayDeviceClient !== undefined &&
+    discoveryPollIntervalMs !== undefined &&
+    linearTeamId !== undefined
+      ? createWhatTriggerLoop({
+          createPorts: async () => {
+            const octokit = await createInstallationOctokitResolver({
+              relay: relayDeviceClient,
+              tokenStore,
+              repositoryId,
+              purpose: "admission",
+            })();
+
+            if (octokit === null) {
+              return null;
+            }
+
+            const linearToken = await bunSecretsLinearToken(repositoryId).get();
+
+            if (linearToken === null) {
+              return null;
+            }
+
+            const comments = createOctokitIssueCommentPublisher(octokit);
+            const openIssues = createGitHubOpenIssuePort({
+              octokit,
+              repository: { owner: repositoryOwner, name: repositoryName },
+            });
+            const discoveryReader = createLinearDiscoveryReader({
+              token: linearToken,
+            });
+
+            return {
+              listOpenIssues: () => openIssues.listOpenIssues(),
+              listIssueComments: (issueNumber) =>
+                comments
+                  .listIssueComments({
+                    repository: {
+                      owner: repositoryOwner,
+                      name: repositoryName,
+                    },
+                    issueNumber,
+                  })
+                  .catch(() => null),
+              getActorLogin: () => comments.getActorLogin(),
+              findLinearIssuesByGitHubIssueUrl: (url) =>
+                discoveryReader.findIssuesByAttachmentUrl(url),
+            };
+          },
+          startWhatConfirmationJob: startWhatConfirmation,
+          pollIntervalMs: discoveryPollIntervalMs,
+        })
+      : undefined;
+
+  if (
+    (discoveryLoop !== undefined || whatTriggerLoop !== undefined) &&
+    repositoryId !== undefined &&
+    environment !== undefined
   ) {
-    void (async () => {
-      const deviceToken = await tokenStore.get(repositoryId);
+    if (linearTeamId !== undefined && relayDeviceClient !== undefined) {
+      void (async () => {
+        const deviceToken = await tokenStore.get(repositoryId);
 
-      if (deviceToken !== null) {
-        await relayDeviceClient.registerLinearRouting(
-          deviceToken,
-          linearTeamId,
-        );
-      }
-    })();
-
-    const discoveryLoop = createDiscoveryLoop({
-      createPorts: async () => {
-        const octokit = await createInstallationOctokitResolver({
-          relay: relayDeviceClient,
-          tokenStore,
-          repositoryId,
-          purpose: "admission",
-        })();
-
-        if (octokit === null) {
-          return null;
+        if (deviceToken !== null) {
+          await relayDeviceClient.registerLinearRouting(
+            deviceToken,
+            linearTeamId,
+          );
         }
+      })();
+    }
 
-        const linearToken = await bunSecretsLinearToken(repositoryId).get();
-
-        if (linearToken === null) {
-          return null;
-        }
-
-        const openIssues = createGitHubOpenIssuePort({
-          octokit,
-          repository: { owner: repositoryOwner, name: repositoryName },
-        });
-        const discoveryReader = createLinearDiscoveryReader({
-          token: linearToken,
-        });
-
-        return {
-          listOpenIssues: () => openIssues.listOpenIssues(),
-          findLinearIssuesByGitHubIssueUrl: (url) =>
-            discoveryReader.findIssuesByAttachmentUrl(url),
-        };
-      },
-      startImplementationJob: startImplementation,
-      pollIntervalMs: discoveryPollIntervalMs,
-    });
-
-    discoveryLoop.start();
+    discoveryLoop?.start();
+    whatTriggerLoop?.start();
     createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
       onWake: (source) => {
-        void discoveryLoop.wake(source);
+        void discoveryLoop?.wake(source);
+        void whatTriggerLoop?.wake(source);
       },
     });
   }

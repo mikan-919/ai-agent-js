@@ -50,6 +50,20 @@
       "when": 1786618806000,
       "tag": "0006_linear_progress_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786618807000,
+      "tag": "0007_issue_body_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786618808000,
+      "tag": "0008_linear_triage_link_outbox",
+      "breakpoints": true
     }
   ]
 }

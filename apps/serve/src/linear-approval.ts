@@ -183,7 +183,7 @@ const stateMutation = `mutation($id: String!, $stateId: String!) {
 }`;
 
 /** 差し戻し先と、worker起動直後に反映するworkflow state名。 */
-const triageStateName = "Triage";
+export const triageStateName = "Triage";
 const inProgressStateName = "In Progress";
 
 /**

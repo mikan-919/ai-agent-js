@@ -595,8 +595,10 @@ export function createRelayApp({
       return context.text("Unauthorized", 401);
     }
 
-    // Issue以外のeventは、この製品のadmission対象を早める必要がない。
-    if (context.req.header("x-github-event") !== "issues") {
+    // Issue本体とcommentだけが起床対象。ADR 0006のとおりcontentは読まない。
+    const githubEvent = context.req.header("x-github-event");
+
+    if (githubEvent !== "issues" && githubEvent !== "issue_comment") {
       return context.text("", 202);
     }
 

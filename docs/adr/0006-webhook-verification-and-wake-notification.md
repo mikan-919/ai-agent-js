@@ -40,6 +40,12 @@ Linear team IDの供給元は、本来は各`serve`が個別に完了するLinea
 
 GitHub App webhookは、App作成時に設定する単一の固定URL（`POST /webhooks/github`）でよい。payload中の`installation.id`/`repository.id`から動的にrouting先のDurable Objectインスタンスを解決できるため、GitHub側にはrouting用の永続テーブルを必要としない。
 
+### `issue_comment`イベントの追加（Issue #33改訂）
+
+当初の決定は`issues`イベントだけを起床通知の対象とし、`issue_comment`イベントを明示的に対象外としていた。GitHub Issue #33（GitHub Issue対話からWHATを確定してLinearへ渡す）のmention／commandトリガーは、人間がGitHub Issueのcommentへ書いた指示を契機に動く必要があり、`issues`イベント（Issue本体の作成・編集・open/close）だけでは検知できない。そのため`issue_comment`イベント（`action: "created"`）も起床通知の対象へ追加する。
+
+この追加は本ADRの原則を変えない。署名検証、readする最小限のfield（`installation.id`/`repository.id`）、`{ type: "notification.wake", source: "github" }`という中身のないwake通知、いずれも`issues`イベントと同じ扱いとする。comment本文やauthorは検証直後に破棄し、relayへ保存も転送もしない。`serve`側は起床後にGitHub側の現在状態（open issueの最新comment一覧）を自分で読み直し、mention／commandパターンの判定もそこで行う。webhookそのものは常に「早く起こすための合図」のままであり、判定の正本にはならない。
+
 ## 帰結
 
 - webhookのpayload内容はrelayを一切通過せず、`serve`は常に現在値を読み直してからJobを開始する。webhookそのものがJob開始の根拠にならないというADR 0001の原則が、実装上も保たれる。
@@ -51,7 +57,7 @@ GitHub App webhookは、App作成時に設定する単一の固定URL（`POST /w
 
 - Linear OAuth完了フロー自体の設計（別Issueで扱う）
 - heartbeatの具体的な時間値（`DISCOVERY_POLL_INTERVAL_MS`を含む運用値は既定値を持たず、測定と検証専用環境の実動作から決める）
-- GitHub App webhookで`issues`以外のイベント種別を扱う設計（v1は`issues`イベントだけを起床通知の対象とする）
+- GitHub App webhookで`issues`・`issue_comment`以外のイベント種別を扱う設計（v1はこの二つだけを起床通知の対象とする）
 - staleなLinear team routeの削除方針
 
 ## 実装前の検証

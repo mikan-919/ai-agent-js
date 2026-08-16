@@ -1176,6 +1176,25 @@ describe("webhook wake notifications", () => {
     expect(await wake).toEqual({ type: "notification.wake", source: "github" });
   });
 
+  it("wakes a subscribed connection on a signed GitHub issue_comment webhook", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    const wake = nextMessage(socket);
+    const response = await sendGithubWebhook(app, "issue_comment", {
+      action: "created",
+      installation: { id: installationId },
+      repository: { id: repository.id },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await wake).toEqual({ type: "notification.wake", source: "github" });
+  });
+
   it("refuses a GitHub webhook with an invalid signature", async () => {
     const app = relay();
     const body = JSON.stringify({
