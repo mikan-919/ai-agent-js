@@ -31,6 +31,7 @@ let currentTime = 1_700_000_000_000;
 let administrable = true;
 // 生存確認の運用値はtestが与える。既定値は持たない。
 let heartbeatExpiryMs = 60_000;
+let transcriptSearchTimeoutMs = 60_000;
 const githubWebhookSecret = "github-webhook-secret";
 const linearWebhookSecret = "linear-webhook-secret";
 const linearWebhookMaxSkewMs = 60_000;
@@ -104,6 +105,7 @@ function relay(
     ownershipHeartbeatIntervalMs: 1_000,
     ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
     ownershipAuditIntervalMs: 5_000,
+    transcriptSearchTimeoutMs,
     installationTokenPermissions,
     githubWebhookSecret,
     linearWebhookSecret,
@@ -259,6 +261,7 @@ beforeEach(() => {
   currentTime = 1_700_000_000_000;
   administrable = true;
   heartbeatExpiryMs = 60_000;
+  transcriptSearchTimeoutMs = 60_000;
   nextRepositoryId += 1;
   repository = { id: nextRepositoryId, owner: "mikan-919", name: "oriel" };
   issuedInstallationTokens = [];
@@ -1020,6 +1023,7 @@ describe("short lived installation tokens", () => {
         ownershipHeartbeatIntervalMs: 1_000,
         ownershipHeartbeatExpiryMs: heartbeatExpiryMs,
         ownershipAuditIntervalMs: 5_000,
+        transcriptSearchTimeoutMs,
         installationTokenPermissions: {
           issues: "write",
           administration: "write",
@@ -1418,5 +1422,179 @@ describe("webhook wake notifications", () => {
     });
 
     expect(Object.keys(await wake).sort()).toEqual(["source", "type"]);
+  });
+});
+
+describe("transcript search relay", () => {
+  async function openSearchable(app: ReturnType<typeof relay>) {
+    const registered = await registerDevice(app, `state-${Math.random()}`);
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const socket = subscription.webSocket!;
+
+    socket.accept();
+
+    return socket;
+  }
+
+  it("fans a repository-scope request out and merges every sibling's answer", async () => {
+    const app = relay();
+    const requester = await openSearchable(app);
+    const sibling = await openSearchable(app);
+    const forwarded = nextMessage(sibling);
+
+    requester.send(
+      JSON.stringify({
+        type: "transcript.search.request",
+        requestId: "search-1",
+        scope: "repository",
+        query: "hello",
+        limit: 10,
+      }),
+    );
+
+    // 中継先へは要求元自身の局所検索範囲(`local`)へ落として届く。
+    expect(await forwarded).toEqual({
+      type: "transcript.search.request",
+      requestId: "search-1",
+      scope: "local",
+      query: "hello",
+      limit: 10,
+    });
+
+    const result = nextMessage(requester);
+
+    sibling.send(
+      JSON.stringify({
+        type: "transcript.search.result",
+        requestId: "search-1",
+        entries: [
+          {
+            jobId: "job-1",
+            sequence: 1,
+            kind: "model.stream.event",
+            content: "hello there",
+            createdAt: 1,
+          },
+        ],
+      }),
+    );
+
+    expect(await result).toEqual({
+      type: "transcript.search.result",
+      requestId: "search-1",
+      entries: [
+        {
+          jobId: "job-1",
+          sequence: 1,
+          kind: "model.stream.event",
+          content: "hello there",
+          createdAt: 1,
+        },
+      ],
+    });
+  });
+
+  it("returns no entries when no sibling server is connected", async () => {
+    const app = relay();
+    const requester = await openSearchable(app);
+    const result = nextMessage(requester);
+
+    requester.send(
+      JSON.stringify({
+        type: "transcript.search.request",
+        requestId: "search-alone",
+        scope: "repository",
+        query: "hello",
+        limit: 10,
+      }),
+    );
+
+    expect(await result).toEqual({
+      type: "transcript.search.result",
+      requestId: "search-alone",
+      entries: [],
+    });
+  });
+
+  it("stops waiting on a sibling that never answers and returns what it has", async () => {
+    transcriptSearchTimeoutMs = 20;
+
+    const app = relay();
+    const requester = await openSearchable(app);
+    const sibling = await openSearchable(app);
+    const forwarded = nextMessage(sibling);
+
+    requester.send(
+      JSON.stringify({
+        type: "transcript.search.request",
+        requestId: "search-timeout",
+        scope: "repository",
+        query: "hello",
+        limit: 10,
+      }),
+    );
+
+    await forwarded;
+
+    const result = nextMessage(requester);
+
+    // siblingは意図的に応答しない。
+
+    expect(await result).toEqual({
+      type: "transcript.search.result",
+      requestId: "search-timeout",
+      entries: [],
+    });
+  });
+
+  it("does not merge a result carrying a requestId the relay never asked for", async () => {
+    const app = relay();
+    const requester = await openSearchable(app);
+    const sibling = await openSearchable(app);
+    const forwarded = nextMessage(sibling);
+
+    requester.send(
+      JSON.stringify({
+        type: "transcript.search.request",
+        requestId: "search-real",
+        scope: "repository",
+        query: "hello",
+        limit: 10,
+      }),
+    );
+
+    await forwarded;
+
+    const result = nextMessage(requester);
+
+    // 要求していない別のrequestIdへの答えは、待機中のどの検索にも合流しない。
+    sibling.send(
+      JSON.stringify({
+        type: "transcript.search.result",
+        requestId: "unrelated",
+        entries: [
+          {
+            jobId: "job-x",
+            sequence: 1,
+            kind: "model.stream.event",
+            content: "noise",
+            createdAt: 1,
+          },
+        ],
+      }),
+    );
+    sibling.send(
+      JSON.stringify({
+        type: "transcript.search.result",
+        requestId: "search-real",
+        entries: [],
+      }),
+    );
+
+    expect(await result).toEqual({
+      type: "transcript.search.result",
+      requestId: "search-real",
+      entries: [],
+    });
   });
 });

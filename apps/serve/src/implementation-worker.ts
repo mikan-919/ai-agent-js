@@ -27,6 +27,7 @@ import {
   type ModelStreamProvider,
 } from "./model-stream";
 import { integrateTargetBase } from "./target-base-integration";
+import { createTranscriptStore } from "./transcript-store";
 
 export interface StartImplementationWorkerOptions {
   databasePath: string;
@@ -179,6 +180,15 @@ export async function startImplementationWorker({
 
   const database = openServeLocalState(databasePath);
   const jobState = createJobStateStore(database);
+  const transcripts = createTranscriptStore(database);
+
+  transcripts.append({
+    jobId: binding.jobId,
+    repository: binding.repository,
+    kind: "job.start",
+    content: JSON.stringify({ type: "implementation", adopted: start.adopted }),
+  });
+
   const checkpoints = createCheckpointService({
     outbox: createCheckpointOutbox(database),
     binding,
@@ -198,6 +208,7 @@ export async function startImplementationWorker({
     },
     ownership,
     provider: modelProvider,
+    transcript: transcripts,
   });
 
   // harnessへはcredentialを渡さない。承認済みの対象だけをstdinのstart eventで渡す。
@@ -306,6 +317,12 @@ export async function startImplementationWorker({
       result: {
         report(result) {
           reported = result;
+          transcripts.append({
+            jobId: binding.jobId,
+            repository: binding.repository,
+            kind: "job.result",
+            content: JSON.stringify(result),
+          });
         },
       },
     },

@@ -174,6 +174,6 @@ packages/identity
 2. Jobの状態遷移、接続所有権、ブランチ排他、同じ承認指紋のブランチ引き継ぎの不変条件を定義する。完了（[ADR 0002](./docs/adr/0002-job-ownership-and-execution-state.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)）。
 3. GitHub・Linear・リレー・`serve`間のイベントと再調停を時系列で定義する。完了（[ADR 0003](./docs/adr/0003-approval-admission-and-reconciliation.md)、[ADR 0004](./docs/adr/0004-connection-ownership-and-branch-resumption.md)、[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
 4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。device登録の詳細を除き、所有権接続と外部操作の境界は完了（[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
-5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。checkpointとworker引き継ぎは完了。transcript検索の詳細は実装項目へ分解する。
+5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。完了（[ADR 0008](./docs/adr/0008-transcript-storage-and-search.md)）。人間向けの呼び出し口(CLI・Web UI)はissue #40で扱う。
 6. capability schemaと実行環境選択を定義する。
 7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。

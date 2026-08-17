@@ -38,6 +38,8 @@ export interface RelayOptions {
   ownershipHeartbeatIntervalMs: number;
   ownershipHeartbeatExpiryMs: number;
   ownershipAuditIntervalMs: number;
+  /** repository scopeのtranscript検索が、接続中の他の`serve`を待つ上限。 */
+  transcriptSearchTimeoutMs: number;
   /**
    * installation tokenへ載せる最小権限。deploy設定から与えるが、固定allowlistを
    * 越える権限はrelayが受け付けない。
@@ -124,6 +126,7 @@ export function createRelayApp({
   ownershipHeartbeatIntervalMs,
   ownershipHeartbeatExpiryMs,
   ownershipAuditIntervalMs,
+  transcriptSearchTimeoutMs,
   installationTokenPermissions,
   githubWebhookSecret,
   linearWebhookSecret,
@@ -572,6 +575,7 @@ export function createRelayApp({
           upgrade: "websocket",
           "x-device-token-hash": await sha256Hex(deviceToken),
           "x-notification-channel": "1",
+          "x-transcript-search-timeout-ms": String(transcriptSearchTimeoutMs),
         },
       }),
     );

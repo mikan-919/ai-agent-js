@@ -20,6 +20,7 @@ import {
   createModelStreamService,
   type ModelStreamProvider,
 } from "./model-stream";
+import { createTranscriptStore } from "./transcript-store";
 
 export interface HowConfirmationOwnership extends JobOwnershipVerifier {
   readonly stopSignal: AbortSignal;
@@ -58,6 +59,15 @@ export function startHowConfirmationWorker({
 }: StartHowConfirmationWorkerOptions): HowConfirmationWorker {
   const database = openServeLocalState(databasePath);
   const jobState = createJobStateStore(database);
+  const transcripts = createTranscriptStore(database);
+
+  transcripts.append({
+    jobId: start.jobId,
+    repository: start.repository,
+    kind: "job.start",
+    content: JSON.stringify({ type: "how_confirmation" }),
+  });
+
   const linearCommentService = createLinearCommentService({
     outbox: createLinearCommentOutbox(database),
     ownershipVerifier: ownership,
@@ -73,6 +83,7 @@ export function startHowConfirmationWorker({
     },
     ownership,
     provider: modelProvider,
+    transcript: transcripts,
   });
   const target = {
     jobId: start.jobId,
@@ -134,6 +145,12 @@ export function startHowConfirmationWorker({
       result: {
         report(result) {
           reported = result;
+          transcripts.append({
+            jobId: start.jobId,
+            repository: start.repository,
+            kind: "job.result",
+            content: JSON.stringify(result),
+          });
         },
       },
     },

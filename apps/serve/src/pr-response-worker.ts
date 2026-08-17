@@ -25,6 +25,7 @@ import {
   createModelStreamService,
   type ModelStreamProvider,
 } from "./model-stream";
+import { createTranscriptStore } from "./transcript-store";
 import type { ReconcileApproval } from "./implementation-admission";
 
 export interface StartPrResponseWorkerOptions {
@@ -96,6 +97,15 @@ export async function startPrResponseWorker({
 
   const database = openServeLocalState(databasePath);
   const jobState = createJobStateStore(database);
+  const transcripts = createTranscriptStore(database);
+
+  transcripts.append({
+    jobId: binding.jobId,
+    repository: binding.repository,
+    kind: "job.start",
+    content: JSON.stringify({ type: "pr_response" }),
+  });
+
   const checkpoints = createCheckpointService({
     outbox: createCheckpointOutbox(database),
     binding,
@@ -115,6 +125,7 @@ export async function startPrResponseWorker({
     },
     ownership,
     provider: modelProvider,
+    transcript: transcripts,
   });
 
   const harness = Bun.spawn(
@@ -201,6 +212,12 @@ export async function startPrResponseWorker({
       result: {
         report(result) {
           reported = result;
+          transcripts.append({
+            jobId: binding.jobId,
+            repository: binding.repository,
+            kind: "job.result",
+            content: JSON.stringify(result),
+          });
         },
       },
     },

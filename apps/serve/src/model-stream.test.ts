@@ -35,6 +35,14 @@ function ownership(current = true) {
   return { hasCurrentJobOwnership: () => current };
 }
 
+function fakeTranscript(recorded: { kind: string; content: string }[] = []) {
+  return {
+    append: (input: { kind: string; content: string }) =>
+      void recorded.push({ kind: input.kind, content: input.content }),
+    search: () => [],
+  };
+}
+
 function fakeProvider(
   events: unknown[],
   seen: { provider: string; model: string; context: unknown }[] = [],
@@ -62,6 +70,7 @@ async function collect(stream: AsyncIterable<unknown>) {
 
 test("provider events reach the harness without being reshaped", async () => {
   const seen: { provider: string; model: string; context: unknown }[] = [];
+  const recorded: { kind: string; content: string }[] = [];
   const service = createModelStreamService({
     binding,
     ownership: ownership(),
@@ -72,6 +81,7 @@ test("provider events reach the harness without being reshaped", async () => {
       ],
       seen,
     ),
+    transcript: fakeTranscript(recorded),
   });
 
   expect(await collect(service.stream(request()))).toEqual([
@@ -96,6 +106,13 @@ test("provider events reach the harness without being reshaped", async () => {
       context: { messages: [{ role: "user", content: "implement the HOW" }] },
     },
   ]);
+
+  // model-streamはこのAgent実行系だけを通る全Job種別のtranscriptを一箇所で記録する。
+  expect(recorded.map((entry) => entry.kind)).toEqual([
+    "model.stream.request",
+    "model.stream.event",
+    "model.stream.event",
+  ]);
 });
 
 test("a request for another Job, lease or model is refused", async () => {
@@ -111,6 +128,7 @@ test("a request for another Job, lease or model is refused", async () => {
       binding,
       ownership: ownership(),
       provider,
+      transcript: fakeTranscript(),
     });
 
     expect(await collect(service.stream(request(overrides)))).toEqual([
@@ -129,6 +147,7 @@ test("a serve that lost the current Job ownership starts no model request", asyn
     binding,
     ownership: ownership(false),
     provider: fakeProvider([{ type: "start" }], seen),
+    transcript: fakeTranscript(),
   });
 
   expect(await collect(service.stream(request()))).toEqual([
@@ -150,6 +169,7 @@ test("a model that cannot be used stops the run instead of falling back", async 
         throw new Error("the configured model is unavailable");
       },
     },
+    transcript: fakeTranscript(),
   });
 
   expect(await collect(service.stream(request()))).toEqual([
@@ -171,6 +191,7 @@ test("a provider that fails mid-stream still terminates the stream", async () =>
         throw new Error("the provider connection dropped");
       },
     },
+    transcript: fakeTranscript(),
   });
 
   expect(await collect(service.stream(request()))).toEqual([
@@ -201,6 +222,7 @@ test("an aborted request stops streaming and still ends the stream", async () =>
         }
       },
     },
+    transcript: fakeTranscript(),
   });
 
   const messages: unknown[] = [];

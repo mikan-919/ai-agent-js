@@ -5,6 +5,7 @@ import type {
 } from "@mikan-919/oriel-contracts";
 
 import type { JobOwnershipVerifier } from "./issue-comments";
+import type { TranscriptStore } from "./transcript-store";
 
 /** このJobがmodelへ要求してよい唯一の対象。 */
 export interface ModelStreamBinding {
@@ -35,6 +36,8 @@ export interface ModelStreamServiceDependencies {
   binding: ModelStreamBinding;
   ownership: JobOwnershipVerifier;
   provider: ModelStreamProvider;
+  /** すべてのJob種別が通るAgent実行系のtranscriptを、ここ一箇所で記録する。 */
+  transcript: TranscriptStore;
 }
 
 /**
@@ -48,8 +51,16 @@ export function createModelStreamService({
   binding,
   ownership,
   provider,
+  transcript,
 }: ModelStreamServiceDependencies) {
   const running = new Map<string, AbortController>();
+  const record = (kind: string, content: unknown) =>
+    transcript.append({
+      jobId: binding.jobId,
+      repository: binding.repository,
+      kind,
+      content: JSON.stringify(content),
+    });
 
   async function* stream(
     request: ModelStreamRequest,
@@ -72,6 +83,8 @@ export function createModelStreamService({
       yield rejected(request.requestId, "ownership_not_current");
       return;
     }
+
+    record("model.stream.request", request.context);
 
     const abort = new AbortController();
 
@@ -97,6 +110,7 @@ export function createModelStreamService({
     try {
       for await (const event of events) {
         delivered += 1;
+        record("model.stream.event", event);
         yield {
           type: "model.stream.event",
           requestId: request.requestId,

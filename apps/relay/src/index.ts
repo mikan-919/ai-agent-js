@@ -23,6 +23,7 @@ export interface RelayEnv {
   OWNERSHIP_HEARTBEAT_INTERVAL_MS: string;
   OWNERSHIP_HEARTBEAT_EXPIRY_MS: string;
   OWNERSHIP_AUDIT_INTERVAL_MS: string;
+  TRANSCRIPT_SEARCH_TIMEOUT_MS: string;
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
   GITHUB_APP_JWT_LIFETIME_SECONDS: string;
@@ -92,6 +93,10 @@ export default {
       ownershipAuditIntervalMs: requiredPositiveInteger(
         env.OWNERSHIP_AUDIT_INTERVAL_MS,
         "OWNERSHIP_AUDIT_INTERVAL_MS",
+      ),
+      transcriptSearchTimeoutMs: requiredPositiveInteger(
+        env.TRANSCRIPT_SEARCH_TIMEOUT_MS,
+        "TRANSCRIPT_SEARCH_TIMEOUT_MS",
       ),
       installationTokenPermissions:
         env.INSTALLATION_TOKEN_PERMISSIONS === undefined

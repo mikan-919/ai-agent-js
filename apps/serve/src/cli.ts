@@ -52,6 +52,7 @@ import {
 } from "./pi-model-provider";
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
+import { createTranscriptStore } from "./transcript-store";
 import { startWhatConfirmationJob } from "./what-confirmation-job";
 import { createWhatTriggerLoop } from "./what-trigger-discovery";
 
@@ -756,6 +757,12 @@ if (Bun.argv[2] === "serve") {
     howTriggerLoop?.start();
     prMergeLoop?.start();
     prResponseLoop?.start();
+
+    const transcripts =
+      statePath === undefined
+        ? undefined
+        : createTranscriptStore(openServeLocalState(statePath));
+
     createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
@@ -766,6 +773,18 @@ if (Bun.argv[2] === "serve") {
         void prMergeLoop?.wake(source);
         void prResponseLoop?.wake(source);
       },
+      onTranscriptSearchRequest: (request) =>
+        transcripts === undefined ||
+        repositoryOwner === undefined ||
+        repositoryName === undefined
+          ? []
+          : transcripts.search({
+              repository: { owner: repositoryOwner, name: repositoryName },
+              scope: request.scope === "job" ? "job" : "local",
+              jobId: request.jobId,
+              query: request.query,
+              limit: request.limit,
+            }),
     });
   }
 

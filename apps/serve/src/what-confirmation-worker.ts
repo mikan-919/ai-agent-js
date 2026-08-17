@@ -21,6 +21,7 @@ import {
   createModelStreamService,
   type ModelStreamProvider,
 } from "./model-stream";
+import { createTranscriptStore } from "./transcript-store";
 import { serveOwnedHarnessWhatConfirmationIpc } from "./what-conversation-ipc";
 
 export interface WhatConfirmationOwnership extends JobOwnershipVerifier {
@@ -66,6 +67,15 @@ export function startWhatConfirmationWorker({
 }: StartWhatConfirmationWorkerOptions): WhatConfirmationWorker {
   const database = openServeLocalState(databasePath);
   const jobState = createJobStateStore(database);
+  const transcripts = createTranscriptStore(database);
+
+  transcripts.append({
+    jobId: start.jobId,
+    repository: start.repository,
+    kind: "job.start",
+    content: JSON.stringify({ type: "what_confirmation" }),
+  });
+
   const issueCommentService = createIssueCommentService({
     outbox: createIssueCommentOutbox(database),
     ownershipVerifier: ownership,
@@ -81,6 +91,7 @@ export function startWhatConfirmationWorker({
     },
     ownership,
     provider: modelProvider,
+    transcript: transcripts,
   });
   const target: {
     jobId: string;
@@ -159,6 +170,12 @@ export function startWhatConfirmationWorker({
       result: {
         report(result) {
           reported = result;
+          transcripts.append({
+            jobId: start.jobId,
+            repository: start.repository,
+            kind: "job.result",
+            content: JSON.stringify(result),
+          });
         },
       },
     },

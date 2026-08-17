@@ -2,9 +2,13 @@ import {
   ownershipHeartbeatRequest,
   ownershipHeartbeatResponse,
   parseOwnershipClientMessage,
+  parseTranscriptRelayMessage,
   type DeviceRecord,
   type NotificationServerMessage,
   type OwnershipServerMessage,
+  type TranscriptEntry,
+  type TranscriptSearchRequest,
+  type TranscriptSearchResult,
 } from "@mikan-919/oriel-contracts";
 import { DurableObject } from "cloudflare:workers";
 
@@ -69,6 +73,7 @@ interface OwnershipAttachment {
 interface NotificationAttachment {
   deviceId: string;
   channel: "notification";
+  transcriptSearchTimeoutMs: number;
 }
 
 /**
@@ -79,6 +84,13 @@ interface OwnershipAuditConfig {
   heartbeatIntervalMs: number;
   heartbeatExpiryMs: number;
   auditIntervalMs: number;
+}
+
+interface PendingTranscriptSearch {
+  from: WebSocket;
+  entries: TranscriptEntry[];
+  remaining: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface DeviceRow extends Record<string, SqlStorageValue> {
@@ -130,6 +142,12 @@ function toDeviceRecord(row: DeviceRow): DeviceRecord {
  * 短命codeはhashで保存し、`DELETE ... RETURNING`の単一文で一度だけ消費する。
  */
 export class DeviceRegistryObject extends DurableObject {
+  /** query/結果はDurable Objectsストレージへ保存せず、往復の間だけ保持する。 */
+  private readonly pendingTranscriptSearches = new Map<
+    string,
+    PendingTranscriptSearch
+  >();
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as never);
 
@@ -497,10 +515,15 @@ export class DeviceRegistryObject extends DurableObject {
   private upgradeNotification(request: Request): Response {
     const deviceTokenHash = request.headers.get("x-device-token-hash") ?? "";
     const device = this.authenticateDevice(deviceTokenHash);
+    const transcriptSearchTimeoutMs = Number(
+      request.headers.get("x-transcript-search-timeout-ms"),
+    );
 
     if (
       request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
-      device === null
+      device === null ||
+      !Number.isInteger(transcriptSearchTimeoutMs) ||
+      transcriptSearchTimeoutMs <= 0
     ) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -511,6 +534,7 @@ export class DeviceRegistryObject extends DurableObject {
     pair[1].serializeAttachment({
       deviceId: device.deviceId,
       channel: "notification",
+      transcriptSearchTimeoutMs,
     } satisfies NotificationAttachment);
 
     return new Response(null, { status: 101, webSocket: pair[0] });
@@ -526,6 +550,106 @@ export class DeviceRegistryObject extends DurableObject {
     for (const ws of this.activeNotificationSockets()) {
       ws.send(JSON.stringify(message));
     }
+  }
+
+  /**
+   * transcript検索のrelay。notification channel上を双方向に流れる同じ二つの
+   * message型を、要求元からの起点か、fan-out先からの答えかで振り分ける。
+   * queryも結果もここでは保存せず、往復の間だけin-memoryに保持する。
+   */
+  private handleTranscriptRelayMessage(ws: WebSocket, raw: string): void {
+    let message;
+
+    try {
+      message = parseTranscriptRelayMessage(JSON.parse(raw));
+    } catch {
+      return;
+    }
+
+    if (message.type === "transcript.search.request") {
+      this.fanOutTranscriptSearch(ws, message);
+      return;
+    }
+
+    this.collectTranscriptSearchResult(message.requestId, message.entries);
+  }
+
+  /** repository scopeの検索だけがここへ届く。要求元自身へは中継しない。 */
+  private fanOutTranscriptSearch(
+    ws: WebSocket,
+    request: TranscriptSearchRequest,
+  ): void {
+    const siblings = this.activeNotificationSockets().filter(
+      (socket) => socket !== ws,
+    );
+
+    if (siblings.length === 0) {
+      ws.send(
+        JSON.stringify({
+          type: "transcript.search.result",
+          requestId: request.requestId,
+          entries: [],
+        } satisfies TranscriptSearchResult),
+      );
+      return;
+    }
+
+    const attachment = ws.deserializeAttachment() as NotificationAttachment;
+
+    this.pendingTranscriptSearches.set(request.requestId, {
+      from: ws,
+      entries: [],
+      remaining: siblings.length,
+      timer: setTimeout(
+        () => this.finishTranscriptSearch(request.requestId),
+        attachment.transcriptSearchTimeoutMs,
+      ),
+    });
+
+    const forSiblings: TranscriptSearchRequest = {
+      ...request,
+      scope: "local",
+    };
+
+    for (const sibling of siblings) {
+      sibling.send(JSON.stringify(forSiblings));
+    }
+  }
+
+  private collectTranscriptSearchResult(
+    requestId: string,
+    entries: TranscriptEntry[],
+  ): void {
+    const pending = this.pendingTranscriptSearches.get(requestId);
+
+    if (pending === undefined) {
+      return;
+    }
+
+    pending.entries.push(...entries);
+    pending.remaining -= 1;
+
+    if (pending.remaining <= 0) {
+      this.finishTranscriptSearch(requestId);
+    }
+  }
+
+  private finishTranscriptSearch(requestId: string): void {
+    const pending = this.pendingTranscriptSearches.get(requestId);
+
+    if (pending === undefined) {
+      return;
+    }
+
+    this.pendingTranscriptSearches.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.from.send(
+      JSON.stringify({
+        type: "transcript.search.result",
+        requestId,
+        entries: pending.entries,
+      } satisfies TranscriptSearchResult),
+    );
   }
 
   private activeNotificationSockets(): WebSocket[] {
@@ -652,6 +776,18 @@ export class DeviceRegistryObject extends DurableObject {
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     if (typeof message !== "string") {
+      return;
+    }
+
+    const attachment = ws.deserializeAttachment() as
+      NotificationAttachment | OwnershipAttachment | null;
+
+    if (
+      attachment !== null &&
+      "channel" in attachment &&
+      attachment.channel === "notification"
+    ) {
+      this.handleTranscriptRelayMessage(ws, message);
       return;
     }
 
