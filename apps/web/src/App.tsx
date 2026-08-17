@@ -6,13 +6,21 @@ const csrfHeaderName = `x-${identity.codeName}-csrf`;
 
 interface Job {
   jobId: string;
-  kind: "issue_conversation" | "implementation";
+  kind:
+    | "issue_conversation"
+    | "implementation"
+    | "what_confirmation"
+    | "how_confirmation"
+    | "pr_response";
   status: string | null;
 }
 
 const kindLabel: Record<Job["kind"], string> = {
   issue_conversation: "Issue対話",
   implementation: "実装",
+  what_confirmation: "WHAT確定",
+  how_confirmation: "HOW確定",
+  pr_response: "PR対応",
 };
 
 async function postJson(
