@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import type { DeviceRegistrationPurpose } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 import { Hono, type Context } from "hono";
+import { serveStatic } from "hono/bun";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
 
@@ -35,12 +37,17 @@ function isDeviceRegistrationPurpose(
 const loopbackHostname = "127.0.0.1";
 const readinessPath = "/healthz";
 const callbackPath = "/device/callback";
+const webPath = "/app";
 const sessionCookieName = `${identity.codeName}_session`;
 const csrfHeaderName = `x-${identity.codeName}-csrf`;
+/** ビルド後は`dist/cli.js`と同じ`dist/`直下にVite buildの`web/`が並ぶ。 */
+const defaultWebDistRoot = fileURLToPath(new URL("./web", import.meta.url));
 
 export interface ServeHttpServerOptions {
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
+  /** Web UIのビルド成果物を置くディレクトリ。既定はビルド後の`dist/web`。 */
+  webDistRoot?: string;
   /**
    * 明示的に起動する、コードを変更しないIssue対話。relay所有権を取れた場合だけ
    * workerが動く。
@@ -180,13 +187,21 @@ function shellHtml(csrfToken: string): string {
 `;
 }
 
+type JobKind = "issue_conversation" | "implementation";
+
+interface ActiveJob {
+  kind: JobKind;
+  conversation: StartedIssueConversation;
+}
+
 export function startServeHttpServer({
   createDeviceRegistration,
   startIssueConversation,
   startImplementationJob,
+  webDistRoot = defaultWebDistRoot,
 }: ServeHttpServerOptions = {}) {
   const { sessionId, csrfToken } = newSessionSecrets();
-  const activeConversations = new Set<StartedIssueConversation>();
+  const activeConversations = new Set<ActiveJob>();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
   const app = new Hono();
@@ -306,6 +321,7 @@ export function startServeHttpServer({
   /** 起動できたJobを保持し、終了まで面倒を見る共通処理。 */
   async function holdStartedJob(
     context: Context,
+    kind: JobKind,
     start: () => Promise<
       StartedIssueConversation | { status: string; reason?: string }
     >,
@@ -316,13 +332,14 @@ export function startServeHttpServer({
       return context.json(started, 409);
     }
 
-    activeConversations.add(started);
+    const active: ActiveJob = { kind, conversation: started };
+    activeConversations.add(active);
     // 正常終了でも失敗でも、leaseとheartbeatとprocessを片付ける。
     void started.finished
       .catch(() => undefined)
       .finally(() => {
         started.close();
-        activeConversations.delete(started);
+        activeConversations.delete(active);
       });
 
     return context.json({
@@ -355,7 +372,7 @@ export function startServeHttpServer({
       return context.text("Bad Request", 400);
     }
 
-    return holdStartedJob(context, () =>
+    return holdStartedJob(context, "issue_conversation", () =>
       startIssueConversation({ issueNumber, body: body.body as string }),
     );
   });
@@ -379,17 +396,29 @@ export function startServeHttpServer({
       return context.text("Bad Request", 400);
     }
 
-    return holdStartedJob(context, () =>
+    return holdStartedJob(context, "implementation", () =>
       startImplementationJob({ linearIssueId: body.linearIssueId as string }),
     );
   });
 
-  app.get("/api/issue-conversations", (context) =>
+  // Workflow/Jobの現在状態を横断的に確認する唯一の一覧経路。
+  app.get("/api/jobs", (context) =>
     context.json({
-      jobs: [...activeConversations].map((conversation) => ({
+      jobs: [...activeConversations].map(({ kind, conversation }) => ({
         jobId: conversation.jobId,
+        kind,
         status: conversation.jobStatus(),
       })),
+    }),
+  );
+
+  // Workflow/Job一覧を確認するWeb UI。ビルド成果物をそのまま配信する。
+  app.get(webPath, (context) => context.redirect(`${webPath}/`, 302));
+  app.use(
+    `${webPath}/*`,
+    serveStatic({
+      root: webDistRoot,
+      rewriteRequestPath: (path) => path.slice(webPath.length) || "/",
     }),
   );
 
@@ -419,8 +448,8 @@ export function startServeHttpServer({
     server,
     /** 停止時も動いているJobのprocessと所有権接続を閉じる。 */
     close() {
-      for (const conversation of activeConversations) {
-        conversation.close();
+      for (const active of activeConversations) {
+        active.conversation.close();
       }
 
       activeConversations.clear();

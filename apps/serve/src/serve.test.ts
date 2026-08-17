@@ -79,6 +79,15 @@ test("serve announces one loopback health URL and serves readiness without confi
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
     expect(await response.text()).toBe('{"status":"ok"}');
+
+    // ビルド後の`dist/cli.js`から見て`dist/web`のVite buildを実際に配信できる。
+    const webIndex = await fetch(new URL("/app/", url), {
+      headers: { Origin: url.origin },
+    });
+
+    expect(webIndex.status).toBe(200);
+    expect(webIndex.headers.get("content-type")).toContain("text/html");
+    expect(await webIndex.text()).toContain('<div id="root">');
   } finally {
     child.kill();
     await child.exited;

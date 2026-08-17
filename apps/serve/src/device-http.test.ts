@@ -434,12 +434,12 @@ test("a started conversation is held, driven to completion, and cleaned up", asy
 
     expect(await started.json()).toEqual({ status: "started", jobId: "job-1" });
 
-    const active = await fetch(`${server.origin}/api/issue-conversations`, {
+    const active = await fetch(`${server.origin}/api/jobs`, {
       headers: { Origin: server.origin, cookie: shell.session },
     });
 
     expect(await active.json()).toEqual({
-      jobs: [{ jobId: "job-1", status: "running" }],
+      jobs: [{ jobId: "job-1", kind: "issue_conversation", status: "running" }],
     });
     expect(conversation.state.closed).toBe(false);
 
@@ -450,10 +450,9 @@ test("a started conversation is held, driven to completion, and cleaned up", asy
     expect(conversation.state.closed).toBe(true);
     expect(conversation.state.status).toBe("completed");
 
-    const afterCompletion = await fetch(
-      `${server.origin}/api/issue-conversations`,
-      { headers: { Origin: server.origin, cookie: shell.session } },
-    );
+    const afterCompletion = await fetch(`${server.origin}/api/jobs`, {
+      headers: { Origin: server.origin, cookie: shell.session },
+    });
 
     expect(await afterCompletion.json()).toEqual({ jobs: [] });
   } finally {
@@ -538,6 +537,20 @@ test("the implementation Job entry takes only the approved Linear issue", async 
     expect(implementations).toEqual([{ linearIssueId: "ENG-12" }]);
     // 対話の起動経路とは混ぜない。
     expect(conversations).toEqual([]);
+
+    const active = await fetch(`${server.origin}/api/jobs`, {
+      headers: { Origin: server.origin, cookie: shell.session },
+    });
+
+    expect(await active.json()).toEqual({
+      jobs: [
+        {
+          jobId: "implementation-1",
+          kind: "implementation",
+          status: "running",
+        },
+      ],
+    });
   } finally {
     server.close();
   }
