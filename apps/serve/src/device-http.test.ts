@@ -90,6 +90,26 @@ test("the localhost shell sets a per-start session cookie and hands out a CSRF t
   }
 });
 
+test("the web UI session endpoint hands out a session and a CSRF token without device registration", async () => {
+  const server = startServer(undefined as unknown as DeviceRegistrationFlow);
+
+  try {
+    const response = await fetch(`${server.origin}/app/session`, {
+      headers: { Origin: server.origin },
+    });
+    const cookie = response.headers.get("set-cookie") ?? "";
+
+    expect(response.status).toBe(200);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Strict");
+    const body = (await response.json()) as { csrfToken: string };
+
+    expect(body.csrfToken).not.toBe("");
+  } finally {
+    server.close();
+  }
+});
+
 test("state changing requests need the session cookie, the CSRF header, and a same-origin Origin", async () => {
   const { flow } = fakeFlow();
   const server = startServer(flow);

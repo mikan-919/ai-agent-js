@@ -49,6 +49,7 @@
     "apps/web": {
       "name": "@mikan-919/oriel-web",
       "dependencies": {
+        "@mikan-919/oriel-identity": "workspace:*",
         "react": "^19",
         "react-dom": "^19",
       },

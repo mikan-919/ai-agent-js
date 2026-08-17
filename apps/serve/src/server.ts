@@ -413,6 +413,15 @@ export function startServeHttpServer({
   );
 
   // Workflow/Job一覧を確認するWeb UI。ビルド成果物をそのまま配信する。
+  // deviceRegistrationの設定有無に関わらず、sessionとCSRF tokenだけを配る。
+  app.get(`${webPath}/session`, (context) => {
+    context.header(
+      "Set-Cookie",
+      `${sessionCookieName}=${sessionId}; HttpOnly; SameSite=Strict; Path=/`,
+    );
+
+    return context.json({ csrfToken });
+  });
   app.get(webPath, (context) => context.redirect(`${webPath}/`, 302));
   app.use(
     `${webPath}/*`,
