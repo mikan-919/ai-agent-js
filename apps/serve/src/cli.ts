@@ -7,8 +7,16 @@ import {
   createDeviceRegistrationFlow,
 } from "./device-registration";
 import { createDiscoveryLoop } from "./discovery";
-import { createGitHubApprovalPorts } from "./github-approval-ports";
+import {
+  createGitHubApprovalPorts,
+  createGitHubTargetBaseReader,
+} from "./github-approval-ports";
 import { createGitHubOpenIssuePort } from "./github-discovery-ports";
+import {
+  createGitHubPrResponsePorts,
+  createGitHubPrResponseReconciliationPorts,
+  createGitHubPrResponseReportPorts,
+} from "./github-pr-response-ports";
 import {
   createGitHubPullRequestMergeCheck,
   createGitHubPullRequestPorts,
@@ -33,6 +41,9 @@ import { openServeLocalState } from "./local-state";
 import { createNotificationConnection } from "./notification-connection";
 import { createPendingCancellationStore } from "./pending-cancellations";
 import { createPrMergeDiscoveryLoop } from "./pr-merge-discovery";
+import { createPrResponseCheckFailureStore } from "./pr-response-check-failures";
+import { createPrResponseLoop } from "./pr-response-discovery";
+import { startPrResponseJob } from "./pr-response-job";
 import { createPullRequestWatchStore } from "./pull-request-watch";
 import {
   bunSecretsModelCredential,
@@ -598,11 +609,132 @@ if (Bun.argv[2] === "serve") {
         })()
       : undefined;
 
+  /**
+   * ADR 0007のPR対応Job。実装Jobと同じ構成が揃っている場合だけ動かし、Linear
+   * credentialは要求しない(このJobはLinearを一切触らない)。
+   */
+  const prResponseLoop =
+    implementationReady &&
+    relayDeviceClient !== undefined &&
+    discoveryPollIntervalMs !== undefined &&
+    statePath !== undefined
+      ? (() => {
+          const database = openServeLocalState(statePath);
+          const checkFailures = createPrResponseCheckFailureStore(database);
+          const repository = { owner: repositoryOwner, name: repositoryName };
+          const createPrResponseOctokit = createInstallationOctokitResolver({
+            relay: relayDeviceClient,
+            tokenStore,
+            repositoryId,
+            purpose: "pr_response",
+          });
+
+          return createPrResponseLoop({
+            createPorts: async () => {
+              const octokit = await createPrResponseOctokit();
+
+              if (octokit === null) {
+                return null;
+              }
+
+              const actorLogin = await octokit.rest.users
+                .getAuthenticated()
+                .then((response) => response.data.login)
+                .catch(() => null);
+
+              if (actorLogin === null) {
+                return null;
+              }
+
+              return createGitHubPrResponsePorts({
+                octokit,
+                repository,
+                actorLogin,
+              });
+            },
+            repositoryId,
+            checkFailures,
+            startPrResponseJob: ({
+              prNumber,
+              headRef,
+              headOid,
+              githubIssueNumber,
+              approvalFingerprint,
+              trigger,
+            }) =>
+              startPrResponseJob({
+                relayOrigin: environment,
+                tokenStore,
+                databasePath: statePath,
+                harnessEntry: new URL("./harness.js", import.meta.url),
+                repositoryId,
+                repository,
+                heartbeatStopMs,
+                repositoryRoot,
+                worktreesRoot,
+                remote: canonicalRemote,
+                resolveCredential: createInstallationGitCredentialResolver({
+                  relay: relayDeviceClient,
+                  tokenStore,
+                  repositoryId,
+                }),
+                model: { provider: modelProviderId, id: modelId },
+                modelProvider: createPiModelStreamProvider({
+                  models,
+                  resolveApiKey: (provider) =>
+                    bunSecretsModelCredential(provider).get(),
+                }),
+                createExecutionConfigPorts: async () => {
+                  const octokit = await createInstallationOctokitResolver({
+                    relay: relayDeviceClient,
+                    tokenStore,
+                    repositoryId,
+                    purpose: "admission",
+                  })();
+
+                  return octokit === null
+                    ? null
+                    : createGitHubTargetBaseReader({ octokit, repository });
+                },
+                createReconciliationPorts: async () => {
+                  const octokit = await createPrResponseOctokit();
+
+                  return octokit === null
+                    ? null
+                    : createGitHubPrResponseReconciliationPorts({
+                        octokit,
+                        repository,
+                      });
+                },
+                createReportPorts: async () => {
+                  const octokit = await createPrResponseOctokit();
+
+                  return octokit === null
+                    ? null
+                    : createGitHubPrResponseReportPorts({
+                        octokit,
+                        repository,
+                      });
+                },
+                checkFailures,
+                prNumber,
+                headRef,
+                headOid,
+                githubIssueNumber,
+                approvalFingerprint,
+                trigger,
+              }),
+            pollIntervalMs: discoveryPollIntervalMs,
+          });
+        })()
+      : undefined;
+
   if (
     (discoveryLoop !== undefined ||
       whatTriggerLoop !== undefined ||
       howTriggerLoop !== undefined ||
-      prMergeLoop !== undefined) &&
+      prMergeLoop !== undefined ||
+      prResponseLoop !== undefined) &&
     repositoryId !== undefined &&
     environment !== undefined
   ) {
@@ -623,6 +755,7 @@ if (Bun.argv[2] === "serve") {
     whatTriggerLoop?.start();
     howTriggerLoop?.start();
     prMergeLoop?.start();
+    prResponseLoop?.start();
     createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
@@ -631,6 +764,7 @@ if (Bun.argv[2] === "serve") {
         void whatTriggerLoop?.wake(source);
         void howTriggerLoop?.wake(source);
         void prMergeLoop?.wake(source);
+        void prResponseLoop?.wake(source);
       },
     });
   }

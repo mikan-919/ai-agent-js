@@ -10,4 +10,5 @@ export * from "./linear-comment";
 export * from "./linear-description";
 export * from "./linear-triage-link";
 export * from "./model-stream";
+export * from "./pr-response";
 export * from "./what-confirmation";

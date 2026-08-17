@@ -65,6 +65,101 @@ function classifySealFailure(error: unknown): SealOutcome {
   return types.length > 0 ? "rejected" : "unknown";
 }
 
+export interface GitHubTargetBaseReader {
+  readTargetBase(): Promise<{ ref: string; oid: string } | null>;
+  readTargetBaseFile(
+    oid: string,
+    path: string,
+  ): Promise<
+    | { status: "present"; content: string }
+    | { status: "absent" }
+    | { status: "unknown" }
+  >;
+}
+
+/**
+ * 取り込み先branchの現在値とその版のfile内容を読む境界。
+ *
+ * ADR 0003の実装Jobと、[ADR 0007](../../../docs/adr/0007-pull-request-response-job.md)
+ * のPR対応Jobの両方が、実行設定を読むためだけにこれを使う。
+ */
+export function createGitHubTargetBaseReader({
+  octokit,
+  repository,
+}: {
+  octokit: Octokit;
+  repository: GitHubRepository;
+}): GitHubTargetBaseReader {
+  const owner = repository.owner;
+  const name = repository.name;
+
+  return {
+    async readTargetBase() {
+      try {
+        const read = (await octokit.graphql(
+          `query($owner: String!, $name: String!) {
+             repository(owner: $owner, name: $name) {
+               defaultBranchRef { name target { oid } }
+             }
+           }`,
+          { owner, name },
+        )) as {
+          repository?: {
+            defaultBranchRef?: {
+              name?: string;
+              target?: { oid?: string } | null;
+            } | null;
+          } | null;
+        };
+        const base = read.repository?.defaultBranchRef;
+
+        return base?.name === undefined || base.target?.oid === undefined
+          ? null
+          : { ref: `refs/heads/${base.name}`, oid: base.target.oid };
+      } catch {
+        return null;
+      }
+    },
+    /**
+     * 実行設定は取り込み先branchの版だけを信頼する。
+     *
+     * ROADMAPのとおり、Agentが作業branchで変更した設定はそのJobへ適用しない。
+     * 承認の読み直しで確認した取り込み先のcommit OIDから直接読み、読めない場合を
+     * 不存在と区別する。
+     */
+    async readTargetBaseFile(oid, path) {
+      try {
+        const read = (await octokit.graphql(
+          `query($owner: String!, $name: String!, $expression: String!) {
+             repository(owner: $owner, name: $name) {
+               object(expression: $expression) {
+                 ... on Blob { text isBinary }
+               }
+             }
+           }`,
+          { owner, name, expression: `${oid}:${path}` },
+        )) as {
+          repository?: {
+            object?: { text?: string | null; isBinary?: boolean | null } | null;
+          } | null;
+        };
+        const object = read.repository?.object;
+
+        if (object === null || object === undefined) {
+          return { status: "absent" };
+        }
+
+        // blobでない、またはtextとして読めないものを設定として解釈しない。
+        return typeof object.text === "string" && object.isBinary !== true
+          ? { status: "present", content: object.text }
+          : { status: "unknown" };
+      } catch {
+        return { status: "unknown" };
+      }
+    },
+  };
+}
+
 /**
  * ADR 0003のadmissionがGitHubへ触る境界。読み取りは現在値だけを返し、封印は
  * GraphQLの`updateRefs`一回だけを使う。
@@ -77,6 +172,7 @@ export function createGitHubApprovalPorts({
 }: GitHubApprovalPortsOptions): ImplementationApprovalPorts {
   const owner = repository.owner;
   const name = repository.name;
+  const targetBase = createGitHubTargetBaseReader({ octokit, repository });
 
   function issueNumberOf(url: string): number | null {
     let parsed;
@@ -163,32 +259,7 @@ export function createGitHubApprovalPorts({
         return null;
       }
     },
-    async readTargetBase() {
-      try {
-        const read = (await octokit.graphql(
-          `query($owner: String!, $name: String!) {
-             repository(owner: $owner, name: $name) {
-               defaultBranchRef { name target { oid } }
-             }
-           }`,
-          { owner, name },
-        )) as {
-          repository?: {
-            defaultBranchRef?: {
-              name?: string;
-              target?: { oid?: string } | null;
-            } | null;
-          } | null;
-        };
-        const base = read.repository?.defaultBranchRef;
-
-        return base?.name === undefined || base.target?.oid === undefined
-          ? null
-          : { ref: `refs/heads/${base.name}`, oid: base.target.oid };
-      } catch {
-        return null;
-      }
-    },
+    readTargetBase: () => targetBase.readTargetBase(),
     async readRef(qualifiedRef): Promise<RefRead> {
       try {
         const read = (await octokit.graphql(
@@ -213,43 +284,7 @@ export function createGitHubApprovalPorts({
         return { status: "unknown" };
       }
     },
-    /**
-     * 実行設定は取り込み先branchの版だけを信頼する。
-     *
-     * ROADMAPのとおり、Agentが作業branchで変更した設定はそのJobへ適用しない。
-     * 承認の読み直しで確認した取り込み先のcommit OIDから直接読み、読めない場合を
-     * 不存在と区別する。
-     */
-    async readTargetBaseFile(oid, path) {
-      try {
-        const read = (await octokit.graphql(
-          `query($owner: String!, $name: String!, $expression: String!) {
-             repository(owner: $owner, name: $name) {
-               object(expression: $expression) {
-                 ... on Blob { text isBinary }
-               }
-             }
-           }`,
-          { owner, name, expression: `${oid}:${path}` },
-        )) as {
-          repository?: {
-            object?: { text?: string | null; isBinary?: boolean | null } | null;
-          } | null;
-        };
-        const object = read.repository?.object;
-
-        if (object === null || object === undefined) {
-          return { status: "absent" };
-        }
-
-        // blobでない、またはtextとして読めないものを設定として解釈しない。
-        return typeof object.text === "string" && object.isBinary !== true
-          ? { status: "present", content: object.text }
-          : { status: "unknown" };
-      } catch {
-        return { status: "unknown" };
-      }
-    },
+    readTargetBaseFile: (oid, path) => targetBase.readTargetBaseFile(oid, path),
     async listOpenPullRequestHeadRefs() {
       try {
         const pulls = (await octokit.paginate(

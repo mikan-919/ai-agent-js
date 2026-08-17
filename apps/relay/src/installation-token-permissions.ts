@@ -7,12 +7,16 @@ import { identity } from "@mikan-919/oriel-identity";
  * でも守る。製品が必要とするのは、canonicalブランチの送信（contents）、Issueと
  * Linear連携の書き込み（issues）、レビュー可能なプルリクエスト（pull_requests）、
  * repositoryの現在値読み取り（metadata）だけとする。これ以外のkey、およびここへ
- * 書いた値より広い値は受け付けない。
+ * 書いた値より広い値は受け付けない。PR対応Job([ADR 0007](../../../docs/adr/0007-pull-request-response-job.md))
+ * のため、required checkの読み取り(checks)とbranch protectionの読み取り
+ * (administration)も同じallowlistで絞る。
  */
 export const maximumInstallationTokenPermissions = {
   contents: ["read", "write"],
   issues: ["read", "write"],
   pull_requests: ["read", "write"],
+  checks: ["read"],
+  administration: ["read"],
   metadata: ["read"],
 } as const satisfies Record<string, readonly string[]>;
 
@@ -43,6 +47,18 @@ export const installationTokenPurposePermissions = {
   pull_request: {
     contents: "read",
     pull_requests: "write",
+    metadata: "read",
+  },
+  /**
+   * PR対応Jobのdiscoveryと報告。read only(pull_requests/checks/administration)
+   * とPRへのcomment投稿(issues)だけを持ち、mergeやcontentsの書き込みは持たない。
+   * canonicalブランチへの送信は既存の"implementation"用途を再利用する。
+   */
+  pr_response: {
+    pull_requests: "read",
+    checks: "read",
+    administration: "read",
+    issues: "write",
     metadata: "read",
   },
 } as const satisfies Record<string, Record<string, string>>;

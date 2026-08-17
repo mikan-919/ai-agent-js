@@ -136,6 +136,7 @@ export const installationTokenPurposeSchema = v.picklist([
   "admission",
   "implementation",
   "pull_request",
+  "pr_response",
 ]);
 
 export type InstallationTokenPurpose = v.InferOutput<

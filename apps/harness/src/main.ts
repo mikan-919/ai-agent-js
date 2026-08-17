@@ -1,8 +1,10 @@
 import {
   parseHowConfirmationStartEvent,
   parseImplementationStartEvent,
+  parsePrResponseStartEvent,
   parseWhatConfirmationStartEvent,
   type ImplementationClientMessage,
+  type PrResponseClientMessage,
 } from "@mikan-919/oriel-contracts";
 
 import { createImplementationAgent } from "./agent";
@@ -16,6 +18,8 @@ import {
   postIssueConversationReply,
 } from "./issue-conversation";
 import { createProxyStreamFn, type ModelStreamChannel } from "./model-channel";
+import { createPrResponseAgent } from "./pr-response-agent";
+import { runPrResponseWorker } from "./pr-response";
 import { createWhatConfirmationAgent } from "./what-confirmation-agent";
 import { createWhatConfirmationTools } from "./what-confirmation-tools";
 import { createWorktreeTools } from "./worktree-tools";
@@ -129,6 +133,51 @@ if (mode === "implementation") {
 
   process.stderr.write(
     `implementation ${outcome.checkpoint} verified=${outcome.verified} agent=${outcome.agent.stopReason}\n`,
+  );
+  process.exit(outcome.checkpoint === "rejected" ? 1 : 0);
+}
+
+if (mode === "pr-response") {
+  // 既に開いているPull Requestのcanonicalブランチの現在の先端だけを受け取る。
+  const start = parsePrResponseStartEvent(await read());
+  const channel: ModelStreamChannel = {
+    open(request) {
+      const stream = router.open(request.requestId);
+
+      write(request);
+
+      return stream;
+    },
+    abort(requestId) {
+      write({ type: "model.stream.abort", requestId });
+    },
+  };
+  const outcome = await runPrResponseWorker({
+    start,
+    transport: {
+      write: async (message: PrResponseClientMessage) => {
+        await write(message);
+      },
+      read,
+    },
+    git: systemLocalGit,
+    agent: createPrResponseAgent({
+      streamFn: createProxyStreamFn({
+        jobId: start.jobId,
+        jobLeaseId: start.jobLeaseId,
+        model: start.model,
+        channel,
+      }),
+      tools: createWorktreeTools({
+        worktreePath: start.worktreePath,
+        runCommand,
+      }),
+    }),
+    runCommand,
+  });
+
+  process.stderr.write(
+    `pr_response ${outcome.checkpoint} verified=${outcome.verified} agent=${outcome.agent.stopReason}\n`,
   );
   process.exit(outcome.checkpoint === "rejected" ? 1 : 0);
 }

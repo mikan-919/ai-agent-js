@@ -13,6 +13,8 @@ describe("installation token permissions", () => {
       contents: "write",
       issues: "write",
       pull_requests: "write",
+      checks: "read",
+      administration: "read",
       metadata: "read",
     });
   });
@@ -73,6 +75,15 @@ describe("installation token permissions", () => {
     expect(installationTokenPurposePermissions.pull_request).toEqual({
       contents: "read",
       pull_requests: "write",
+      metadata: "read",
+    });
+    // PR対応Jobのdiscoveryと報告は読み取りとPRへのcomment投稿だけで、mergeや
+    // contentsの書き込みは持たない(ADR 0007)。
+    expect(installationTokenPurposePermissions.pr_response).toEqual({
+      pull_requests: "read",
+      checks: "read",
+      administration: "read",
+      issues: "write",
       metadata: "read",
     });
   });
