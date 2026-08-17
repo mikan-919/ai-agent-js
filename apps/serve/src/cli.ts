@@ -28,6 +28,7 @@ import { startImplementationJob } from "./implementation-job";
 import { createInstallationGitCredentialResolver } from "./installation-credential";
 import { createInstallationOctokitResolver } from "./installation-octokit";
 import { startIssueConversationJob } from "./issue-conversation-job";
+import { createJobRegistry, holdIfStarted } from "./job-registry";
 import {
   bunSecretsLinearToken,
   createLinearApprovalReader,
@@ -74,6 +75,12 @@ function requiredNumber(name: string): number | undefined {
 }
 
 if (Bun.argv[2] === "serve") {
+  /**
+   * Workflow/Job一覧の唯一の正本。HTTP経由の起動(POST /api/*)とdiscoveryLoop
+   * などHTTPを経由しない自立起動の両方が、同じJob起動関数を通じてここへ登録
+   * される。
+   */
+  const jobRegistry = createJobRegistry();
   const environment = Bun.env[`${identity.environmentPrefix}RELAY_ORIGIN`];
   const statePath = Bun.env[`${identity.environmentPrefix}STATE_PATH`];
   const repositoryId = requiredNumber("REPOSITORY_ID");
@@ -233,7 +240,9 @@ if (Bun.argv[2] === "serve") {
               octokit,
               repository: { owner: repositoryOwner, name: repositoryName },
             }),
-        })
+        }).then((result) =>
+          holdIfStarted(jobRegistry, "implementation", result),
+        )
     : undefined;
 
   /**
@@ -293,7 +302,9 @@ if (Bun.argv[2] === "serve") {
                   };
             },
             heartbeatStopMs,
-          })
+          }).then((result) =>
+            holdIfStarted(jobRegistry, "what_confirmation", result),
+          )
       : undefined;
 
   /**
@@ -353,10 +364,13 @@ if (Bun.argv[2] === "serve") {
               };
             },
             heartbeatStopMs,
-          })
+          }).then((result) =>
+            holdIfStarted(jobRegistry, "how_confirmation", result),
+          )
       : undefined;
 
   const httpServer = startServeHttpServer({
+    jobRegistry,
     startImplementationJob: startImplementation,
     startIssueConversation: conversationReady
       ? ({ issueNumber, body }) =>
@@ -378,7 +392,9 @@ if (Bun.argv[2] === "serve") {
             issueNumber,
             body,
             heartbeatStopMs,
-          })
+          }).then((result) =>
+            holdIfStarted(jobRegistry, "issue_conversation", result),
+          )
       : undefined,
     createDeviceRegistration:
       environment === undefined ||
@@ -724,7 +740,9 @@ if (Bun.argv[2] === "serve") {
                 githubIssueNumber,
                 approvalFingerprint,
                 trigger,
-              }),
+              }).then((result) =>
+                holdIfStarted(jobRegistry, "pr_response", result),
+              ),
             pollIntervalMs: discoveryPollIntervalMs,
           });
         })()

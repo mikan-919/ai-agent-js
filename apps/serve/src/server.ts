@@ -7,14 +7,15 @@ import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
+import {
+  createJobRegistry,
+  type JobRegistry,
+  type StartedJob,
+} from "./job-registry";
 
 /** 起動できたJobの取り扱い。開始結果を捨てず、終了まで面倒を見る。 */
-export interface StartedIssueConversation {
+export interface StartedIssueConversation extends StartedJob {
   status: "started";
-  jobId: string;
-  finished: Promise<void>;
-  jobStatus(): string | null;
-  close(): void;
 }
 
 function isStarted(
@@ -48,6 +49,11 @@ export interface ServeHttpServerOptions {
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
   /** Web UIのビルド成果物を置くディレクトリ。既定はビルド後の`dist/web`。 */
   webDistRoot?: string;
+  /**
+   * Workflow/Job一覧の唯一の正本。discoveryLoopなどHTTPを経由しない起動経路と
+   * 共有できるよう、既定では内部で新しく作らず外部から注入できるようにする。
+   */
+  jobRegistry?: JobRegistry;
   /**
    * 明示的に起動する、コードを変更しないIssue対話。relay所有権を取れた場合だけ
    * workerが動く。
@@ -187,21 +193,14 @@ function shellHtml(csrfToken: string): string {
 `;
 }
 
-type JobKind = "issue_conversation" | "implementation";
-
-interface ActiveJob {
-  kind: JobKind;
-  conversation: StartedIssueConversation;
-}
-
 export function startServeHttpServer({
   createDeviceRegistration,
   startIssueConversation,
   startImplementationJob,
   webDistRoot = defaultWebDistRoot,
+  jobRegistry = createJobRegistry(),
 }: ServeHttpServerOptions = {}) {
   const { sessionId, csrfToken } = newSessionSecrets();
-  const activeConversations = new Set<ActiveJob>();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
   const app = new Hono();
@@ -318,10 +317,16 @@ export function startServeHttpServer({
     return context.json(await deviceRegistration!.complete(callbackUrl));
   });
 
-  /** 起動できたJobを保持し、終了まで面倒を見る共通処理。 */
+  /**
+   * 起動できたJobをHTTPレスポンスへ変換する共通処理。
+   *
+   * Job registryへの登録は呼び出し元(`startIssueConversation`/
+   * `startImplementationJob`自体)の責務とする。discoveryLoopなどHTTPを経由
+   * しない起動経路も同じJob起動関数を呼ぶため、登録をここへ置くと二重登録に
+   * なるか、HTTPを経由しない起動が一覧から漏れるかのどちらかになる。
+   */
   async function holdStartedJob(
     context: Context,
-    kind: JobKind,
     start: () => Promise<
       StartedIssueConversation | { status: string; reason?: string }
     >,
@@ -331,16 +336,6 @@ export function startServeHttpServer({
     if (!isStarted(started)) {
       return context.json(started, 409);
     }
-
-    const active: ActiveJob = { kind, conversation: started };
-    activeConversations.add(active);
-    // 正常終了でも失敗でも、leaseとheartbeatとprocessを片付ける。
-    void started.finished
-      .catch(() => undefined)
-      .finally(() => {
-        started.close();
-        activeConversations.delete(active);
-      });
 
     return context.json({
       status: "started",
@@ -372,7 +367,7 @@ export function startServeHttpServer({
       return context.text("Bad Request", 400);
     }
 
-    return holdStartedJob(context, "issue_conversation", () =>
+    return holdStartedJob(context, () =>
       startIssueConversation({ issueNumber, body: body.body as string }),
     );
   });
@@ -396,21 +391,13 @@ export function startServeHttpServer({
       return context.text("Bad Request", 400);
     }
 
-    return holdStartedJob(context, "implementation", () =>
+    return holdStartedJob(context, () =>
       startImplementationJob({ linearIssueId: body.linearIssueId as string }),
     );
   });
 
   // Workflow/Jobの現在状態を横断的に確認する唯一の一覧経路。
-  app.get("/api/jobs", (context) =>
-    context.json({
-      jobs: [...activeConversations].map(({ kind, conversation }) => ({
-        jobId: conversation.jobId,
-        kind,
-        status: conversation.jobStatus(),
-      })),
-    }),
-  );
+  app.get("/api/jobs", (context) => context.json({ jobs: jobRegistry.list() }));
 
   // Workflow/Job一覧を確認するWeb UI。ビルド成果物をそのまま配信する。
   // deviceRegistrationの設定有無に関わらず、sessionとCSRF tokenだけを配る。
@@ -455,13 +442,10 @@ export function startServeHttpServer({
   return {
     readinessUrl: new URL(`http://${expectedAuthority}${readinessPath}`),
     server,
+    jobRegistry,
     /** 停止時も動いているJobのprocessと所有権接続を閉じる。 */
     close() {
-      for (const active of activeConversations) {
-        active.conversation.close();
-      }
-
-      activeConversations.clear();
+      jobRegistry.closeAll();
       server.stop(true);
     },
   };

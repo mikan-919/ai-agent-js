@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
+import { createJobRegistry, holdIfStarted } from "./job-registry";
 import { startServeHttpServer, type StartedIssueConversation } from "./server";
 
 const installationId = 7;
@@ -40,10 +41,28 @@ function startServer(
     linearIssueId: string;
   }) => Promise<StartedIssueConversation | { status: string; reason?: string }>,
 ) {
+  const jobRegistry = createJobRegistry();
   const server = startServeHttpServer({
     createDeviceRegistration: () => flow,
-    startIssueConversation,
-    startImplementationJob,
+    jobRegistry,
+    startIssueConversation:
+      startIssueConversation === undefined
+        ? undefined
+        : async (input) =>
+            holdIfStarted(
+              jobRegistry,
+              "issue_conversation",
+              await startIssueConversation(input),
+            ),
+    startImplementationJob:
+      startImplementationJob === undefined
+        ? undefined
+        : async (input) =>
+            holdIfStarted(
+              jobRegistry,
+              "implementation",
+              await startImplementationJob(input),
+            ),
   });
 
   return {
