@@ -103,7 +103,8 @@ packages/identity
   3. Job単独override。人間が`NewJobModal`から明示的に起動できる`implementation`だけに存在する。`what_confirmation`/`how_confirmation`/`pr_response`は`discoveryLoop`がwebhook/pollingから自動起動し、その場で選ぶ人間がいないためper-kind既定値どまり。永続化せず、起動APIの引数としてその場限りで渡す。
   - 選択のgranularityは「Job作成時点で固定」。同一Job（同一harness process）実行中の途中切り替えは対象外とし、別増分にする。
   - per-kind既定値とinstance既定値は新しい保存機構を作らず、instance設定と同じlocal state SQLiteへ保存する。
-  - 未決定: per-kind既定値をWeb UIでどう編集するか（現状の`ConfigModal`は読み取り専用）。model IDを自由入力にするか、provider側（LM Studioなど）から一覧取得して選ばせるか。
+  - per-kind既定値の編集は既存の`ConfigModal`を拡張する（read-only表示から、base設定＋4種別のper-kind override入力へ）。別画面は今のところ作らない。
+  - model一覧の選択も同じ設定パネルへ含める。`apps/serve/src/lm-studio-provider.ts`の暫定providerは既に`createProvider()`でpi-aiの`Provider`契約を実装し、`fetchModels()`がLM Studio自身の`GET /api/v0/models`から一覧を取得済み。`pi-model-provider.ts`の`createServeModels()`がこれをpi-ai公式providerと同じ`Models`集合へ登録しているため、`Models.getAvailable()`/`getModel()`は既に一覧取得できる。欠けているのはこの`Models`集合をHTTP経由でWeb UIへ届ける配線（`/api/config`拡張または新endpoint）だけで、provider側の作り直しは不要。
 - local state SQLiteのdefault置き場所は`~/.local/share/oriel/`（XDG_DATA_HOME、v1はLinux/WSL2限定なのでXDG準拠）とし、`ORIEL_STATE_PATH`はこの既定値を持つことで省略可能にする。ROADMAP.md「配布、品質、test」節の「OS application data領域へ置く」という既存方針と整合させる。
 - 未着手。実装前にGitHub Issueへ分解する。
 
