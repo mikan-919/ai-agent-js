@@ -9,6 +9,7 @@ import {
   Plus,
   Route,
   Search,
+  Settings,
   Square,
   Wrench,
   X,
@@ -17,6 +18,10 @@ import {
 import { identity } from "@mikan-919/oriel-identity";
 
 const csrfHeaderName = `x-${identity.codeName}-csrf`;
+
+function environmentVariable(name: string): string {
+  return `${identity.environmentPrefix}${name}`;
+}
 
 interface Job {
   jobId: string;
@@ -27,6 +32,15 @@ interface Job {
     | "how_confirmation"
     | "pr_response";
   status: string | null;
+}
+
+interface ServeConfig {
+  relayOrigin?: string;
+  repositoryId?: number;
+  repositoryOwner?: string;
+  repositoryName?: string;
+  modelProviderId?: string;
+  modelId?: string;
 }
 
 const kindLabel: Record<Job["kind"], string> = {
@@ -188,6 +202,20 @@ async function postJson(
   });
 
   return { ok: response.ok, body: await response.json().catch(() => null) };
+}
+
+function getApiErrorMessage(body: unknown): string {
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    "message" in body &&
+    typeof body.message === "string" &&
+    body.message !== ""
+  ) {
+    return body.message;
+  }
+
+  return "サーバーからエラーの詳細を取得できませんでした。";
 }
 
 /** 出窓の格子(mullion)をかたどった、Orielのワードマーク用ロゴ。 */
@@ -506,7 +534,7 @@ function NewJobModal({
     setPending(false);
 
     if (!ok) {
-      setFormError(JSON.stringify(body));
+      setFormError(getApiErrorMessage(body));
       return;
     }
 
@@ -650,6 +678,151 @@ function NewJobModal({
   );
 }
 
+function ConfigModal({ onClose }: { onClose: () => void }) {
+  const [config, setConfig] = useState<ServeConfig | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch("/api/config")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
+        }
+
+        return response.json() as Promise<ServeConfig>;
+      })
+      .then((body) => {
+        if (!cancelled) {
+          setConfig(body);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError("設定を読み込めませんでした。");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fields = [
+    {
+      label: "Relay origin",
+      env: environmentVariable("RELAY_ORIGIN"),
+      value: config?.relayOrigin,
+    },
+    {
+      label: "Repository ID",
+      env: environmentVariable("REPOSITORY_ID"),
+      value: config?.repositoryId,
+    },
+    {
+      label: "Repository owner",
+      env: environmentVariable("REPOSITORY_OWNER"),
+      value: config?.repositoryOwner,
+    },
+    {
+      label: "Repository name",
+      env: environmentVariable("REPOSITORY_NAME"),
+      value: config?.repositoryName,
+    },
+    {
+      label: "Model provider",
+      env: environmentVariable("MODEL_PROVIDER"),
+      value: config?.modelProviderId,
+    },
+    {
+      label: "Model ID",
+      env: environmentVariable("MODEL_ID"),
+      value: config?.modelId,
+    },
+  ].filter((field) => field.value !== undefined);
+
+  return (
+    <div
+      role="presentation"
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="現在の設定"
+        className="rise-in w-full max-w-lg rounded-2xl border border-border bg-surface p-6 shadow-lg"
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-lg text-text">現在の設定</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="閉じる"
+            className="rounded-md p-1 text-faint transition-colors hover:bg-surface-hover hover:text-text"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-muted">
+          これらはserve起動時に環境変数で設定されます。ここでは確認だけできます。
+        </p>
+
+        {config === null && error === null && (
+          <p className="mt-5 text-sm text-muted">読み込み中…</p>
+        )}
+        {error !== null && (
+          <p role="alert" className="mt-5 text-sm text-fail">
+            {error}
+          </p>
+        )}
+        {config !== null && fields.length === 0 && (
+          <p className="mt-5 text-sm text-muted">
+            設定されている項目はありません。
+          </p>
+        )}
+        {config !== null && fields.length > 0 && (
+          <dl className="mt-5 space-y-3">
+            {fields.map((field) => (
+              <div
+                key={field.env}
+                className="rounded-lg border border-border bg-bg px-3 py-2"
+              >
+                <dt className="flex items-baseline justify-between gap-3 text-xs text-muted">
+                  <span>{field.label}</span>
+                  <span className="font-mono text-[10px] text-faint">
+                    {field.env}
+                  </span>
+                </dt>
+                <dd className="mt-1 break-all font-mono text-sm text-text">
+                  {String(field.value)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [csrfToken, setCsrfToken] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[] | null>(null);
@@ -660,6 +833,7 @@ export function App() {
     null,
   );
   const [newModalOpen, setNewModalOpen] = useState(false);
+  const [configModalOpen, setConfigModalOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
 
   async function refreshJobs() {
@@ -671,6 +845,7 @@ export function App() {
 
     const body = (await response.json()) as { jobs: Job[] };
     setJobs(body.jobs);
+    setError(null);
   }
 
   useEffect(() => {
@@ -789,6 +964,14 @@ export function App() {
           <span className="font-display text-base text-text">
             {identity.displayName}
           </span>
+          <button
+            type="button"
+            onClick={() => setConfigModalOpen(true)}
+            aria-label="現在の設定を表示"
+            className="ml-auto rounded-md p-1.5 text-faint transition-colors hover:bg-surface-hover hover:text-text"
+          >
+            <Settings size={16} />
+          </button>
         </div>
 
         <div className="px-4 pb-3">
@@ -825,6 +1008,11 @@ export function App() {
 
           {jobs === null && error === null && (
             <p className="px-2 py-2 text-sm text-muted">読み込み中…</p>
+          )}
+          {jobs === null && error !== null && (
+            <p role="alert" className="px-2 py-2 text-sm text-fail">
+              Job一覧の読み込みに失敗しました。
+            </p>
           )}
           {jobs !== null && filteredJobs.length === 0 && (
             <p className="px-2 py-2 text-sm text-muted">
@@ -905,6 +1093,9 @@ export function App() {
           onClose={() => setNewModalOpen(false)}
           onStarted={refreshJobs}
         />
+      )}
+      {configModalOpen && (
+        <ConfigModal onClose={() => setConfigModalOpen(false)} />
       )}
     </div>
   );

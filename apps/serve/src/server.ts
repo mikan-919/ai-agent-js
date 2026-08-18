@@ -53,7 +53,26 @@ const csrfHeaderName = `x-${identity.codeName}-csrf`;
 /** ビルド後は`dist/cli.js`と同じ`dist/`直下にVite buildの`web/`が並ぶ。 */
 const defaultWebDistRoot = fileURLToPath(new URL("./web", import.meta.url));
 
+function environmentVariable(name: string): string {
+  return `${identity.environmentPrefix}${name}`;
+}
+
+const deviceRegistrationNotConfiguredMessage = `Device registration is not configured. Set ${environmentVariable("RELAY_ORIGIN")} and ${environmentVariable("STATE_PATH")}.`;
+const transcriptSearchNotConfiguredMessage = `Transcript search is not configured. Set ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_OWNER")}, and ${environmentVariable("REPOSITORY_NAME")}.`;
+const apiPathsWithoutDeviceRegistration = new Set([
+  "/api/config",
+  "/api/issue-conversations",
+  "/api/implementation-jobs",
+]);
+
 export interface ServeHttpServerOptions {
+  /** Web UIから確認できる、credentialを含まないserve設定。 */
+  relayOrigin?: string;
+  repositoryId?: number;
+  repositoryOwner?: string;
+  repositoryName?: string;
+  modelProviderId?: string;
+  modelId?: string;
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
   /** Web UIのビルド成果物を置くディレクトリ。既定はビルド後の`dist/web`。 */
@@ -244,6 +263,15 @@ function shellHtml(csrfToken: string): string {
       pre:empty {
         display: none;
       }
+      #dashboard {
+        display: inline-block;
+        margin-top: 16px;
+        color: #d97757;
+        font-size: 13px;
+      }
+      #dashboard[hidden] {
+        display: none;
+      }
       :focus-visible {
         outline: 2px solid #d97757;
         outline-offset: 2px;
@@ -262,6 +290,7 @@ function shellHtml(csrfToken: string): string {
       </form>
       <ul id="devices"></ul>
       <pre id="result"></pre>
+      <a id="dashboard" href="/app/" hidden>ダッシュボードを開く</a>
     </div>
     <script type="module">
       const csrf = document.querySelector('meta[name="${identity.codeName}-csrf"]').content;
@@ -343,6 +372,9 @@ function shellHtml(csrfToken: string): string {
           state: parameters.get("state"),
         });
         show(completed);
+        if (completed.status === "registered" || completed.status === "revoked") {
+          document.querySelector("#dashboard").hidden = false;
+        }
         if (completed.status === "installations") {
           showTargets(completed.installations);
         }
@@ -360,6 +392,12 @@ function shellHtml(csrfToken: string): string {
 }
 
 export function startServeHttpServer({
+  relayOrigin,
+  repositoryId,
+  repositoryOwner,
+  repositoryName,
+  modelProviderId,
+  modelId,
   createDeviceRegistration,
   startIssueConversation,
   startImplementationJob,
@@ -371,7 +409,27 @@ export function startServeHttpServer({
   const { sessionId, csrfToken } = newSessionSecrets();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
+  const serveConfig = {
+    ...(relayOrigin === undefined ? {} : { relayOrigin }),
+    ...(repositoryId === undefined ? {} : { repositoryId }),
+    ...(repositoryOwner === undefined ? {} : { repositoryOwner }),
+    ...(repositoryName === undefined ? {} : { repositoryName }),
+    ...(modelProviderId === undefined ? {} : { modelProviderId }),
+    ...(modelId === undefined ? {} : { modelId }),
+  };
   const app = new Hono();
+
+  function requireDeviceRegistration(context: Context): Response | null {
+    return deviceRegistration === null
+      ? context.json(
+          {
+            error: "not_configured",
+            message: deviceRegistrationNotConfiguredMessage,
+          },
+          503,
+        )
+      : null;
+  }
 
   app.use("*", async (context, next) => {
     const host = context.req.header("host");
@@ -410,8 +468,17 @@ export function startServeHttpServer({
       return context.text("Forbidden", 403);
     }
 
-    if (deviceRegistration === null) {
-      return context.text("Device registration is not configured", 503);
+    if (
+      deviceRegistration === null &&
+      !apiPathsWithoutDeviceRegistration.has(context.req.path)
+    ) {
+      return context.json(
+        {
+          error: "not_configured",
+          message: deviceRegistrationNotConfiguredMessage,
+        },
+        503,
+      );
     }
 
     await next();
@@ -433,6 +500,12 @@ export function startServeHttpServer({
   app.get(callbackPath, serveShell);
 
   app.post("/api/device-registrations", async (context) => {
+    const unavailable = requireDeviceRegistration(context);
+
+    if (unavailable !== null) {
+      return unavailable;
+    }
+
     const body = (await context.req.json().catch(() => null)) as {
       installationId?: unknown;
       repositoryId?: unknown;
@@ -469,6 +542,12 @@ export function startServeHttpServer({
   });
 
   app.post("/api/device-registrations/completion", async (context) => {
+    const unavailable = requireDeviceRegistration(context);
+
+    if (unavailable !== null) {
+      return unavailable;
+    }
+
     const body = (await context.req.json().catch(() => null)) as {
       code?: unknown;
       state?: unknown;
@@ -519,10 +598,19 @@ export function startServeHttpServer({
     } | null;
     const issueNumber = Number(body?.issueNumber);
 
+    if (startIssueConversation === undefined) {
+      return context.json(
+        {
+          error: "not_configured",
+          message: `Issue conversations are not configured. Set ${environmentVariable("RELAY_ORIGIN")}, ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_ID")}, ${environmentVariable("REPOSITORY_OWNER")}, ${environmentVariable("REPOSITORY_NAME")}, and ${environmentVariable("OWNERSHIP_HEARTBEAT_STOP_MS")}.`,
+        },
+        503,
+      );
+    }
+
     // JobキーとcanonicalブランチはWHATの現在値からserveが導く。
     // clientはどちらも指定できず、この入口ではコードを変更するJobも起動できない。
     if (
-      startIssueConversation === undefined ||
       body === null ||
       Object.keys(body).some(
         (field) => field !== "issueNumber" && field !== "body",
@@ -532,7 +620,14 @@ export function startServeHttpServer({
       !Number.isInteger(issueNumber) ||
       issueNumber <= 0
     ) {
-      return context.text("Bad Request", 400);
+      return context.json(
+        {
+          error: "bad_request",
+          message:
+            "issueNumberは正の整数、bodyは空でない文字列で指定し、余分なフィールドは含めないでください。",
+        },
+        400,
+      );
     }
 
     return holdStartedJob(context, () =>
@@ -549,14 +644,30 @@ export function startServeHttpServer({
       linearIssueId?: unknown;
     } | null;
 
+    if (startImplementationJob === undefined) {
+      return context.json(
+        {
+          error: "not_configured",
+          message: `Implementation jobs are not configured. Set ${environmentVariable("RELAY_ORIGIN")}, ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_ID")}, ${environmentVariable("REPOSITORY_OWNER")}, ${environmentVariable("REPOSITORY_NAME")}, ${environmentVariable("OWNERSHIP_HEARTBEAT_STOP_MS")}, ${environmentVariable("REPOSITORY_ROOT")}, ${environmentVariable("WORKTREES_ROOT")}, ${environmentVariable("MODEL_PROVIDER")}, and ${environmentVariable("MODEL_ID")}.`,
+        },
+        503,
+      );
+    }
+
     if (
-      startImplementationJob === undefined ||
       body === null ||
       Object.keys(body).some((field) => field !== "linearIssueId") ||
       typeof body.linearIssueId !== "string" ||
       body.linearIssueId === ""
     ) {
-      return context.text("Bad Request", 400);
+      return context.json(
+        {
+          error: "bad_request",
+          message:
+            "linearIssueIdは空でない文字列で指定し、余分なフィールドは含めないでください。",
+        },
+        400,
+      );
     }
 
     return holdStartedJob(context, () =>
@@ -612,6 +723,8 @@ export function startServeHttpServer({
   // Workflow/Jobの現在状態を横断的に確認する唯一の一覧経路。
   app.get("/api/jobs", (context) => context.json({ jobs: jobRegistry.list() }));
 
+  app.get("/api/config", (context) => context.json(serveConfig));
+
   /**
    * Web UIからの計画停止。実行に時間がかかるJob種別だけが応じ、それ以外や
    * 対象が見つからない場合は何も起きない。
@@ -625,7 +738,13 @@ export function startServeHttpServer({
   // local、current Job、repositoryの範囲でtranscriptを確認する唯一の経路。
   app.get("/api/transcripts", async (context) => {
     if (searchTranscripts === undefined) {
-      return context.text("Transcript search is not configured", 503);
+      return context.json(
+        {
+          error: "not_configured",
+          message: transcriptSearchNotConfiguredMessage,
+        },
+        503,
+      );
     }
 
     const scope = context.req.query("scope");
@@ -670,14 +789,27 @@ export function startServeHttpServer({
   );
 
   app.get("/api/device-cancellations", (context) =>
-    context.json({ pending: deviceRegistration!.pendingCancellations() }),
+    (() => {
+      const unavailable = requireDeviceRegistration(context);
+
+      return (
+        unavailable ??
+        context.json({ pending: deviceRegistration!.pendingCancellations() })
+      );
+    })(),
   );
 
-  app.post("/api/device-cancellations/resume", async (context) =>
-    context.json({
+  app.post("/api/device-cancellations/resume", async (context) => {
+    const unavailable = requireDeviceRegistration(context);
+
+    if (unavailable !== null) {
+      return unavailable;
+    }
+
+    return context.json({
       pending: await deviceRegistration!.resumePendingCancellations(),
-    }),
-  );
+    });
+  });
 
   const server = Bun.serve({
     hostname: loopbackHostname,

@@ -458,6 +458,12 @@ if (Bun.argv[2] === "serve") {
   const httpServer = startServeHttpServer({
     jobRegistry,
     searchTranscripts,
+    relayOrigin: environment,
+    repositoryId,
+    repositoryOwner,
+    repositoryName,
+    modelProviderId,
+    modelId,
     startImplementationJob: startImplementation,
     startHowConversation,
     startIssueConversation: conversationReady

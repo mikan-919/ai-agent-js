@@ -615,7 +615,11 @@ test("the implementation Job entry is closed while the product cannot run one", 
       body: JSON.stringify({ linearIssueId: "ENG-12" }),
     });
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "not_configured",
+      message: expect.stringContaining("ORIEL_MODEL_PROVIDER"),
+    });
   } finally {
     server.close();
   }

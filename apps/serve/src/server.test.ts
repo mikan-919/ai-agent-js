@@ -18,9 +18,13 @@ async function withSession(origin: string) {
   const response = await fetch(`${origin}/`, {
     headers: { Origin: origin },
   });
+  const html = await response.text();
   const cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "";
 
-  return { cookie };
+  return {
+    cookie,
+    csrf: /content="([^"]+)"/.exec(html)?.[1] ?? "",
+  };
 }
 
 test("/api/transcripts is unavailable without configured search", async () => {
@@ -37,6 +41,37 @@ test("/api/transcripts is unavailable without configured search", async () => {
     );
 
     expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "not_configured",
+      message: expect.stringContaining("ORIEL_STATE_PATH"),
+    });
+  } finally {
+    httpServer.close();
+  }
+});
+
+test("/api/config returns configured public values and omits unset values", async () => {
+  const httpServer = startServeHttpServer({
+    relayOrigin: "https://relay.example.test",
+    repositoryId: 42,
+    repositoryOwner: "mikan",
+    modelProviderId: "lmstudio",
+  });
+
+  try {
+    const origin = httpServer.readinessUrl.origin;
+    const { cookie } = await withSession(origin);
+    const response = await fetch(`${origin}/api/config`, {
+      headers: { Origin: origin, cookie },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      relayOrigin: "https://relay.example.test",
+      repositoryId: 42,
+      repositoryOwner: "mikan",
+      modelProviderId: "lmstudio",
+    });
   } finally {
     httpServer.close();
   }
