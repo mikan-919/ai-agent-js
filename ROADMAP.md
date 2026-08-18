@@ -95,8 +95,9 @@ packages/identity
 
 ### 設定の将来像（未解決）
 
-- 最終的には`bunx @mikan-919/oriel serve`を環境変数なしで呼べるようにしたい。relay origin、repository、model providerなど現在env varで渡している利用者固有設定を、初回起動時のWeb UIから入力し、既存のlocal state SQLite（`ORIEL_STATE_PATH`）へ保存する経路に置き換える方向で検討する。
+- 最終的には`bunx @mikan-919/oriel serve`を環境変数なしで呼べるようにしたい。relay origin、repositoryなど現在env varで渡している利用者固有設定を、初回起動時のWeb UIから入力し、既存のlocal state SQLite（`ORIEL_STATE_PATH`）へ保存する経路に置き換える方向で検討する。
 - 別途の設定ファイル形式は増やさず、既存のSQLite・migration機構へ載せる案が現時点の第一候補。fail closed設計（未設定なら503で止まる）との整合は個別に詰める。
+- model providerは他のinstance単位設定と同列に扱わない。Agent session（Job）ごとに変更可能なのを標準経路とし、`serve`起動時の値はfallback既定値の位置づけにとどめる。「Agentとモデル提供元」節の「実行ハーネスは提供元とモデルの論理的な識別子だけを指定する」という既存方針と、session単位選択をどう配線するか（起動API引数か、Job作成時のUI選択か）は未決定。
 - 未着手。実装前にGitHub Issueへ分解する。
 
 ### Workflowの発見とJobの取得
