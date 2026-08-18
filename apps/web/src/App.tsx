@@ -41,6 +41,44 @@ interface ServeConfig {
   repositoryName?: string;
   modelProviderId?: string;
   modelId?: string;
+  modelDefaults: ModelDefaults;
+}
+
+type ModelKind = Exclude<Job["kind"], "issue_conversation">;
+
+interface ModelSelection {
+  provider: string;
+  modelId: string;
+}
+
+interface ModelDefaults {
+  base: ModelSelection | null;
+  perKind: Record<ModelKind, ModelSelection | null>;
+}
+
+interface ModelOption {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+const modelKinds: readonly { kind: ModelKind; label: string }[] = [
+  { kind: "what_confirmation", label: "WHAT確定" },
+  { kind: "how_confirmation", label: "HOW確定" },
+  { kind: "pr_response", label: "PR対応" },
+  { kind: "implementation", label: "実装" },
+];
+
+function emptyModelDefaults(): ModelDefaults {
+  return {
+    base: null,
+    perKind: {
+      what_confirmation: null,
+      how_confirmation: null,
+      pr_response: null,
+      implementation: null,
+    },
+  };
 }
 
 const kindLabel: Record<Job["kind"], string> = {
@@ -678,9 +716,72 @@ function NewJobModal({
   );
 }
 
-function ConfigModal({ onClose }: { onClose: () => void }) {
+function ModelInput({
+  provider,
+  value,
+  models,
+  onChange,
+}: {
+  provider: string;
+  value: string;
+  models: ModelOption[];
+  onChange: (value: string) => void;
+}) {
+  const providerModels = models.filter((model) => model.provider === provider);
+
+  if (providerModels.length === 0) {
+    return (
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="model IDを入力"
+        className={inputClass}
+      />
+    );
+  }
+
+  const hasCurrentValue = providerModels.some((model) => model.id === value);
+
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className={inputClass}
+    >
+      <option value="">modelを選択</option>
+      {value !== "" && !hasCurrentValue && (
+        <option value={value}>{value}（現在値）</option>
+      )}
+      {providerModels.map((model) => (
+        <option key={`${model.provider}/${model.id}`} value={model.id}>
+          {model.name} · {model.id}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ConfigModal({
+  csrfToken,
+  onClose,
+}: {
+  csrfToken: string | null;
+  onClose: () => void;
+}) {
   const [config, setConfig] = useState<ServeConfig | null>(null);
+  const [models, setModels] = useState<ModelOption[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [base, setBase] = useState<ModelSelection>({
+    provider: "",
+    modelId: "",
+  });
+  const [perKind, setPerKind] = useState<
+    Record<ModelKind, ModelSelection | null>
+  >(() => emptyModelDefaults().perKind);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -698,12 +799,14 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
     let cancelled = false;
 
     fetch("/api/config")
-      .then((response) => {
+      .then(async (response) => {
+        const body = await response.json().catch(() => null);
+
         if (!response.ok) {
-          throw new Error(`status ${response.status}`);
+          throw new Error(getApiErrorMessage(body));
         }
 
-        return response.json() as Promise<ServeConfig>;
+        return body as ServeConfig;
       })
       .then((body) => {
         if (!cancelled) {
@@ -720,6 +823,107 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch("/api/models")
+      .then(async (response) => {
+        const body = await response.json().catch(() => null);
+
+        if (!response.ok || !Array.isArray(body)) {
+          return [];
+        }
+
+        return body as ModelOption[];
+      })
+      .catch(() => [])
+      .then((body) => {
+        if (!cancelled) {
+          setModels(body);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const defaults = config?.modelDefaults ?? emptyModelDefaults();
+
+    setBase(defaults.base ?? { provider: "", modelId: "" });
+    setPerKind({
+      ...emptyModelDefaults().perKind,
+      ...defaults.perKind,
+    });
+  }, [config]);
+
+  function updatePerKind(kind: ModelKind, value: ModelSelection | null) {
+    setPerKind((current) => ({ ...current, [kind]: value }));
+  }
+
+  function selectionForSave(
+    value: ModelSelection,
+    label: string,
+  ): ModelSelection | null {
+    const provider = value.provider.trim();
+    const modelId = value.modelId.trim();
+
+    if (provider === "" && modelId === "") {
+      return null;
+    }
+
+    if (provider === "" || modelId === "") {
+      throw new Error(`${label}のproviderとmodel IDを両方入力してください。`);
+    }
+
+    return { provider, modelId };
+  }
+
+  async function save() {
+    if (csrfToken === null) {
+      return;
+    }
+
+    setSaving(true);
+    setSaveError(null);
+    setSavedMessage(null);
+
+    try {
+      const updates: {
+        scope: "base" | ModelKind;
+        selection: ModelSelection | null;
+      }[] = [
+        { scope: "base", selection: selectionForSave(base, "base") },
+        ...modelKinds.map(({ kind, label }) => ({
+          scope: kind,
+          selection:
+            perKind[kind] === null
+              ? null
+              : selectionForSave(perKind[kind] as ModelSelection, label),
+        })),
+      ];
+
+      for (const update of updates) {
+        const result = await postJson("/api/config", csrfToken, {
+          scope: update.scope,
+          provider: update.selection?.provider ?? null,
+          modelId: update.selection?.modelId ?? null,
+        });
+
+        if (!result.ok) {
+          throw new Error(getApiErrorMessage(result.body));
+        }
+      }
+
+      setSavedMessage("保存しました。");
+    } catch (cause: unknown) {
+      setSaveError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const fields = [
     {
@@ -767,11 +971,11 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="現在の設定"
-        className="rise-in w-full max-w-lg rounded-2xl border border-border bg-surface p-6 shadow-lg"
+        aria-label="設定を編集"
+        className="rise-in max-h-[90dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-border bg-surface p-6 shadow-lg"
       >
         <div className="flex items-center justify-between">
-          <h2 className="font-display text-lg text-text">現在の設定</h2>
+          <h2 className="font-display text-lg text-text">モデル設定</h2>
           <button
             type="button"
             onClick={onClose}
@@ -782,7 +986,7 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <p className="mt-2 text-xs leading-relaxed text-muted">
-          これらはserve起動時に環境変数で設定されます。ここでは確認だけできます。
+          baseを共通の既定値として、Job種別ごとに上書きできます。空のper-kind欄はbaseを使います。
         </p>
 
         {config === null && error === null && (
@@ -793,30 +997,178 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
             {error}
           </p>
         )}
-        {config !== null && fields.length === 0 && (
-          <p className="mt-5 text-sm text-muted">
-            設定されている項目はありません。
-          </p>
-        )}
-        {config !== null && fields.length > 0 && (
-          <dl className="mt-5 space-y-3">
-            {fields.map((field) => (
-              <div
-                key={field.env}
-                className="rounded-lg border border-border bg-bg px-3 py-2"
-              >
-                <dt className="flex items-baseline justify-between gap-3 text-xs text-muted">
-                  <span>{field.label}</span>
-                  <span className="font-mono text-[10px] text-faint">
-                    {field.env}
-                  </span>
-                </dt>
-                <dd className="mt-1 break-all font-mono text-sm text-text">
-                  {String(field.value)}
-                </dd>
+        {config !== null && (
+          <>
+            {fields.length > 0 && (
+              <section className="mt-5 space-y-3">
+                <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+                  serve起動設定
+                </p>
+                <dl className="space-y-3">
+                  {fields.map((field) => (
+                    <div
+                      key={field.env}
+                      className="rounded-lg border border-border bg-bg px-3 py-2"
+                    >
+                      <dt className="flex items-baseline justify-between gap-3 text-xs text-muted">
+                        <span>{field.label}</span>
+                        <span className="font-mono text-[10px] text-faint">
+                          {field.env}
+                        </span>
+                      </dt>
+                      <dd className="mt-1 break-all font-mono text-sm text-text">
+                        {String(field.value)}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            )}
+
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void save();
+              }}
+              className="mt-6 space-y-6"
+            >
+              <section className="space-y-3">
+                <div>
+                  <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+                    base / instance default
+                  </p>
+                  <p className="mt-1 text-xs text-muted">
+                    全Job種別がper-kind overrideを持たない場合に使います。
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="Provider">
+                    <input
+                      type="text"
+                      value={base.provider}
+                      onChange={(event) =>
+                        setBase((current) => ({
+                          ...current,
+                          provider: event.target.value,
+                        }))
+                      }
+                      placeholder="例: openai / lm-studio"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Model ID">
+                    <ModelInput
+                      provider={base.provider}
+                      value={base.modelId}
+                      models={models ?? []}
+                      onChange={(modelId) =>
+                        setBase((current) => ({ ...current, modelId }))
+                      }
+                    />
+                  </Field>
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <div>
+                  <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+                    per-kind defaults
+                  </p>
+                  <p className="mt-1 text-xs text-muted">
+                    自動起動されるJobは、ここで指定したmodelをJob作成時に固定します。
+                  </p>
+                </div>
+                <div className="space-y-3">
+                  {modelKinds.map(({ kind, label }) => {
+                    const override = perKind[kind];
+                    const usesBase = override === null;
+
+                    return (
+                      <div
+                        key={kind}
+                        className="rounded-lg border border-border bg-bg px-3 py-3"
+                      >
+                        <label className="flex items-center gap-2 text-sm text-text">
+                          <input
+                            type="checkbox"
+                            checked={usesBase}
+                            onChange={(event) =>
+                              updatePerKind(
+                                kind,
+                                event.target.checked
+                                  ? null
+                                  : (override ?? { ...base }),
+                              )
+                            }
+                          />
+                          <span>{label}</span>
+                          <span className="text-xs text-muted">baseを使う</span>
+                        </label>
+
+                        {!usesBase && override !== null && (
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            <Field label="Provider override">
+                              <input
+                                type="text"
+                                value={override.provider}
+                                onChange={(event) =>
+                                  updatePerKind(kind, {
+                                    ...override,
+                                    provider: event.target.value,
+                                  })
+                                }
+                                placeholder="provider"
+                                className={inputClass}
+                              />
+                            </Field>
+                            <Field label="Model ID override">
+                              <ModelInput
+                                provider={override.provider}
+                                value={override.modelId}
+                                models={models ?? []}
+                                onChange={(modelId) =>
+                                  updatePerKind(kind, {
+                                    ...override,
+                                    modelId,
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {models === null && (
+                <p className="text-xs text-muted">model一覧を読み込み中…</p>
+              )}
+              {models !== null && models.length === 0 && (
+                <p className="text-xs text-muted">
+                  model一覧を取得できないため、model IDを自由入力できます。
+                </p>
+              )}
+              {saveError !== null && (
+                <p role="alert" className="text-xs text-fail">
+                  保存に失敗しました: {saveError}
+                </p>
+              )}
+              {savedMessage !== null && (
+                <p role="status" className="text-xs text-muted">
+                  {savedMessage}
+                </p>
+              )}
+
+              <div className="flex justify-end">
+                <PrimaryButton disabled={csrfToken === null || saving}>
+                  {saving && <Loader2 size={14} className="animate-spin" />}
+                  設定を保存
+                </PrimaryButton>
               </div>
-            ))}
-          </dl>
+            </form>
+          </>
         )}
       </div>
     </div>
@@ -967,7 +1319,7 @@ export function App() {
           <button
             type="button"
             onClick={() => setConfigModalOpen(true)}
-            aria-label="現在の設定を表示"
+            aria-label="設定を編集"
             className="ml-auto rounded-md p-1.5 text-faint transition-colors hover:bg-surface-hover hover:text-text"
           >
             <Settings size={16} />
@@ -1095,7 +1447,10 @@ export function App() {
         />
       )}
       {configModalOpen && (
-        <ConfigModal onClose={() => setConfigModalOpen(false)} />
+        <ConfigModal
+          csrfToken={csrfToken}
+          onClose={() => setConfigModalOpen(false)}
+        />
       )}
     </div>
   );
