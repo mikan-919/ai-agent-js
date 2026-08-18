@@ -16,7 +16,11 @@ import {
   X,
 } from "lucide-react";
 
-import { modelDefaultKinds } from "@mikan-919/oriel-contracts";
+import {
+  modelDefaultKinds,
+  parseModelOptions,
+  parseServeConfig,
+} from "@mikan-919/oriel-contracts";
 import type {
   ModelDefaultApiSelection,
   ModelDefaultKind,
@@ -818,7 +822,7 @@ function ConfigModal({
         throw new Error(getApiErrorMessage(body));
       }
 
-      return body as ServeConfig;
+      return parseServeConfig(body);
     },
   });
   const modelsQuery = useQuery({
@@ -828,9 +832,7 @@ function ConfigModal({
         const response = await fetch("/api/models");
         const body = await response.json().catch(() => null);
 
-        return response.ok && Array.isArray(body)
-          ? (body as ModelOption[])
-          : [];
+        return response.ok ? parseModelOptions(body) : [];
       } catch {
         return [];
       }

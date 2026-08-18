@@ -99,3 +99,11 @@ export interface ModelDefaults {
   base: ModelSelection | null;
   perKind: Record<ModelDefaultKind, ModelSelection | null>;
 }
+
+export function parseServeConfig(value: unknown): ServeConfig {
+  return v.parse(serveConfigSchema, value);
+}
+
+export function parseModelOptions(value: unknown): ModelOption[] {
+  return v.parse(v.array(modelOptionSchema), value);
+}
