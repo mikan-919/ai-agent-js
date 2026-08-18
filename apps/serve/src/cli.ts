@@ -39,6 +39,11 @@ import { createLinearGraphqlCommentPublisher } from "./linear-comments";
 import { createLinearGraphqlDescriptionPublisher } from "./linear-description";
 import { createLinearTriageWriter } from "./linear-triage-writer";
 import { openServeLocalState } from "./local-state";
+import {
+  createModelDefaultsStore,
+  resolveModelDefault,
+  type ModelSelection,
+} from "./model-defaults";
 import { createNotificationConnection } from "./notification-connection";
 import { createPendingCancellationStore } from "./pending-cancellations";
 import { createPrMergeDiscoveryLoop } from "./pr-merge-discovery";
@@ -117,6 +122,31 @@ if (Bun.argv[2] === "serve") {
   const modelProviderId =
     Bun.env[`${identity.environmentPrefix}MODEL_PROVIDER`];
   const modelId = Bun.env[`${identity.environmentPrefix}MODEL_ID`];
+  const configuredModel =
+    modelProviderId !== undefined &&
+    modelProviderId !== "" &&
+    modelId !== undefined &&
+    modelId !== ""
+      ? { provider: modelProviderId, id: modelId }
+      : undefined;
+  const modelDefaults = createModelDefaultsStore(
+    openServeLocalState(statePath),
+  );
+
+  // 既存の環境変数設定は、DBへbaseがまだ無いserveの初回起動時だけ移行する。
+  // per-kind設定があればそちらを優先し、以後はSQLiteの値を正本にする。
+  if (configuredModel !== undefined && modelDefaults.get("base") === null) {
+    modelDefaults.set("base", configuredModel);
+  }
+
+  const resolveJobModel = (
+    kind:
+      | "implementation"
+      | "what_confirmation"
+      | "how_confirmation"
+      | "pr_response",
+    override?: ModelSelection,
+  ) => resolveModelDefault(modelDefaults, kind, override);
   const models = createServeModels({
     lmStudioBaseUrl: Bun.env[`${identity.environmentPrefix}LM_STUDIO_BASE_URL`],
   });
@@ -137,10 +167,11 @@ if (Bun.argv[2] === "serve") {
     repositoryId !== undefined &&
     // worktreeを開けない構成では、実装Jobを始めない。
     repositoryRoot !== undefined &&
-    worktreesRoot !== undefined &&
-    // modelを選べない構成でも、暗黙の既定値を置かずに始めない。
-    modelProviderId !== undefined &&
-    modelId !== undefined;
+    worktreesRoot !== undefined;
+  const modelStreamProvider = createPiModelStreamProvider({
+    models,
+    resolveApiKey: (provider) => bunSecretsModelCredential(provider).get(),
+  });
 
   /**
    * 承認されたHOWのLinear Issueからserveが実装Jobを始める、唯一の入口。
@@ -150,8 +181,23 @@ if (Bun.argv[2] === "serve") {
    * 判断はすべて`startImplementationJob`が現在値から一貫して行う。
    */
   const startImplementation = implementationReady
-    ? ({ linearIssueId }: { linearIssueId: string }) =>
-        startImplementationJob({
+    ? ({
+        linearIssueId,
+        modelOverride,
+      }: {
+        linearIssueId: string;
+        modelOverride?: ModelSelection;
+      }) => {
+        const model = resolveJobModel("implementation", modelOverride);
+
+        if (model === null) {
+          return Promise.resolve({
+            status: "refused" as const,
+            reason: "model_not_configured" as const,
+          });
+        }
+
+        return startImplementationJob({
           relayOrigin: environment,
           tokenStore,
           // admissionの現在値確認は読み取り権限だけで行う。
@@ -193,13 +239,9 @@ if (Bun.argv[2] === "serve") {
             tokenStore,
             repositoryId,
           }),
-          model: { provider: modelProviderId, id: modelId },
+          model,
           // 提供元への接続とcredentialの解決は`serve`の内側だけで行う。
-          modelProvider: createPiModelStreamProvider({
-            models,
-            resolveApiKey: (provider) =>
-              bunSecretsModelCredential(provider).get(),
-          }),
+          modelProvider: modelStreamProvider,
           /**
            * 承認後の状態反映は、所有権を確認した`serve`だけがLinearへ行う。
            * tokenはこの内側だけで解決し、harnessへも引数へも渡さない。
@@ -247,7 +289,8 @@ if (Bun.argv[2] === "serve") {
             }),
         }).then((result) =>
           holdIfStarted(jobRegistry, "implementation", result),
-        )
+        );
+      }
     : undefined;
 
   /**
@@ -255,11 +298,7 @@ if (Bun.argv[2] === "serve") {
    *
    * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。
    */
-  const whatConfirmationReady =
-    conversationReady &&
-    modelProviderId !== undefined &&
-    modelId !== undefined &&
-    linearTeamId !== undefined;
+  const whatConfirmationReady = conversationReady && linearTeamId !== undefined;
   const startWhatConfirmation =
     whatConfirmationReady && relayDeviceClient !== undefined
       ? ({
@@ -268,8 +307,17 @@ if (Bun.argv[2] === "serve") {
         }: {
           issueNumber: number;
           trigger: { commentId: number; command: boolean };
-        }) =>
-          startWhatConfirmationJob({
+        }) => {
+          const model = resolveJobModel("what_confirmation");
+
+          if (model === null) {
+            return Promise.resolve({
+              status: "refused" as const,
+              reason: "model_not_configured" as const,
+            });
+          }
+
+          return startWhatConfirmationJob({
             relayOrigin: environment,
             tokenStore,
             createOctokit: createInstallationOctokitResolver({
@@ -284,12 +332,8 @@ if (Bun.argv[2] === "serve") {
             repository: { owner: repositoryOwner, name: repositoryName },
             issueNumber,
             trigger,
-            model: { provider: modelProviderId, id: modelId },
-            modelProvider: createPiModelStreamProvider({
-              models,
-              resolveApiKey: (provider) =>
-                bunSecretsModelCredential(provider).get(),
-            }),
+            model,
+            modelProvider: modelStreamProvider,
             linearTeamId,
             createLinearPorts: async () => {
               const linearToken =
@@ -309,7 +353,8 @@ if (Bun.argv[2] === "serve") {
             heartbeatStopMs,
           }).then((result) =>
             holdIfStarted(jobRegistry, "what_confirmation", result),
-          )
+          );
+        }
       : undefined;
 
   /**
@@ -318,8 +363,7 @@ if (Bun.argv[2] === "serve") {
    * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。GitHub
    * credentialは使わない(この対話はLinear issueだけを読み書きする)。
    */
-  const howConfirmationReady =
-    conversationReady && modelProviderId !== undefined && modelId !== undefined;
+  const howConfirmationReady = conversationReady;
   const startHowConfirmation =
     howConfirmationReady && relayDeviceClient !== undefined
       ? ({
@@ -330,8 +374,17 @@ if (Bun.argv[2] === "serve") {
           issueNumber: number;
           linearIssueId: string;
           trigger: { commentId: string; command: boolean };
-        }) =>
-          startHowConfirmationJob({
+        }) => {
+          const model = resolveJobModel("how_confirmation");
+
+          if (model === null) {
+            return Promise.resolve({
+              status: "refused" as const,
+              reason: "model_not_configured" as const,
+            });
+          }
+
+          return startHowConfirmationJob({
             relayOrigin: environment,
             tokenStore,
             databasePath: statePath,
@@ -341,12 +394,8 @@ if (Bun.argv[2] === "serve") {
             issueNumber,
             linearIssueId,
             trigger,
-            model: { provider: modelProviderId, id: modelId },
-            modelProvider: createPiModelStreamProvider({
-              models,
-              resolveApiKey: (provider) =>
-                bunSecretsModelCredential(provider).get(),
-            }),
+            model,
+            modelProvider: modelStreamProvider,
             createLinearPorts: async () => {
               const linearToken =
                 await bunSecretsLinearToken(repositoryId).get();
@@ -371,7 +420,8 @@ if (Bun.argv[2] === "serve") {
             heartbeatStopMs,
           }).then((result) =>
             holdIfStarted(jobRegistry, "how_confirmation", result),
-          )
+          );
+        }
       : undefined;
 
   /**
@@ -392,8 +442,17 @@ if (Bun.argv[2] === "serve") {
           linearIssueId: string;
           body: string;
           command: boolean;
-        }) =>
-          startHowConfirmationJob({
+        }) => {
+          const model = resolveJobModel("how_confirmation");
+
+          if (model === null) {
+            return Promise.resolve({
+              status: "refused" as const,
+              reason: "model_not_configured" as const,
+            });
+          }
+
+          return startHowConfirmationJob({
             relayOrigin: environment,
             tokenStore,
             databasePath: statePath,
@@ -403,12 +462,8 @@ if (Bun.argv[2] === "serve") {
             issueNumber,
             linearIssueId,
             trigger: { body, command },
-            model: { provider: modelProviderId, id: modelId },
-            modelProvider: createPiModelStreamProvider({
-              models,
-              resolveApiKey: (provider) =>
-                bunSecretsModelCredential(provider).get(),
-            }),
+            model,
+            modelProvider: modelStreamProvider,
             createLinearPorts: async () => {
               const linearToken =
                 await bunSecretsLinearToken(repositoryId).get();
@@ -433,7 +488,8 @@ if (Bun.argv[2] === "serve") {
             heartbeatStopMs,
           }).then((result) =>
             holdIfStarted(jobRegistry, "how_confirmation", result),
-          )
+          );
+        }
       : undefined;
 
   const transcripts =
@@ -776,8 +832,17 @@ if (Bun.argv[2] === "serve") {
               githubIssueNumber,
               approvalFingerprint,
               trigger,
-            }) =>
-              startPrResponseJob({
+            }) => {
+              const model = resolveJobModel("pr_response");
+
+              if (model === null) {
+                return Promise.resolve({
+                  status: "refused" as const,
+                  reason: "model_not_configured" as const,
+                });
+              }
+
+              return startPrResponseJob({
                 relayOrigin: environment,
                 tokenStore,
                 databasePath: statePath,
@@ -793,12 +858,8 @@ if (Bun.argv[2] === "serve") {
                   tokenStore,
                   repositoryId,
                 }),
-                model: { provider: modelProviderId, id: modelId },
-                modelProvider: createPiModelStreamProvider({
-                  models,
-                  resolveApiKey: (provider) =>
-                    bunSecretsModelCredential(provider).get(),
-                }),
+                model,
+                modelProvider: modelStreamProvider,
                 createExecutionConfigPorts: async () => {
                   const octokit = await createInstallationOctokitResolver({
                     relay: relayDeviceClient,
@@ -840,7 +901,8 @@ if (Bun.argv[2] === "serve") {
                 trigger,
               }).then((result) =>
                 holdIfStarted(jobRegistry, "pr_response", result),
-              ),
+              );
+            },
             pollIntervalMs: discoveryPollIntervalMs,
           });
         })()
