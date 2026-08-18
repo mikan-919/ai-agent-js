@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - run: bun install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(bun -e "console.log(require('./package.json').version)")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "Tag v$tag_version does not match package.json version $pkg_version" >&2
+            exit 1
+          fi
+
+      - run: bun run lint
+      - run: bun run format:check
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+
+      - name: Deploy relay to staging
+        working-directory: apps/relay
+        run: bunx wrangler deploy --env staging | tee /tmp/wrangler-deploy.log
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test staging relay
+        run: |
+          url="$(grep -oE 'https://[^ ]*\.workers\.dev' /tmp/wrangler-deploy.log | head -n1)"
+          if [ -z "$url" ]; then
+            echo "Could not find deployed staging URL in wrangler output" >&2
+            exit 1
+          fi
+          echo "Smoke testing $url"
+          curl --fail-with-body --max-time 10 --retry 3 --retry-delay 5 "$url" -o /dev/null -w "%{http_code}\n"
+
+      # npm trusted publishing (OIDC) needs the official npm CLI; the product
+      # runtime otherwise stays Bun-only (see ROADMAP.md).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm install -g npm@^11.5.1
+      - run: npm publish --access public

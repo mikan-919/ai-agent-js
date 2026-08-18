@@ -11,4 +11,14 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["DeviceRegistryObject"] },
   ],
+  "env": {
+    "staging": {
+      "name": "oriel-relay-staging",
+      "durable_objects": {
+        "bindings": [
+          { "name": "DEVICE_REGISTRY", "class_name": "DeviceRegistryObject" },
+        ],
+      },
+    },
+  },
 }
