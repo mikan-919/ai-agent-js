@@ -153,6 +153,18 @@ test("/api/config updates and clears model defaults with CSRF protection", async
       id: "gpt-5",
     });
 
+    const normalized = await post({
+      scope: "base",
+      provider: " openai ",
+      modelId: " gpt-5 ",
+    });
+
+    expect(normalized.status).toBe(200);
+    expect(modelDefaults.get("base")).toEqual({
+      provider: "openai",
+      id: "gpt-5",
+    });
+
     const perKind = await post({
       scope: "implementation",
       provider: "lm-studio",
@@ -180,6 +192,9 @@ test("/api/config updates and clears model defaults with CSRF protection", async
     ).toBe(400);
     expect(
       (await post({ scope: "base", provider: "openai", modelId: "" })).status,
+    ).toBe(400);
+    expect(
+      (await post({ scope: "base", provider: "   ", modelId: "gpt-5" })).status,
     ).toBe(400);
   } finally {
     httpServer.close();

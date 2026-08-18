@@ -113,6 +113,13 @@ function invalidJsonRequest(message: string) {
       : context.json({ error: "bad_request", message }, 400);
 }
 
+function normalizeModelSelection(model: ModelSelection): ModelSelection | null {
+  const provider = model.provider.trim();
+  const id = model.id.trim();
+
+  return provider === "" || id === "" ? null : { provider, id };
+}
+
 export interface ServeHttpServerOptions {
   /** Web UIから確認できる、credentialを含まないserve設定。 */
   relayOrigin?: string;
@@ -717,10 +724,26 @@ export function startServeHttpServer({
         );
       }
 
+      const modelOverride =
+        body.modelOverride === undefined
+          ? undefined
+          : normalizeModelSelection(body.modelOverride);
+
+      if (body.modelOverride !== undefined && modelOverride === null) {
+        return context.json(
+          {
+            error: "bad_request",
+            message:
+              "modelOverrideのproviderとidは空白以外を指定してください。",
+          },
+          400,
+        );
+      }
+
       return holdStartedJob(context, () =>
         startImplementationJob({
           linearIssueId: body.linearIssueId,
-          modelOverride: body.modelOverride,
+          modelOverride: modelOverride ?? undefined,
         }),
       );
     },
@@ -806,12 +829,26 @@ export function startServeHttpServer({
 
       const body = context.req.valid("json");
 
-      if (body.provider === null || body.modelId === null) {
+      if (body.provider === null && body.modelId === null) {
         modelDefaults.clear(body.scope);
       } else {
+        const provider = body.provider?.trim() ?? "";
+        const modelId = body.modelId?.trim() ?? "";
+
+        if (provider === "" || modelId === "") {
+          return context.json(
+            {
+              error: "bad_request",
+              message:
+                "providerとmodelIdは空白以外を指定するか、両方nullで既定値を解除してください。",
+            },
+            400,
+          );
+        }
+
         modelDefaults.set(body.scope, {
-          provider: body.provider,
-          id: body.modelId,
+          provider,
+          id: modelId,
         });
       }
 
