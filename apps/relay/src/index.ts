@@ -49,8 +49,8 @@ function requiredPositiveInteger(value: string, name: string): number {
   return parsed;
 }
 
-function requiredSecret(value: string, name: string): string {
-  if (value === "") {
+function requiredSecret(value: string | undefined, name: string): string {
+  if (value === undefined || value === "") {
     throw new Error(`${identity.environmentPrefix}${name} is not configured`);
   }
 
