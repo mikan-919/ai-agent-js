@@ -93,6 +93,12 @@ packages/identity
 - provider、GitHub、Linearのcredentialは`Bun.secrets`へ保存する。Linux/WSL2のSecret Serviceが利用できない場合はfail closedとし、平文file、SQLite、環境変数へfallbackしない。
 - operational logはstructured NDJSONとしてstderrとrotation付きlocal fileへ出し、Web UIから直近分を見られるようにする。relayはstructured JSONをWorkers Logsへ出す。transcriptとcredential、prompt、response、tool結果はoperational logへ含めず、外部observability serviceもv1へ入れない。
 
+### 設定の将来像（未解決）
+
+- 最終的には`bunx @mikan-919/oriel serve`を環境変数なしで呼べるようにしたい。relay origin、repository、model providerなど現在env varで渡している利用者固有設定を、初回起動時のWeb UIから入力し、既存のlocal state SQLite（`ORIEL_STATE_PATH`）へ保存する経路に置き換える方向で検討する。
+- 別途の設定ファイル形式は増やさず、既存のSQLite・migration機構へ載せる案が現時点の第一候補。fail closed設計（未設定なら503で止まる）との整合は個別に詰める。
+- 未着手。実装前にGitHub Issueへ分解する。
+
 ### Workflowの発見とJobの取得
 
 - GitHub Issue URLをLinear attachment APIへ渡し、対応するLinear issueを逆引きする。webhook署名検証、起床通知プロトコル、Linear webhookのrouting方式は[ADR 0006](./docs/adr/0006-webhook-verification-and-wake-notification.md)を正本とする。
