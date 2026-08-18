@@ -97,7 +97,14 @@ packages/identity
 
 - 最終的には`bunx @mikan-919/oriel serve`を環境変数なしで呼べるようにしたい。relay origin、repositoryなど現在env varで渡している利用者固有設定を、初回起動時のWeb UIから入力し、既存のlocal state SQLite（`ORIEL_STATE_PATH`）へ保存する経路に置き換える方向で検討する。
 - 別途の設定ファイル形式は増やさず、既存のSQLite・migration機構へ載せる案が現時点の第一候補。fail closed設計（未設定なら503で止まる）との整合は個別に詰める。
-- model providerは他のinstance単位設定と同列に扱わない。Agent session（Job）ごとに変更可能なのを標準経路とし、`serve`起動時の値はfallback既定値の位置づけにとどめる。「Agentとモデル提供元」節の「実行ハーネスは提供元とモデルの論理的な識別子だけを指定する」という既存方針と、session単位選択をどう配線するか（起動API引数か、Job作成時のUI選択か）は未決定。
+- model providerは他のinstance単位設定と同列に扱わない。3層のfallback連鎖で解決する（`/grilling`で合意済み）。
+  1. base（instance既定値）。
+  2. per-kind既定値。modelを実際に使う`what_confirmation`/`how_confirmation`/`pr_response`/`implementation`の4 Job種別ごとに個別の既定を持てる（`issue_conversation`は人間が書いた返答本文をそのままGitHub Issueへ中継するだけでmodelを使わないため対象外）。未設定ならbaseへfallback。
+  3. Job単独override。人間が`NewJobModal`から明示的に起動できる`implementation`だけに存在する。`what_confirmation`/`how_confirmation`/`pr_response`は`discoveryLoop`がwebhook/pollingから自動起動し、その場で選ぶ人間がいないためper-kind既定値どまり。永続化せず、起動APIの引数としてその場限りで渡す。
+  - 選択のgranularityは「Job作成時点で固定」。同一Job（同一harness process）実行中の途中切り替えは対象外とし、別増分にする。
+  - per-kind既定値とinstance既定値は新しい保存機構を作らず、instance設定と同じlocal state SQLiteへ保存する。
+  - 未決定: per-kind既定値をWeb UIでどう編集するか（現状の`ConfigModal`は読み取り専用）。model IDを自由入力にするか、provider側（LM Studioなど）から一覧取得して選ばせるか。
+- local state SQLiteのdefault置き場所は`~/.local/share/oriel/`（XDG_DATA_HOME、v1はLinux/WSL2限定なのでXDG準拠）とし、`ORIEL_STATE_PATH`はこの既定値を持つことで省略可能にする。ROADMAP.md「配布、品質、test」節の「OS application data領域へ置く」という既存方針と整合させる。
 - 未着手。実装前にGitHub Issueへ分解する。
 
 ### Workflowの発見とJobの取得
