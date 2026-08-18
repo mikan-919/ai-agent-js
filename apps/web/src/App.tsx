@@ -80,6 +80,29 @@ function parseTranscriptEvent(
     return { key, role: "system", text: entry.content };
   }
 
+  const externalOperationLabel: Record<string, string> = {
+    "external.linear_in_progress": "Linear: In Progressへ反映",
+    "external.pull_request": "Pull Request",
+    "external.review_state": "Linear: レビュー用stateへ反映",
+    "external.returned_to_triage": "Linear: Triageへ差し戻し",
+  };
+
+  if (entry.kind in externalOperationLabel) {
+    let status: unknown;
+
+    try {
+      status = (JSON.parse(entry.content) as { status: unknown }).status;
+    } catch {
+      status = entry.content;
+    }
+
+    return {
+      key,
+      role: "system",
+      text: `${externalOperationLabel[entry.kind]}: ${String(status)}`,
+    };
+  }
+
   if (entry.kind !== "model.stream.event") {
     return null;
   }

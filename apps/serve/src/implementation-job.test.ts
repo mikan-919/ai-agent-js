@@ -19,6 +19,7 @@ import type { StartImplementationWorkerOptions } from "./implementation-worker";
 import type { LinearInProgressPorts } from "./linear-progress";
 import type { LinearReviewStatePorts } from "./linear-review-state";
 import { openServeLocalState } from "./local-state";
+import { createTranscriptStore } from "./transcript-store";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
 import type { LinearApprovalStatePorts } from "./return-to-triage";
@@ -451,6 +452,34 @@ test("a completed worker creates a Pull Request and reflects the review state", 
             )
             .all(),
         ).toEqual([{ jobId: started.jobId, prNumber: 7, status: "watching" }]);
+
+        // 外部操作の状態はWeb UIがJob単位のtranscriptとして確認できる。
+        const entries = createTranscriptStore(database).search({
+          repository,
+          scope: "job",
+          jobId: started.jobId,
+          query: "",
+          limit: 50,
+        });
+
+        expect(
+          entries.map((entry) => [entry.kind, entry.content]),
+        ).toContainEqual([
+          "external.linear_in_progress",
+          JSON.stringify({ status: "in_progress" }),
+        ]);
+        expect(
+          entries.map((entry) => [entry.kind, entry.content]),
+        ).toContainEqual([
+          "external.pull_request",
+          JSON.stringify({ status: "created", number: 7 }),
+        ]);
+        expect(
+          entries.map((entry) => [entry.kind, entry.content]),
+        ).toContainEqual([
+          "external.review_state",
+          JSON.stringify({ status: "kept_in_progress" }),
+        ]);
       } finally {
         database.close();
       }
@@ -923,6 +952,16 @@ test("an approval that no longer matches is returned from Todo to Triage by the 
             linearIssueId,
             status: "returned",
           },
+        ]);
+
+        // 外部操作の状態はWeb UIがJob単位のtranscriptとして確認できる。
+        expect(
+          createTranscriptStore(database)
+            .search({ repository, scope: "local", query: "", limit: 50 })
+            .map((entry) => [entry.kind, entry.content]),
+        ).toContainEqual([
+          "external.returned_to_triage",
+          JSON.stringify({ status: "returned" }),
         ]);
       } finally {
         database.close();

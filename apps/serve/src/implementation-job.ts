@@ -39,6 +39,7 @@ import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { ensurePullRequest, type PullRequestPorts } from "./pull-request";
 import { createPullRequestWatchStore } from "./pull-request-watch";
+import { createTranscriptStore } from "./transcript-store";
 import {
   reflectReviewState,
   type LinearReviewStatePorts,
@@ -230,7 +231,7 @@ export async function startImplementationJob({
     const database = openServeLocalState(databasePath);
 
     try {
-      return await returnApprovalToTriage({
+      const status = await returnApprovalToTriage({
         database,
         ownership,
         ports: linearApprovalState,
@@ -243,6 +244,15 @@ export async function startImplementationJob({
           approvalFingerprint: approval.approvalFingerprint,
         },
       });
+
+      createTranscriptStore(database).append({
+        jobId: approval.jobId,
+        repository,
+        kind: "external.returned_to_triage",
+        content: JSON.stringify({ status }),
+      });
+
+      return status;
     } finally {
       database.close();
     }
@@ -467,6 +477,13 @@ export async function startImplementationJob({
         approvalFingerprint: approval.approvalFingerprint,
       },
     });
+
+    createTranscriptStore(database).append({
+      jobId: approval.jobId,
+      repository,
+      kind: "external.linear_in_progress",
+      content: JSON.stringify({ status: linearState }),
+    });
   } finally {
     database.close();
   }
@@ -574,14 +591,24 @@ async function afterCompletion({
     },
   });
 
-  if (ensured.number === null) {
-    return;
-  }
-
   const database = openServeLocalState(databasePath);
 
   try {
-    await reflectReviewState({
+    createTranscriptStore(database).append({
+      jobId: approval.jobId,
+      repository,
+      kind: "external.pull_request",
+      content: JSON.stringify({
+        status: ensured.status,
+        number: ensured.number,
+      }),
+    });
+
+    if (ensured.number === null) {
+      return;
+    }
+
+    const reviewState = await reflectReviewState({
       database,
       ownership,
       ports: linearApprovalState,
@@ -594,6 +621,13 @@ async function afterCompletion({
         linearIssueId: approval.linearIssueId,
         approvalFingerprint: approval.approvalFingerprint,
       },
+    });
+
+    createTranscriptStore(database).append({
+      jobId: approval.jobId,
+      repository,
+      kind: "external.review_state",
+      content: JSON.stringify({ status: reviewState }),
     });
 
     createPullRequestWatchStore(database).upsert({
