@@ -79,6 +79,17 @@ export interface ServeHttpServerOptions {
     linearIssueId: string;
   }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
   /**
+   * 明示的に起動する、コードを変更しないLinear対話。人間が書いた本文をLinear
+   * commentとして投稿してからHOW確定Jobを始める。relay所有権を取れた場合だけ
+   * workerが動く。
+   */
+  startHowConversation?: (input: {
+    issueNumber: number;
+    linearIssueId: string;
+    body: string;
+    command: boolean;
+  }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
+  /**
    * ROADMAPの「local、current Job、repositoryの範囲」を横断するtranscript検索。
    * `statePath`や`repository`が構成されていない起動では配線しない。
    */
@@ -352,6 +363,7 @@ export function startServeHttpServer({
   createDeviceRegistration,
   startIssueConversation,
   startImplementationJob,
+  startHowConversation,
   searchTranscripts,
   webDistRoot = defaultWebDistRoot,
   jobRegistry = createJobRegistry(),
@@ -549,6 +561,51 @@ export function startServeHttpServer({
 
     return holdStartedJob(context, () =>
       startImplementationJob({ linearIssueId: body.linearIssueId as string }),
+    );
+  });
+
+  /**
+   * コードを変更しないLinear対話。JobキーとcanonicalブランチはHOWの現在値から
+   * `serve`が導く。`command`はTriage→Todoの承認そのものではなく、Agentへ渡す
+   * 確定意図の合図に過ぎない。
+   */
+  app.post("/api/how-conversations", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      issueNumber?: unknown;
+      linearIssueId?: unknown;
+      body?: unknown;
+      command?: unknown;
+    } | null;
+    const issueNumber = Number(body?.issueNumber);
+
+    if (
+      startHowConversation === undefined ||
+      body === null ||
+      Object.keys(body).some(
+        (field) =>
+          field !== "issueNumber" &&
+          field !== "linearIssueId" &&
+          field !== "body" &&
+          field !== "command",
+      ) ||
+      typeof body.linearIssueId !== "string" ||
+      body.linearIssueId === "" ||
+      typeof body.body !== "string" ||
+      body.body === "" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0 ||
+      (body.command !== undefined && typeof body.command !== "boolean")
+    ) {
+      return context.text("Bad Request", 400);
+    }
+
+    return holdStartedJob(context, () =>
+      startHowConversation({
+        issueNumber,
+        linearIssueId: body.linearIssueId as string,
+        body: body.body as string,
+        command: body.command === true,
+      }),
     );
   });
 

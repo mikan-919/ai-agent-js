@@ -5,7 +5,11 @@ import {
   createLinearIssueConversationAdmission,
   type LinearIssueConversationAdmission,
 } from "./how-confirmation-admission";
-import { startHowConfirmationWorker } from "./how-confirmation-worker";
+import {
+  startHowConfirmationWorker,
+  type HowConfirmationWorker,
+  type StartHowConfirmationWorkerOptions,
+} from "./how-confirmation-worker";
 import type { DeviceTokenStore } from "./device-registration";
 import type { LinearCommentPublisher } from "./linear-comments";
 import type { LinearDescriptionPublisher } from "./linear-description";
@@ -30,13 +34,22 @@ export interface StartHowConfirmationJobOptions {
   repository: GitHubRepository;
   issueNumber: number;
   linearIssueId: string;
-  /** mention/commandを検知したLinear comment。 */
-  trigger: { commentId: string; command: boolean };
+  /**
+   * mention/commandを検知した既存のLinear comment、またはlocalhost UIで人間が
+   * 書いた返答本文。後者は`serve`がLinear commentとして投稿してから対話を
+   * 始める。どちらも、Triage→Todoの実行承認そのものはAgentへ渡さない。
+   */
+  trigger:
+    | { commentId: string; command: boolean }
+    | { body: string; command: boolean };
   model: { provider: string; id: string };
   modelProvider: ModelStreamProvider;
   /** Linear tokenをこの一回の起動でだけ解決する。取れなければ何も始めない。 */
   createLinearPorts: () => Promise<HowConfirmationLinearPorts | null>;
   heartbeatStopMs: number;
+  createWorker?: (
+    options: StartHowConfirmationWorkerOptions,
+  ) => HowConfirmationWorker;
 }
 
 export type StartHowConfirmationJobResult =
@@ -80,6 +93,7 @@ export async function startHowConfirmationJob({
   modelProvider,
   createLinearPorts,
   heartbeatStopMs,
+  createWorker = startHowConfirmationWorker,
 }: StartHowConfirmationJobOptions): Promise<StartHowConfirmationJobResult> {
   const deviceToken = await tokenStore.get(repositoryId);
 
@@ -134,6 +148,21 @@ export async function startHowConfirmationJob({
     return { status: "refused", reason: "linear_issue_not_found" };
   }
 
+  // localhost UIの入力は、そのままLinear commentとして残してから対話を始める。
+  // 既存commentのtriggerと違い、この経路は毎回新しいcommentを作る。
+  const resolvedTrigger =
+    "commentId" in trigger
+      ? trigger
+      : {
+          commentId: (
+            await linearPorts.commentPublisher.createComment({
+              linearIssueId,
+              body: trigger.body,
+            })
+          ).id,
+          command: trigger.command,
+        };
+
   const viewerId = await linearPorts.commentPublisher.getViewerId();
   const comments = (
     await linearPorts.commentPublisher.listComments({ linearIssueId })
@@ -145,7 +174,7 @@ export async function startHowConfirmationJob({
       body: comment.body,
     }));
 
-  const worker = startHowConfirmationWorker({
+  const worker = createWorker({
     databasePath,
     ownership,
     harnessEntry,
@@ -165,7 +194,7 @@ export async function startHowConfirmationJob({
         description: linearIssue.description ?? "",
       },
       comments,
-      trigger,
+      trigger: resolvedTrigger,
     },
   });
 

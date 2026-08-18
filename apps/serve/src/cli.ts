@@ -370,6 +370,68 @@ if (Bun.argv[2] === "serve") {
           )
       : undefined;
 
+  /**
+   * localhost UIで人間が書いた返答本文からHOW対話を始める入口。
+   * mention/commandの検知は要らない: Web UIから明示的に始めた時点で対象を
+   * 選んでいるため、既存commentのtriggerと同じ受け入れ判定・所有権取得を
+   * 経てから`serve`がLinear commentとして投稿する。
+   */
+  const startHowConversation =
+    howConfirmationReady && relayDeviceClient !== undefined
+      ? ({
+          issueNumber,
+          linearIssueId,
+          body,
+          command,
+        }: {
+          issueNumber: number;
+          linearIssueId: string;
+          body: string;
+          command: boolean;
+        }) =>
+          startHowConfirmationJob({
+            relayOrigin: environment,
+            tokenStore,
+            databasePath: statePath,
+            harnessEntry: new URL("./harness.js", import.meta.url),
+            repositoryId,
+            repository: { owner: repositoryOwner, name: repositoryName },
+            issueNumber,
+            linearIssueId,
+            trigger: { body, command },
+            model: { provider: modelProviderId, id: modelId },
+            modelProvider: createPiModelStreamProvider({
+              models,
+              resolveApiKey: (provider) =>
+                bunSecretsModelCredential(provider).get(),
+            }),
+            createLinearPorts: async () => {
+              const linearToken =
+                await bunSecretsLinearToken(repositoryId).get();
+
+              if (linearToken === null) {
+                return null;
+              }
+
+              const reader = createLinearApprovalReader({ token: linearToken });
+
+              return {
+                reader,
+                commentPublisher: createLinearGraphqlCommentPublisher({
+                  token: linearToken,
+                }),
+                descriptionPublisher: createLinearGraphqlDescriptionPublisher({
+                  token: linearToken,
+                  reader,
+                }),
+              };
+            },
+            heartbeatStopMs,
+          }).then((result) =>
+            holdIfStarted(jobRegistry, "how_confirmation", result),
+          )
+      : undefined;
+
   const transcripts =
     statePath === undefined
       ? undefined
@@ -397,6 +459,7 @@ if (Bun.argv[2] === "serve") {
     jobRegistry,
     searchTranscripts,
     startImplementationJob: startImplementation,
+    startHowConversation,
     startIssueConversation: conversationReady
       ? ({ issueNumber, body }) =>
           startIssueConversationJob({

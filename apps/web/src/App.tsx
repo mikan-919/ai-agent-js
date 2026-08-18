@@ -408,7 +408,9 @@ function NewJobModal({
   onClose: () => void;
   onStarted: () => Promise<void>;
 }) {
-  const [kind, setKind] = useState<"issue" | "implementation">("issue");
+  const [kind, setKind] = useState<"issue" | "linear" | "implementation">(
+    "issue",
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -435,14 +437,23 @@ function NewJobModal({
     const path =
       kind === "issue"
         ? "/api/issue-conversations"
-        : "/api/implementation-jobs";
+        : kind === "linear"
+          ? "/api/how-conversations"
+          : "/api/implementation-jobs";
     const payload =
       kind === "issue"
         ? {
             issueNumber: Number(form.get("issueNumber")),
             body: String(form.get("body") ?? ""),
           }
-        : { linearIssueId: String(form.get("linearIssueId") ?? "") };
+        : kind === "linear"
+          ? {
+              issueNumber: Number(form.get("issueNumber")),
+              linearIssueId: String(form.get("linearIssueId") ?? ""),
+              body: String(form.get("body") ?? ""),
+              command: form.get("command") === "on",
+            }
+          : { linearIssueId: String(form.get("linearIssueId") ?? "") };
 
     setPending(true);
 
@@ -491,6 +502,7 @@ function NewJobModal({
           {(
             [
               { value: "issue", label: "Issue対話" },
+              { value: "linear", label: "Linear対話" },
               { value: "implementation", label: "実装Job" },
             ] as const
           ).map((tab) => (
@@ -530,6 +542,40 @@ function NewJobModal({
                   className={`${inputClass} resize-y`}
                 />
               </Field>
+            </>
+          )}
+          {kind === "linear" && (
+            <>
+              <Field label="Issue番号">
+                <input
+                  name="issueNumber"
+                  type="number"
+                  required
+                  min={1}
+                  className={inputClass}
+                  autoFocus
+                />
+              </Field>
+              <Field label="Triage中のLinear issue ID">
+                <input
+                  name="linearIssueId"
+                  type="text"
+                  required
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="返答本文">
+                <textarea
+                  name="body"
+                  required
+                  rows={4}
+                  className={`${inputClass} resize-y`}
+                />
+              </Field>
+              <label className="flex items-center gap-2 text-sm text-muted">
+                <input name="command" type="checkbox" />
+                この回答でHOWの確定を求める(/oriel confirm相当)
+              </label>
             </>
           )}
           {kind === "implementation" && (
