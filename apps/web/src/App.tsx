@@ -550,6 +550,19 @@ function NewJobModal({
         : kind === "linear"
           ? "/api/how-conversations"
           : "/api/implementation-jobs";
+    const modelProvider = String(form.get("modelProvider") ?? "").trim();
+    const modelId = String(form.get("modelId") ?? "").trim();
+
+    if (
+      kind === "implementation" &&
+      (modelProvider === "") !== (modelId === "")
+    ) {
+      setFormError(
+        "model providerとmodel IDのoverrideは両方入力するか、両方空欄にしてください。",
+      );
+      return;
+    }
+
     const payload =
       kind === "issue"
         ? {
@@ -563,7 +576,12 @@ function NewJobModal({
               body: String(form.get("body") ?? ""),
               command: form.get("command") === "on",
             }
-          : { linearIssueId: String(form.get("linearIssueId") ?? "") };
+          : {
+              linearIssueId: String(form.get("linearIssueId") ?? ""),
+              ...(modelProvider === ""
+                ? {}
+                : { modelOverride: { provider: modelProvider, id: modelId } }),
+            };
 
     setPending(true);
 
@@ -689,15 +707,41 @@ function NewJobModal({
             </>
           )}
           {kind === "implementation" && (
-            <Field label="承認済みLinear issue ID">
-              <input
-                name="linearIssueId"
-                type="text"
-                required
-                className={inputClass}
-                autoFocus
-              />
-            </Field>
+            <>
+              <Field label="承認済みLinear issue ID">
+                <input
+                  name="linearIssueId"
+                  type="text"
+                  required
+                  className={inputClass}
+                  autoFocus
+                />
+              </Field>
+              <div className="rounded-lg border border-border bg-bg p-3">
+                <p className="text-sm text-text">Job単独override（任意）</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted">
+                  空欄ならimplementationのper-kindまたはbase既定値を使います。この指定は保存されません。
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <Field label="Provider override">
+                    <input
+                      name="modelProvider"
+                      type="text"
+                      className={inputClass}
+                      placeholder="provider"
+                    />
+                  </Field>
+                  <Field label="Model ID override">
+                    <input
+                      name="modelId"
+                      type="text"
+                      className={inputClass}
+                      placeholder="model ID"
+                    />
+                  </Field>
+                </div>
+              </div>
+            </>
           )}
 
           {formError !== null && (

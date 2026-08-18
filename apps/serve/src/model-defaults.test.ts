@@ -47,6 +47,9 @@ test("model selection resolves override, per-kind, then base", () => {
   store.set("how_confirmation", perKind);
   expect(resolveModelDefault(store, "how_confirmation")).toEqual(perKind);
   expect(resolveModelDefault(store, "how_confirmation", override)).toEqual(
+    perKind,
+  );
+  expect(resolveModelDefault(store, "implementation", override)).toEqual(
     override,
   );
   expect(resolveModelDefault(store, "issue_conversation", override)).toBe(null);

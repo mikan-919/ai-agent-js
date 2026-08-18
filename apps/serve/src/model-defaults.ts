@@ -106,5 +106,9 @@ export function resolveModelDefault(
     return null;
   }
 
-  return override ?? store.get(kind) ?? store.get("base");
+  return (
+    (kind === "implementation" ? override : undefined) ??
+    store.get(kind) ??
+    store.get("base")
+  );
 }
