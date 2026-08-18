@@ -53,6 +53,7 @@ import {
 } from "./pi-model-provider";
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
+import { createTranscriptSearch } from "./transcript-search";
 import { createTranscriptStore } from "./transcript-store";
 import { startWhatConfirmationJob } from "./what-confirmation-job";
 import { createWhatTriggerLoop } from "./what-trigger-discovery";
@@ -369,8 +370,32 @@ if (Bun.argv[2] === "serve") {
           )
       : undefined;
 
+  const transcripts =
+    statePath === undefined
+      ? undefined
+      : createTranscriptStore(openServeLocalState(statePath));
+  // repository scopeの検索が中継先へ届く接続。webhook通知loopと共に後で開く。
+  let notificationConnection: ReturnType<
+    typeof createNotificationConnection
+  > | null = null;
+  const searchTranscripts =
+    transcripts !== undefined &&
+    repositoryOwner !== undefined &&
+    repositoryName !== undefined
+      ? createTranscriptSearch(
+          transcripts,
+          {
+            searchRepository: (request) =>
+              notificationConnection?.searchRepository(request) ??
+              Promise.resolve([]),
+          },
+          { owner: repositoryOwner, name: repositoryName },
+        )
+      : undefined;
+
   const httpServer = startServeHttpServer({
     jobRegistry,
+    searchTranscripts,
     startImplementationJob: startImplementation,
     startIssueConversation: conversationReady
       ? ({ issueNumber, body }) =>
@@ -776,12 +801,7 @@ if (Bun.argv[2] === "serve") {
     prMergeLoop?.start();
     prResponseLoop?.start();
 
-    const transcripts =
-      statePath === undefined
-        ? undefined
-        : createTranscriptStore(openServeLocalState(statePath));
-
-    createNotificationConnection({
+    notificationConnection = createNotificationConnection({
       relayOrigin: environment,
       resolveDeviceToken: () => tokenStore.get(repositoryId),
       onWake: (source) => {
