@@ -9,6 +9,7 @@
     "@mikan-919/oriel-identity": "workspace:*",
     "@octokit/rest": "22.0.1",
     "drizzle-orm": "0.36.4",
-    "hono": "4.13.1"
+    "hono": "4.13.1",
+    "valibot": "1.2.0"
   }
 }

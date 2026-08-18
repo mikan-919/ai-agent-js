@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   GitPullRequest,
@@ -813,12 +814,8 @@ function ConfigModal({
   csrfToken: string | null;
   onClose: () => void;
 }) {
-  const [config, setConfig] = useState<ServeConfig | null>(null);
-  const [models, setModels] = useState<ModelOption[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   const [base, setBase] = useState<ModelSelection>({
     provider: "",
     modelId: "",
@@ -826,6 +823,38 @@ function ConfigModal({
   const [perKind, setPerKind] = useState<
     Record<ModelKind, ModelSelection | null>
   >(() => emptyModelDefaults().perKind);
+  const queryClient = useQueryClient();
+  const configQuery = useQuery({
+    queryKey: ["serve-config"],
+    queryFn: async (): Promise<ServeConfig> => {
+      const response = await fetch("/api/config");
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(body));
+      }
+
+      return body as ServeConfig;
+    },
+  });
+  const modelsQuery = useQuery({
+    queryKey: ["serve-models"],
+    queryFn: async (): Promise<ModelOption[]> => {
+      try {
+        const response = await fetch("/api/models");
+        const body = await response.json().catch(() => null);
+
+        return response.ok && Array.isArray(body)
+          ? (body as ModelOption[])
+          : [];
+      } catch {
+        return [];
+      }
+    },
+  });
+  const config = configQuery.data ?? null;
+  const models = modelsQuery.data ?? null;
+  const error = configQuery.isError ? "設定を読み込めませんでした。" : null;
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -840,61 +869,11 @@ function ConfigModal({
   }, [onClose]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (config === null) {
+      return;
+    }
 
-    fetch("/api/config")
-      .then(async (response) => {
-        const body = await response.json().catch(() => null);
-
-        if (!response.ok) {
-          throw new Error(getApiErrorMessage(body));
-        }
-
-        return body as ServeConfig;
-      })
-      .then((body) => {
-        if (!cancelled) {
-          setConfig(body);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setError("設定を読み込めませんでした。");
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    fetch("/api/models")
-      .then(async (response) => {
-        const body = await response.json().catch(() => null);
-
-        if (!response.ok || !Array.isArray(body)) {
-          return [];
-        }
-
-        return body as ModelOption[];
-      })
-      .catch(() => [])
-      .then((body) => {
-        if (!cancelled) {
-          setModels(body);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const defaults = config?.modelDefaults ?? emptyModelDefaults();
+    const defaults = config.modelDefaults;
 
     setBase(defaults.base ?? { provider: "", modelId: "" });
     setPerKind({
@@ -925,12 +904,39 @@ function ConfigModal({
     return { provider, modelId };
   }
 
+  const saveMutation = useMutation({
+    mutationFn: async (
+      updates: {
+        scope: "base" | ModelKind;
+        selection: ModelSelection | null;
+      }[],
+    ) => {
+      if (csrfToken === null) {
+        throw new Error("CSRF tokenがありません。");
+      }
+
+      for (const update of updates) {
+        const result = await postJson("/api/config", csrfToken, {
+          scope: update.scope,
+          provider: update.selection?.provider ?? null,
+          modelId: update.selection?.modelId ?? null,
+        });
+
+        if (!result.ok) {
+          throw new Error(getApiErrorMessage(result.body));
+        }
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["serve-config"] });
+    },
+  });
+
   async function save() {
     if (csrfToken === null) {
       return;
     }
 
-    setSaving(true);
     setSaveError(null);
     setSavedMessage(null);
 
@@ -949,23 +955,11 @@ function ConfigModal({
         })),
       ];
 
-      for (const update of updates) {
-        const result = await postJson("/api/config", csrfToken, {
-          scope: update.scope,
-          provider: update.selection?.provider ?? null,
-          modelId: update.selection?.modelId ?? null,
-        });
-
-        if (!result.ok) {
-          throw new Error(getApiErrorMessage(result.body));
-        }
-      }
+      await saveMutation.mutateAsync(updates);
 
       setSavedMessage("保存しました。");
     } catch (cause: unknown) {
       setSaveError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -1206,8 +1200,12 @@ function ConfigModal({
               )}
 
               <div className="flex justify-end">
-                <PrimaryButton disabled={csrfToken === null || saving}>
-                  {saving && <Loader2 size={14} className="animate-spin" />}
+                <PrimaryButton
+                  disabled={csrfToken === null || saveMutation.isPending}
+                >
+                  {saveMutation.isPending && (
+                    <Loader2 size={14} className="animate-spin" />
+                  )}
                   設定を保存
                 </PrimaryButton>
               </div>

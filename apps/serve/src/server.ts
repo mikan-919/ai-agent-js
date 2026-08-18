@@ -6,8 +6,10 @@ import type {
   TranscriptEntry,
 } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
+import { sValidator } from "@hono/standard-validator";
 import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
+import * as v from "valibot";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
 import {
@@ -48,29 +50,6 @@ function isDeviceRegistrationPurpose(
     value === "registration" ||
     value === "device_list" ||
     value === "revocation"
-  );
-}
-
-function isModelDefaultScope(value: unknown): value is ModelDefaultScope {
-  return (
-    value === "base" ||
-    (typeof value === "string" &&
-      modelDefaultKinds.some((kind) => kind === value))
-  );
-}
-
-function isModelSelection(value: unknown): value is ModelSelection {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const model = value as { provider?: unknown; id?: unknown };
-
-  return (
-    typeof model.provider === "string" &&
-    model.provider !== "" &&
-    typeof model.id === "string" &&
-    model.id !== ""
   );
 }
 
@@ -124,6 +103,36 @@ const apiPathsWithoutDeviceRegistration = new Set([
   "/api/issue-conversations",
   "/api/implementation-jobs",
 ]);
+
+const nonEmptyString = v.pipe(v.string(), v.minLength(1));
+const modelSelectionSchema = v.strictObject({
+  provider: nonEmptyString,
+  id: nonEmptyString,
+});
+const implementationJobRequestSchema = v.strictObject({
+  linearIssueId: nonEmptyString,
+  modelOverride: v.optional(modelSelectionSchema),
+});
+const modelDefaultRequestSchema = v.pipe(
+  v.strictObject({
+    scope: v.picklist(["base", ...modelDefaultKinds]),
+    provider: v.nullable(nonEmptyString),
+    modelId: v.nullable(nonEmptyString),
+  }),
+  v.check(
+    (input) =>
+      (input.provider === null && input.modelId === null) ||
+      (input.provider !== null && input.modelId !== null),
+    "providerとmodelIdは両方指定するか、両方nullで指定してください。",
+  ),
+);
+
+function invalidJsonRequest(message: string) {
+  return (result: { success: boolean }, context: Context) =>
+    result.success
+      ? undefined
+      : context.json({ error: "bad_request", message }, 400);
+}
 
 export interface ServeHttpServerOptions {
   /** Web UIから確認できる、credentialを含まないserve設定。 */
@@ -712,49 +721,35 @@ export function startServeHttpServer({
    * コードを変更する実装Job。入力は承認されたHOWのLinear Issueだけとし、WHAT、
    * Jobキー、canonicalブランチ、承認指紋、作業内容はclientから受け取らない。
    */
-  app.post("/api/implementation-jobs", async (context) => {
-    const body = (await context.req.json().catch(() => null)) as {
-      linearIssueId?: unknown;
-      modelOverride?: unknown;
-    } | null;
+  app.post(
+    "/api/implementation-jobs",
+    sValidator(
+      "json",
+      implementationJobRequestSchema,
+      invalidJsonRequest(
+        "linearIssueIdは空でない文字列で指定し、modelOverrideにはproviderとidを指定してください。",
+      ),
+    ),
+    async (context) => {
+      const body = context.req.valid("json");
+      if (startImplementationJob === undefined) {
+        return context.json(
+          {
+            error: "not_configured",
+            message: `Implementation jobs are not configured. Set ${environmentVariable("RELAY_ORIGIN")}, ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_ID")}, ${environmentVariable("REPOSITORY_OWNER")}, ${environmentVariable("REPOSITORY_NAME")}, ${environmentVariable("OWNERSHIP_HEARTBEAT_STOP_MS")}, ${environmentVariable("REPOSITORY_ROOT")}, ${environmentVariable("WORKTREES_ROOT")}, ${environmentVariable("MODEL_PROVIDER")}, and ${environmentVariable("MODEL_ID")}.`,
+          },
+          503,
+        );
+      }
 
-    if (startImplementationJob === undefined) {
-      return context.json(
-        {
-          error: "not_configured",
-          message: `Implementation jobs are not configured. Set ${environmentVariable("RELAY_ORIGIN")}, ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_ID")}, ${environmentVariable("REPOSITORY_OWNER")}, ${environmentVariable("REPOSITORY_NAME")}, ${environmentVariable("OWNERSHIP_HEARTBEAT_STOP_MS")}, ${environmentVariable("REPOSITORY_ROOT")}, ${environmentVariable("WORKTREES_ROOT")}, ${environmentVariable("MODEL_PROVIDER")}, and ${environmentVariable("MODEL_ID")}.`,
-        },
-        503,
+      return holdStartedJob(context, () =>
+        startImplementationJob({
+          linearIssueId: body.linearIssueId,
+          modelOverride: body.modelOverride,
+        }),
       );
-    }
-
-    if (
-      body === null ||
-      Object.keys(body).some(
-        (field) => field !== "linearIssueId" && field !== "modelOverride",
-      ) ||
-      typeof body.linearIssueId !== "string" ||
-      body.linearIssueId === "" ||
-      (body.modelOverride !== undefined &&
-        !isModelSelection(body.modelOverride))
-    ) {
-      return context.json(
-        {
-          error: "bad_request",
-          message:
-            "linearIssueIdは空でない文字列で指定し、余分なフィールドは含めないでください。",
-        },
-        400,
-      );
-    }
-
-    return holdStartedJob(context, () =>
-      startImplementationJob({
-        linearIssueId: body.linearIssueId as string,
-        modelOverride: body.modelOverride as ModelSelection | undefined,
-      }),
-    );
-  });
+    },
+  );
 
   /**
    * コードを変更しないLinear対話。JobキーとcanonicalブランチはHOWの現在値から
@@ -814,70 +809,40 @@ export function startServeHttpServer({
     context.json({ ...serveConfig, modelDefaults: currentModelDefaults() }),
   );
 
-  app.post("/api/config", async (context) => {
-    if (modelDefaults === undefined) {
-      return context.json(
-        {
-          error: "not_configured",
-          message: "Model defaults are not configured.",
-        },
-        503,
-      );
-    }
+  app.post(
+    "/api/config",
+    sValidator(
+      "json",
+      modelDefaultRequestSchema,
+      invalidJsonRequest(
+        "scope、provider、modelIdを指定し、providerとmodelIdは両方指定するか両方nullにしてください。",
+      ),
+    ),
+    async (context) => {
+      if (modelDefaults === undefined) {
+        return context.json(
+          {
+            error: "not_configured",
+            message: "Model defaults are not configured.",
+          },
+          503,
+        );
+      }
 
-    const body = (await context.req.json().catch(() => null)) as {
-      scope?: unknown;
-      provider?: unknown;
-      modelId?: unknown;
-    } | null;
+      const body = context.req.valid("json");
 
-    if (
-      body === null ||
-      Object.keys(body).some(
-        (field) =>
-          field !== "scope" && field !== "provider" && field !== "modelId",
-      ) ||
-      !isModelDefaultScope(body.scope)
-    ) {
-      return context.json(
-        {
-          error: "bad_request",
-          message:
-            "scopeはbaseまたはmodelを使うJob種別、providerとmodelIdは両方指定してください。",
-        },
-        400,
-      );
-    }
+      if (body.provider === null) {
+        modelDefaults.clear(body.scope as ModelDefaultScope);
+      } else {
+        modelDefaults.set(body.scope as ModelDefaultScope, {
+          provider: body.provider,
+          id: body.modelId as string,
+        });
+      }
 
-    const clear = body.provider === null && body.modelId === null;
-    const validModel =
-      typeof body.provider === "string" &&
-      body.provider !== "" &&
-      typeof body.modelId === "string" &&
-      body.modelId !== "";
-
-    if (!clear && !validModel) {
-      return context.json(
-        {
-          error: "bad_request",
-          message:
-            "providerとmodelIdは空でない文字列で指定するか、両方nullで既定値を解除してください。",
-        },
-        400,
-      );
-    }
-
-    if (clear) {
-      modelDefaults.clear(body.scope);
-    } else {
-      modelDefaults.set(body.scope, {
-        provider: body.provider as string,
-        id: body.modelId as string,
-      });
-    }
-
-    return context.json({ modelDefaults: currentModelDefaults() });
-  });
+      return context.json({ modelDefaults: currentModelDefaults() });
+    },
+  );
 
   app.get("/api/models", async (context) => {
     if (listModels === undefined) {
