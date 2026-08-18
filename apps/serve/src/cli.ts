@@ -53,6 +53,7 @@ import {
 } from "./pi-model-provider";
 import { createRelayDeviceClient } from "./relay-client";
 import { startServeHttpServer } from "./server";
+import { resolveStatePath } from "./state-path";
 import { createTranscriptSearch } from "./transcript-search";
 import { createTranscriptStore } from "./transcript-store";
 import { startWhatConfirmationJob } from "./what-confirmation-job";
@@ -83,7 +84,10 @@ if (Bun.argv[2] === "serve") {
    */
   const jobRegistry = createJobRegistry();
   const environment = Bun.env[`${identity.environmentPrefix}RELAY_ORIGIN`];
-  const statePath = Bun.env[`${identity.environmentPrefix}STATE_PATH`];
+  const statePath = resolveStatePath({
+    explicitPath: Bun.env[`${identity.environmentPrefix}STATE_PATH`],
+    xdgDataHome: Bun.env.XDG_DATA_HOME,
+  });
   const repositoryId = requiredNumber("REPOSITORY_ID");
   const repositoryOwner =
     Bun.env[`${identity.environmentPrefix}REPOSITORY_OWNER`];
