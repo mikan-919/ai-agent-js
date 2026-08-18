@@ -5,6 +5,7 @@ import {
   checkpointCompletedEventSchema,
   checkpointRejectedEventSchema,
   checkpointRequestSchema,
+  stopRequestSchema,
 } from "./implementation";
 import {
   modelStreamAbortSchema,
@@ -99,6 +100,7 @@ export const prResponseServerMessageSchema = v.variant("type", [
   checkpointAcceptedEventSchema,
   checkpointCompletedEventSchema,
   checkpointRejectedEventSchema,
+  stopRequestSchema,
   modelStreamEventSchema,
   modelStreamEndSchema,
   modelStreamRejectedSchema,

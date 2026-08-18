@@ -66,6 +66,24 @@ test("closeAll closes every held Job that is still running", () => {
   expect(registry.list()).toEqual([]);
 });
 
+test("requestStop calls a held Job's requestStop and reports whether it was reachable", () => {
+  const registry = createJobRegistry();
+  const implementation = fakeJob("job-1");
+  const stopRequests: string[] = [];
+
+  registry.hold("implementation", {
+    ...implementation.job,
+    requestStop: () => stopRequests.push("job-1"),
+  });
+  registry.hold("issue_conversation", fakeJob("job-2").job);
+
+  expect(registry.requestStop("job-1")).toBe(true);
+  expect(stopRequests).toEqual(["job-1"]);
+  // issue_conversationはrequestStopを持たない種別。
+  expect(registry.requestStop("job-2")).toBe(false);
+  expect(registry.requestStop("job-missing")).toBe(false);
+});
+
 test("holdIfStarted only registers results whose status is started", () => {
   const registry = createJobRegistry();
   const started = fakeJob("job-1");

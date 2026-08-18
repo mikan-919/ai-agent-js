@@ -49,6 +49,43 @@ test("an unknown model stream requestId is not silently dropped", async () => {
   expect(await router.read()).toMatchObject({ requestId: "other" });
 });
 
+test("a stop request reaches the registered handler instead of the general queue", async () => {
+  const router = createHarnessMessageRouter();
+  const stopped: unknown[] = [];
+
+  router.onStop(() => stopped.push("stopped"));
+  router.deliver({
+    type: "stop.request",
+    jobId: "job-1",
+    jobLeaseId: "lease-1",
+  });
+  router.deliver({
+    type: "checkpoint.accepted",
+    requestId: "checkpoint-1",
+    operationId: "operation-1",
+  });
+
+  expect(stopped).toEqual(["stopped"]);
+  expect(await router.read()).toMatchObject({ type: "checkpoint.accepted" });
+});
+
+test("a stop request delivered before any handler is registered is dropped, not queued", async () => {
+  const router = createHarnessMessageRouter();
+
+  router.deliver({
+    type: "stop.request",
+    jobId: "job-1",
+    jobLeaseId: "lease-1",
+  });
+  router.deliver({
+    type: "checkpoint.accepted",
+    requestId: "checkpoint-1",
+    operationId: "operation-1",
+  });
+
+  expect(await router.read()).toMatchObject({ type: "checkpoint.accepted" });
+});
+
 test("a closed router ends every open subscription rather than hanging", async () => {
   const router = createHarnessMessageRouter();
   const stream = router.open("model-1");

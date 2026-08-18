@@ -47,6 +47,7 @@ function fakeAgent(
       acted: true,
       ...outcome,
     }),
+    abort: () => {},
   };
 }
 

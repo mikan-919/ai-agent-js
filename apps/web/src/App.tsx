@@ -9,6 +9,7 @@ import {
   Plus,
   Route,
   Search,
+  Square,
   Wrench,
   X,
 } from "lucide-react";
@@ -150,6 +151,12 @@ function parseTranscriptEvent(
 
   return null;
 }
+
+/** 実行に時間がかかり、計画停止に応じるJob種別。 */
+const stoppableKinds: Set<Job["kind"]> = new Set([
+  "implementation",
+  "pr_response",
+]);
 
 /** 一覧に残っているJobは稼働中が既定。明確な拒否/失敗語だけ静止表示にする。 */
 function statusTone(status: string | null): "live" | "fail" {
@@ -295,11 +302,13 @@ function ConversationBubble({ event }: { event: ConversationEvent }) {
 
 function ConversationView({
   job,
+  csrfToken,
   onBack,
   conversation,
   conversationError,
 }: {
   job: Job;
+  csrfToken: string | null;
   onBack: () => void;
   conversation: ConversationEvent[];
   conversationError: string | null;
@@ -307,10 +316,28 @@ function ConversationView({
   const Icon = kindIcon[job.kind];
   const tone = statusTone(job.status);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [conversation.length]);
+
+  useEffect(() => {
+    setStopping(false);
+  }, [job.jobId]);
+
+  async function stop() {
+    if (csrfToken === null || stopping) {
+      return;
+    }
+
+    setStopping(true);
+    await postJson(
+      `/api/jobs/${encodeURIComponent(job.jobId)}/stop`,
+      csrfToken,
+      {},
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -331,9 +358,26 @@ function ConversationView({
             </p>
             <p className="font-mono text-xs text-faint">{job.jobId}</p>
           </div>
-          <div className="ml-auto flex items-center gap-2 font-mono text-xs text-muted">
-            <StatusDot tone={tone} />
-            {job.status ?? "unknown"}
+          <div className="ml-auto flex items-center gap-3 font-mono text-xs text-muted">
+            {stoppableKinds.has(job.kind) && (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                disabled={csrfToken === null || stopping}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-muted transition-colors hover:border-fail/50 hover:text-fail disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {stopping ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Square size={12} />
+                )}
+                {stopping ? "停止中…" : "停止"}
+              </button>
+            )}
+            <span className="flex items-center gap-2">
+              <StatusDot tone={tone} />
+              {job.status ?? "unknown"}
+            </span>
           </div>
         </div>
       </header>
@@ -847,6 +891,7 @@ export function App() {
         {selectedJob !== null && (
           <ConversationView
             job={selectedJob}
+            csrfToken={csrfToken}
             onBack={() => setSelectedJobId(null)}
             conversation={conversation}
             conversationError={conversationError}

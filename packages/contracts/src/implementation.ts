@@ -111,6 +111,20 @@ export type CheckpointRejectedEvent = v.InferOutput<
   typeof checkpointRejectedEventSchema
 >;
 
+/**
+ * Web UIからの計画停止要求。
+ *
+ * CONCEPT.mdのとおり、harnessはAgent loopの現在のturnを安全に区切ってから
+ * checkpointをpushする。接続所有権喪失時の即時abortとは別の、明示的な要求。
+ */
+export const stopRequestSchema = v.strictObject({
+  type: v.literal("stop.request"),
+  jobId: nonEmptyString,
+  jobLeaseId: nonEmptyString,
+});
+
+export type StopRequest = v.InferOutput<typeof stopRequestSchema>;
+
 export const checkpointEventSchema = v.variant("type", [
   checkpointAcceptedEventSchema,
   checkpointCompletedEventSchema,
@@ -151,6 +165,7 @@ export const implementationServerMessageSchema = v.variant("type", [
   checkpointAcceptedEventSchema,
   checkpointCompletedEventSchema,
   checkpointRejectedEventSchema,
+  stopRequestSchema,
   modelStreamEventSchema,
   modelStreamEndSchema,
   modelStreamRejectedSchema,

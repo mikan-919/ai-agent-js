@@ -271,6 +271,29 @@ test("losing ownership closes the request path before the harness is served", as
   expect(stdin.written).toEqual([start]);
 });
 
+test("a user-requested stop sends a stop.request without touching checkpoint or model operations", async () => {
+  const stdin = serveStdin();
+  const { service, accepted } = fakeService();
+  const userStop = new AbortController();
+
+  userStop.abort();
+
+  await serveOwnedHarnessImplementationIpc(
+    harnessStdout([]),
+    stdin.stream,
+    start,
+    service,
+    undefined,
+    userStop.signal,
+  );
+
+  expect(accepted).toEqual([]);
+  expect(stdin.written).toEqual([
+    start,
+    { type: "stop.request", jobId: start.jobId, jobLeaseId: start.jobLeaseId },
+  ]);
+});
+
 test("model requests are streamed back per requestId and stay abortable while running", async () => {
   const stdin = serveStdin();
   const requests: ModelStreamRequest[] = [];

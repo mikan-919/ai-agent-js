@@ -106,6 +106,21 @@ if (mode === "implementation") {
       write({ type: "model.stream.abort", requestId });
     },
   };
+  const implementationAgent = createImplementationAgent({
+    streamFn: createProxyStreamFn({
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      model: start.model,
+      channel,
+    }),
+    tools: createWorktreeTools({
+      worktreePath: start.worktreePath,
+      runCommand,
+    }),
+  });
+
+  router.onStop(() => implementationAgent.abort());
+
   const outcome = await runImplementationWorker({
     start,
     transport: {
@@ -116,18 +131,7 @@ if (mode === "implementation") {
       read,
     },
     git: systemLocalGit,
-    agent: createImplementationAgent({
-      streamFn: createProxyStreamFn({
-        jobId: start.jobId,
-        jobLeaseId: start.jobLeaseId,
-        model: start.model,
-        channel,
-      }),
-      tools: createWorktreeTools({
-        worktreePath: start.worktreePath,
-        runCommand,
-      }),
-    }),
+    agent: implementationAgent,
     runCommand,
   });
 
@@ -152,6 +156,21 @@ if (mode === "pr-response") {
       write({ type: "model.stream.abort", requestId });
     },
   };
+  const prResponseAgent = createPrResponseAgent({
+    streamFn: createProxyStreamFn({
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+      model: start.model,
+      channel,
+    }),
+    tools: createWorktreeTools({
+      worktreePath: start.worktreePath,
+      runCommand,
+    }),
+  });
+
+  router.onStop(() => prResponseAgent.abort());
+
   const outcome = await runPrResponseWorker({
     start,
     transport: {
@@ -161,18 +180,7 @@ if (mode === "pr-response") {
       read,
     },
     git: systemLocalGit,
-    agent: createPrResponseAgent({
-      streamFn: createProxyStreamFn({
-        jobId: start.jobId,
-        jobLeaseId: start.jobLeaseId,
-        model: start.model,
-        channel,
-      }),
-      tools: createWorktreeTools({
-        worktreePath: start.worktreePath,
-        runCommand,
-      }),
-    }),
+    agent: prResponseAgent,
     runCommand,
   });
 

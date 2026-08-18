@@ -18,6 +18,8 @@ export interface ImplementationAgentOutcome {
 /** worktree内で承認済みWHAT/HOWを実装するAgent loop。 */
 export interface ImplementationAgent {
   run(start: ImplementationStartEvent): Promise<ImplementationAgentOutcome>;
+  /** 実行中のturnを計画停止として中断する。実行中でなければ何もしない。 */
+  abort(): void;
 }
 
 /**
@@ -108,6 +110,8 @@ export function createImplementationAgent({
   streamFn,
   tools,
 }: CreateImplementationAgentOptions): ImplementationAgent {
+  let active: Agent | null = null;
+
   return {
     async run(start) {
       const agent = new Agent({
@@ -118,6 +122,8 @@ export function createImplementationAgent({
           tools,
         },
       });
+
+      active = agent;
 
       let turns = 0;
       let toolCalls = 0;
@@ -134,6 +140,8 @@ export function createImplementationAgent({
 
       await agent.prompt(implementationPrompt(start));
 
+      active = null;
+
       const last = [...agent.state.messages]
         .reverse()
         .find((message) => message.role === "assistant");
@@ -147,6 +155,9 @@ export function createImplementationAgent({
             : "unknown",
         acted: toolCalls > 0,
       };
+    },
+    abort() {
+      active?.abort();
     },
   };
 }

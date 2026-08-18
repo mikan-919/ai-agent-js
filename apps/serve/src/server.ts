@@ -612,6 +612,16 @@ export function startServeHttpServer({
   // Workflow/Jobの現在状態を横断的に確認する唯一の一覧経路。
   app.get("/api/jobs", (context) => context.json({ jobs: jobRegistry.list() }));
 
+  /**
+   * Web UIからの計画停止。実行に時間がかかるJob種別だけが応じ、それ以外や
+   * 対象が見つからない場合は何も起きない。
+   */
+  app.post("/api/jobs/:jobId/stop", (context) => {
+    const stopped = jobRegistry.requestStop(context.req.param("jobId"));
+
+    return context.json({ stopped });
+  });
+
   // local、current Job、repositoryの範囲でtranscriptを確認する唯一の経路。
   app.get("/api/transcripts", async (context) => {
     if (searchTranscripts === undefined) {

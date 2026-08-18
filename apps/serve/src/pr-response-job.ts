@@ -92,6 +92,7 @@ export type StartPrResponseJobResult =
       finished: Promise<void>;
       jobStatus(): string | null;
       close(): Promise<void>;
+      requestStop(): void;
     }
   | StartPrResponseJobRefusal;
 
@@ -276,6 +277,7 @@ export async function startPrResponseJob({
     ),
     jobStatus: worker.jobStatus,
     close: worker.close,
+    requestStop: worker.requestStop,
   };
 }
 

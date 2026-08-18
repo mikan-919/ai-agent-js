@@ -137,6 +137,7 @@ export type StartImplementationJobResult =
       finished: Promise<void>;
       jobStatus(): string | null;
       close(): Promise<void>;
+      requestStop(): void;
     }
   | StartImplementationJobRefusal;
 
@@ -514,6 +515,7 @@ export async function startImplementationJob({
     ),
     jobStatus: worker.jobStatus,
     close: worker.close,
+    requestStop: worker.requestStop,
   };
 }
 

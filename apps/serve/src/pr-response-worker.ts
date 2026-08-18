@@ -50,6 +50,11 @@ export interface PrResponseWorker {
   finished: Promise<void>;
   jobStatus(): string | null;
   close(): Promise<void>;
+  /**
+   * Web UIからの計画停止。harnessへ停止要求を送り、現在のturnを安全に区切って
+   * checkpointをpushさせてから終了させる。接続所有権喪失時の即時abortとは別。
+   */
+  requestStop(): void;
 }
 
 export type PrResponseWorkerRefusalReason = "canonical_worktree_unavailable";
@@ -149,6 +154,7 @@ export async function startPrResponseWorker({
     },
   );
   const stopHarness = () => harness.kill();
+  const userStop = new AbortController();
   let running = !(ownership.stopSignal?.aborted ?? false);
   const restorable = [start.canonicalOid];
   let checkpointRefused = false;
@@ -222,6 +228,7 @@ export async function startPrResponseWorker({
       },
     },
     ownership.stopSignal,
+    userStop.signal,
   );
 
   let lastJobStatus: string | null = null;
@@ -230,6 +237,7 @@ export async function startPrResponseWorker({
   return {
     status: "started",
     worktreePath: worktree.path,
+    requestStop: () => userStop.abort(),
     finished: serving.then(async () => {
       const exitCode = await harness.exited;
 

@@ -11,6 +11,8 @@ export interface StartedJob {
   finished: Promise<void>;
   jobStatus(): string | null;
   close(): void | Promise<void>;
+  /** 実行に時間がかかるJob種別だけが持つ、Web UIからの計画停止。 */
+  requestStop?(): void;
 }
 
 export interface JobSummary {
@@ -26,6 +28,11 @@ export interface JobRegistry {
   list(): JobSummary[];
   /** 停止時に、まだ動いているJobのprocessと所有権接続を閉じる。 */
   closeAll(): void;
+  /**
+   * Web UIからの計画停止をJobへ伝える。対象が見つからない、または計画停止を
+   * 持たないJob種別では何もせず`false`を返す。
+   */
+  requestStop(jobId: string): boolean;
 }
 
 export function createJobRegistry(): JobRegistry {
@@ -57,6 +64,16 @@ export function createJobRegistry(): JobRegistry {
       }
 
       active.clear();
+    },
+    requestStop(jobId) {
+      const entry = [...active].find(({ job }) => job.jobId === jobId);
+
+      if (entry?.job.requestStop === undefined) {
+        return false;
+      }
+
+      entry.job.requestStop();
+      return true;
     },
   };
 }

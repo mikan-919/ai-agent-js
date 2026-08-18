@@ -48,6 +48,8 @@ export async function serveOwnedHarnessPrResponseIpc(
   start: PrResponseStartEvent,
   operations: PrResponseOperations,
   stopSignal?: AbortSignal,
+  /** ユーザーがWeb UIから求めた計画停止。接続所有権喪失時のstopSignalとは別。 */
+  userStopSignal?: AbortSignal,
 ): Promise<void> {
   const writer = output.getWriter();
   let writes = Promise.resolve();
@@ -56,9 +58,29 @@ export async function serveOwnedHarnessPrResponseIpc(
     return writes;
   };
   const streaming = new Set<Promise<void>>();
+  let stopRequested = false;
+  const requestStop = () => {
+    if (stopRequested) {
+      return;
+    }
+
+    stopRequested = true;
+    void send({
+      type: "stop.request",
+      jobId: start.jobId,
+      jobLeaseId: start.jobLeaseId,
+    });
+  };
+
+  // すでに求められていた場合も含め、必ずstart eventの後に送る。
+  userStopSignal?.addEventListener("abort", requestStop, { once: true });
 
   try {
     await send(start);
+
+    if (userStopSignal?.aborted === true) {
+      requestStop();
+    }
 
     for await (const message of readNdjson(input, stopSignal)) {
       const request = parseRequest(message);
@@ -109,6 +131,7 @@ export async function serveOwnedHarnessPrResponseIpc(
 
     await Promise.all(streaming);
   } finally {
+    userStopSignal?.removeEventListener("abort", requestStop);
     await writes.catch(() => {});
     writer.releaseLock();
   }

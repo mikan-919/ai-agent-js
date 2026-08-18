@@ -64,6 +64,11 @@ export interface ImplementationWorker {
   finished: Promise<void>;
   jobStatus(): string | null;
   close(): Promise<void>;
+  /**
+   * Web UIからの計画停止。harnessへ停止要求を送り、現在のturnを安全に区切って
+   * checkpointをpushさせてから終了させる。接続所有権喪失時の即時abortとは別。
+   */
+  requestStop(): void;
 }
 
 export type ImplementationWorkerRefusalReason =
@@ -237,6 +242,7 @@ export async function startImplementationWorker({
     },
   );
   const stopHarness = () => harness.kill();
+  const userStop = new AbortController();
   let running = !(ownership.stopSignal?.aborted ?? false);
   /** 遠隔から復元できると確認済みの先端。sandboxの削除条件に使う。 */
   const restorable = [start.canonicalOid];
@@ -327,6 +333,7 @@ export async function startImplementationWorker({
       },
     },
     ownership.stopSignal,
+    userStop.signal,
   );
 
   let lastJobStatus: string | null = null;
@@ -336,6 +343,7 @@ export async function startImplementationWorker({
     status: "started",
     worktreePath: worktree.path,
     worktreeOid,
+    requestStop: () => userStop.abort(),
     finished: serving.then(async () => {
       const exitCode = await harness.exited;
 

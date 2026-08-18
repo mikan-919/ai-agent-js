@@ -257,6 +257,7 @@ function fakeWorker(started: StartImplementationWorkerOptions[]) {
       close: async () => {
         workerOptions.release();
       },
+      requestStop: () => {},
     };
   };
 }
@@ -399,6 +400,7 @@ test("a completed worker creates a Pull Request and reflects the review state", 
         close: async () => {
           workerOptions.release();
         },
+        requestStop: () => {},
       }),
       createPullRequestOctokit: async () => fakeOctokit({ bodies: [] }),
       createPullRequestPorts: () => ({

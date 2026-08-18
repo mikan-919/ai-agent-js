@@ -79,6 +79,14 @@ function modelStreamRequestId(message: unknown): string | null {
     : null;
 }
 
+function isStopRequest(message: unknown): boolean {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { type?: unknown }).type === "stop.request"
+  );
+}
+
 /**
  * stdinで届くmessageの対応付け。
  *
@@ -88,9 +96,17 @@ function modelStreamRequestId(message: unknown): string | null {
 export function createHarnessMessageRouter() {
   const general = new MessageQueue<unknown>();
   const streams = new Map<string, MessageQueue<ModelStreamServerMessage>>();
+  let onStop: (() => void) | null = null;
 
   return {
     deliver(message: unknown): void {
+      // 停止要求はcheckpoint応答のような順序待ちの一般queueへ混ぜず、即座に
+      // 中断へつなぐ。
+      if (isStopRequest(message)) {
+        onStop?.();
+        return;
+      }
+
       const requestId = modelStreamRequestId(message);
       const stream = requestId === null ? undefined : streams.get(requestId);
 
@@ -117,6 +133,10 @@ export function createHarnessMessageRouter() {
       streams.set(requestId, stream);
 
       return stream;
+    },
+    /** 停止要求を受けたときの処理を登録する。 */
+    onStop(handler: () => void): void {
+      onStop = handler;
     },
     /** 切断時は購読も閉じ、待ち続けるturnを残さない。 */
     close(): void {

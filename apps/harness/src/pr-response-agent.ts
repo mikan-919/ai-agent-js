@@ -18,6 +18,8 @@ export interface PrResponseAgentOutcome {
 /** worktree内で対象PRのfeedbackへ対応するAgent loop。 */
 export interface PrResponseAgent {
   run(start: PrResponseStartEvent): Promise<PrResponseAgentOutcome>;
+  /** 実行中のturnを計画停止として中断する。実行中でなければ何もしない。 */
+  abort(): void;
 }
 
 function triggerPrompt(start: PrResponseStartEvent): string {
@@ -83,6 +85,8 @@ export function createPrResponseAgent({
   streamFn,
   tools,
 }: CreatePrResponseAgentOptions): PrResponseAgent {
+  let active: Agent | null = null;
+
   return {
     async run(start) {
       const agent = new Agent({
@@ -93,6 +97,8 @@ export function createPrResponseAgent({
           tools,
         },
       });
+
+      active = agent;
 
       let turns = 0;
       let toolCalls = 0;
@@ -109,6 +115,8 @@ export function createPrResponseAgent({
 
       await agent.prompt(triggerPrompt(start));
 
+      active = null;
+
       const last = [...agent.state.messages]
         .reverse()
         .find((message) => message.role === "assistant");
@@ -122,6 +130,9 @@ export function createPrResponseAgent({
             : "unknown",
         acted: toolCalls > 0,
       };
+    },
+    abort() {
+      active?.abort();
     },
   };
 }
