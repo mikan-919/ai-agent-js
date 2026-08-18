@@ -524,6 +524,16 @@ if (Bun.argv[2] === "serve") {
     repositoryName,
     modelProviderId,
     modelId,
+    modelDefaults,
+    listModels: async () => {
+      await models.refresh({ allowNetwork: true });
+
+      return models.getModels().map(({ provider, id, name }) => ({
+        provider,
+        id,
+        name,
+      }));
+    },
     startImplementationJob: startImplementation,
     startHowConversation,
     startIssueConversation: conversationReady

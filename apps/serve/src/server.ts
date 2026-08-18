@@ -15,6 +15,13 @@ import {
   type JobRegistry,
   type StartedJob,
 } from "./job-registry";
+import {
+  modelDefaultKinds,
+  type ModelDefaultScope,
+  type ModelDefaults,
+  type ModelDefaultsStore,
+  type ModelSelection,
+} from "./model-defaults";
 
 /** 起動できたJobの取り扱い。開始結果を捨てず、終了まで面倒を見る。 */
 export interface StartedIssueConversation extends StartedJob {
@@ -44,6 +51,58 @@ function isDeviceRegistrationPurpose(
   );
 }
 
+function isModelDefaultScope(value: unknown): value is ModelDefaultScope {
+  return (
+    value === "base" ||
+    (typeof value === "string" &&
+      modelDefaultKinds.some((kind) => kind === value))
+  );
+}
+
+function isModelSelection(value: unknown): value is ModelSelection {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const model = value as { provider?: unknown; id?: unknown };
+
+  return (
+    typeof model.provider === "string" &&
+    model.provider !== "" &&
+    typeof model.id === "string" &&
+    model.id !== ""
+  );
+}
+
+function serializeModelSelection(
+  model: ModelSelection | null,
+): { provider: string; modelId: string } | null {
+  return model === null
+    ? null
+    : { provider: model.provider, modelId: model.id };
+}
+
+function serializeModelDefaults(defaults: ModelDefaults) {
+  return {
+    base: serializeModelSelection(defaults.base),
+    perKind: Object.fromEntries(
+      modelDefaultKinds.map((kind) => [
+        kind,
+        serializeModelSelection(defaults.perKind[kind]),
+      ]),
+    ),
+  };
+}
+
+function emptyModelDefaults(): ModelDefaults {
+  return {
+    base: null,
+    perKind: Object.fromEntries(
+      modelDefaultKinds.map((kind) => [kind, null]),
+    ) as ModelDefaults["perKind"],
+  };
+}
+
 const loopbackHostname = "127.0.0.1";
 const readinessPath = "/healthz";
 const callbackPath = "/device/callback";
@@ -61,6 +120,7 @@ const deviceRegistrationNotConfiguredMessage = `Device registration is not confi
 const transcriptSearchNotConfiguredMessage = `Transcript search is not configured. Set ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_OWNER")}, and ${environmentVariable("REPOSITORY_NAME")}.`;
 const apiPathsWithoutDeviceRegistration = new Set([
   "/api/config",
+  "/api/models",
   "/api/issue-conversations",
   "/api/implementation-jobs",
 ]);
@@ -73,6 +133,10 @@ export interface ServeHttpServerOptions {
   repositoryName?: string;
   modelProviderId?: string;
   modelId?: string;
+  /** local state SQLiteへ保存するmodelのbase/per-kind既定値。 */
+  modelDefaults?: ModelDefaultsStore;
+  /** `serve`のModels集合から、現在選択できるmodelを列挙する。 */
+  listModels?: () => Promise<readonly ServeModelOption[]>;
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
   createDeviceRegistration?: (redirectUri: URL) => DeviceRegistrationFlow;
   /** Web UIのビルド成果物を置くディレクトリ。既定はビルド後の`dist/web`。 */
@@ -96,6 +160,7 @@ export interface ServeHttpServerOptions {
    */
   startImplementationJob?: (input: {
     linearIssueId: string;
+    modelOverride?: ModelSelection;
   }) => Promise<StartedIssueConversation | { status: string; reason?: string }>;
   /**
    * 明示的に起動する、コードを変更しないLinear対話。人間が書いた本文をLinear
@@ -118,6 +183,12 @@ export interface ServeHttpServerOptions {
     query: string;
     limit: number;
   }) => Promise<TranscriptEntry[]>;
+}
+
+export interface ServeModelOption {
+  provider: string;
+  id: string;
+  name: string;
 }
 
 /** 起動ごとのsession値とCSRF token。永続化しない。 */
@@ -398,6 +469,8 @@ export function startServeHttpServer({
   repositoryName,
   modelProviderId,
   modelId,
+  modelDefaults,
+  listModels,
   createDeviceRegistration,
   startIssueConversation,
   startImplementationJob,
@@ -642,6 +715,7 @@ export function startServeHttpServer({
   app.post("/api/implementation-jobs", async (context) => {
     const body = (await context.req.json().catch(() => null)) as {
       linearIssueId?: unknown;
+      modelOverride?: unknown;
     } | null;
 
     if (startImplementationJob === undefined) {
@@ -656,9 +730,13 @@ export function startServeHttpServer({
 
     if (
       body === null ||
-      Object.keys(body).some((field) => field !== "linearIssueId") ||
+      Object.keys(body).some(
+        (field) => field !== "linearIssueId" && field !== "modelOverride",
+      ) ||
       typeof body.linearIssueId !== "string" ||
-      body.linearIssueId === ""
+      body.linearIssueId === "" ||
+      (body.modelOverride !== undefined &&
+        !isModelSelection(body.modelOverride))
     ) {
       return context.json(
         {
@@ -671,7 +749,10 @@ export function startServeHttpServer({
     }
 
     return holdStartedJob(context, () =>
-      startImplementationJob({ linearIssueId: body.linearIssueId as string }),
+      startImplementationJob({
+        linearIssueId: body.linearIssueId as string,
+        modelOverride: body.modelOverride as ModelSelection | undefined,
+      }),
     );
   });
 
@@ -723,7 +804,92 @@ export function startServeHttpServer({
   // Workflow/Jobの現在状態を横断的に確認する唯一の一覧経路。
   app.get("/api/jobs", (context) => context.json({ jobs: jobRegistry.list() }));
 
-  app.get("/api/config", (context) => context.json(serveConfig));
+  function currentModelDefaults() {
+    return serializeModelDefaults(
+      modelDefaults?.list() ?? emptyModelDefaults(),
+    );
+  }
+
+  app.get("/api/config", (context) =>
+    context.json({ ...serveConfig, modelDefaults: currentModelDefaults() }),
+  );
+
+  app.post("/api/config", async (context) => {
+    if (modelDefaults === undefined) {
+      return context.json(
+        {
+          error: "not_configured",
+          message: "Model defaults are not configured.",
+        },
+        503,
+      );
+    }
+
+    const body = (await context.req.json().catch(() => null)) as {
+      scope?: unknown;
+      provider?: unknown;
+      modelId?: unknown;
+    } | null;
+
+    if (
+      body === null ||
+      Object.keys(body).some(
+        (field) =>
+          field !== "scope" && field !== "provider" && field !== "modelId",
+      ) ||
+      !isModelDefaultScope(body.scope)
+    ) {
+      return context.json(
+        {
+          error: "bad_request",
+          message:
+            "scopeはbaseまたはmodelを使うJob種別、providerとmodelIdは両方指定してください。",
+        },
+        400,
+      );
+    }
+
+    const clear = body.provider === null && body.modelId === null;
+    const validModel =
+      typeof body.provider === "string" &&
+      body.provider !== "" &&
+      typeof body.modelId === "string" &&
+      body.modelId !== "";
+
+    if (!clear && !validModel) {
+      return context.json(
+        {
+          error: "bad_request",
+          message:
+            "providerとmodelIdは空でない文字列で指定するか、両方nullで既定値を解除してください。",
+        },
+        400,
+      );
+    }
+
+    if (clear) {
+      modelDefaults.clear(body.scope);
+    } else {
+      modelDefaults.set(body.scope, {
+        provider: body.provider as string,
+        id: body.modelId as string,
+      });
+    }
+
+    return context.json({ modelDefaults: currentModelDefaults() });
+  });
+
+  app.get("/api/models", async (context) => {
+    if (listModels === undefined) {
+      return context.json([]);
+    }
+
+    try {
+      return context.json(await listModels());
+    } catch {
+      return context.json([]);
+    }
+  });
 
   /**
    * Web UIからの計画停止。実行に時間がかかるJob種別だけが応じ、それ以外や
