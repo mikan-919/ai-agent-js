@@ -1,7 +1,11 @@
 {
   "name": "@mikan-919/oriel",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikan-919/oriel.git"
+  },
   "packageManager": "bun@1.3.14",
   "workspaces": [
     "apps/*",
