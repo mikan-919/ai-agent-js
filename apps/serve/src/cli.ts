@@ -162,7 +162,6 @@ if (Bun.argv[2] === "serve") {
   const conversationReady =
     relayDeviceClient !== undefined &&
     environment !== undefined &&
-    statePath !== undefined &&
     repositoryId !== undefined &&
     repositoryOwner !== undefined &&
     repositoryName !== undefined &&
@@ -485,10 +484,7 @@ if (Bun.argv[2] === "serve") {
         }
       : undefined;
 
-  const transcripts =
-    statePath === undefined
-      ? undefined
-      : createTranscriptStore(openServeLocalState(statePath));
+  const transcripts = createTranscriptStore(openServeLocalState(statePath));
   // repository scopeの検索が中継先へ届く接続。webhook通知loopと共に後で開く。
   let notificationConnection: ReturnType<
     typeof createNotificationConnection
@@ -554,9 +550,7 @@ if (Bun.argv[2] === "serve") {
           )
       : undefined,
     createDeviceRegistration:
-      environment === undefined ||
-      statePath === undefined ||
-      relayDeviceClient === undefined
+      environment === undefined || relayDeviceClient === undefined
         ? undefined
         : (redirectUri) => {
             const flow = createDeviceRegistrationFlow({
@@ -740,8 +734,7 @@ if (Bun.argv[2] === "serve") {
   const prMergeLoop =
     implementationReady &&
     relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined &&
-    statePath !== undefined
+    discoveryPollIntervalMs !== undefined
       ? (() => {
           const database = openServeLocalState(statePath);
 
@@ -790,8 +783,7 @@ if (Bun.argv[2] === "serve") {
   const prResponseLoop =
     implementationReady &&
     relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined &&
-    statePath !== undefined
+    discoveryPollIntervalMs !== undefined
       ? (() => {
           const database = openServeLocalState(statePath);
           const checkFailures = createPrResponseCheckFailureStore(database);
