@@ -11,6 +11,23 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["DeviceRegistryObject"] },
   ],
+  // ponytail: 運用値は測定と検証専用環境の実動作から決める設計(ROADMAP.md)
+  // だが、初回の実動作確認そのものにこの値が要る。妥当な初期値を置き、
+  // 実際の使用感を見て調整する前提とする。
+  "vars": {
+    "GITHUB_CLIENT_ID": "Iv23liLe7gluNc45KCEI",
+    "GITHUB_APP_ID": "4632357",
+    "GITHUB_APP_JWT_LIFETIME_SECONDS": "540",
+    "RELAY_ORIGIN": "https://oriel-relay.mikan-919.workers.dev",
+    "RELAY_VERSION": "0.1.5",
+    "DEVICE_CODE_EXPIRY_MS": "300000",
+    "DEVICE_CANCELLATION_EXPIRY_MS": "300000",
+    "OWNERSHIP_HEARTBEAT_INTERVAL_MS": "30000",
+    "OWNERSHIP_HEARTBEAT_EXPIRY_MS": "90000",
+    "OWNERSHIP_AUDIT_INTERVAL_MS": "60000",
+    "TRANSCRIPT_SEARCH_TIMEOUT_MS": "5000",
+    "LINEAR_WEBHOOK_MAX_SKEW_MS": "300000",
+  },
   "env": {
     "staging": {
       "name": "oriel-relay-staging",
