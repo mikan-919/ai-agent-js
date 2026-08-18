@@ -56,7 +56,7 @@ jobs:
           # Any HTTP response (even 404 from an unmatched route) proves the
           # Worker is deployed and serving; only a connection failure fails
           # this step.
-          code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --retry 3 --retry-delay 5 "$url" || true)"
+          code="$(curl -s -o /tmp/smoke-response.txt -w "%{http_code}" --max-time 10 --retry 3 --retry-delay 5 "$url" || true)"
           echo "HTTP $code"
           if [ -z "$code" ] || [ "$code" = "000" ]; then
             echo "No response from $url" >&2
