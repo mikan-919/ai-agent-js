@@ -20,6 +20,7 @@ test("model defaults persist base and per-kind values", () => {
   store.set("implementation", implementation);
 
   expect(store.get("base")).toEqual(base);
+  expect(store.isInitialized("base")).toBe(true);
   expect(store.get("implementation")).toEqual(implementation);
   expect(store.get("what_confirmation")).toBeNull();
   const listed = store.list();
@@ -65,5 +66,15 @@ test("clearing a model default restores fallback behavior", () => {
   store.clear("pr_response");
 
   expect(store.get("pr_response")).toBeNull();
+  expect(store.isInitialized("pr_response")).toBe(true);
   expect(resolveModelDefault(store, "pr_response")).toEqual(base);
+});
+
+test("clearing the base default stays cleared across environment seeding", () => {
+  const store = createStore();
+
+  store.clear("base");
+
+  expect(store.get("base")).toBeNull();
+  expect(store.isInitialized("base")).toBe(true);
 });

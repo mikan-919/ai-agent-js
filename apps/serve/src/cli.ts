@@ -135,7 +135,7 @@ if (Bun.argv[2] === "serve") {
 
   // 既存の環境変数設定は、DBへbaseがまだ無いserveの初回起動時だけ移行する。
   // per-kind設定があればそちらを優先し、以後はSQLiteの値を正本にする。
-  if (configuredModel !== undefined && modelDefaults.get("base") === null) {
+  if (configuredModel !== undefined && !modelDefaults.isInitialized("base")) {
     modelDefaults.set("base", configuredModel);
   }
 

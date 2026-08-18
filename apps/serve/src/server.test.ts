@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { TranscriptEntry } from "@mikan-919/oriel-contracts";
+import { identity } from "@mikan-919/oriel-identity";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
 import { openServeLocalState } from "./local-state";
@@ -116,7 +117,7 @@ test("/api/config updates and clears model defaults with CSRF protection", async
           "content-type": "application/json",
           Origin: origin,
           cookie,
-          "x-oriel-csrf": csrf,
+          [`x-${identity.codeName}-csrf`]: csrf,
           ...headers,
         },
         body: JSON.stringify(body),

@@ -1,4 +1,8 @@
+import { join } from "node:path";
+
 import { expect, test } from "bun:test";
+
+import { identity } from "@mikan-919/oriel-identity";
 
 import { resolveStatePath } from "./state-path";
 
@@ -7,13 +11,21 @@ test("an explicitly configured state path takes priority", () => {
 
   expect(
     resolveStatePath({
-      explicitPath: "/var/lib/oriel/custom.sqlite",
+      explicitPath: join(
+        "/var/lib",
+        identity.applicationDataDirectoryName,
+        "custom.sqlite",
+      ),
       xdgDataHome: "/xdg/data",
       homeDirectory: "/home/tester",
       ensureDirectory: (directory) => directories.push(directory),
     }),
-  ).toBe("/var/lib/oriel/custom.sqlite");
-  expect(directories).toEqual(["/var/lib/oriel"]);
+  ).toBe(
+    join("/var/lib", identity.applicationDataDirectoryName, "custom.sqlite"),
+  );
+  expect(directories).toEqual([
+    join("/var/lib", identity.applicationDataDirectoryName),
+  ]);
 });
 
 test("the XDG data home is used for the default state path", () => {
@@ -25,8 +37,12 @@ test("the XDG data home is used for the default state path", () => {
       homeDirectory: "/home/tester",
       ensureDirectory: (directory) => directories.push(directory),
     }),
-  ).toBe("/xdg/data/oriel/state.sqlite");
-  expect(directories).toEqual(["/xdg/data/oriel"]);
+  ).toBe(
+    join("/xdg/data", identity.applicationDataDirectoryName, "state.sqlite"),
+  );
+  expect(directories).toEqual([
+    join("/xdg/data", identity.applicationDataDirectoryName),
+  ]);
 });
 
 test("the default state path uses the user's local data directory", () => {
@@ -37,6 +53,21 @@ test("the default state path uses the user's local data directory", () => {
       homeDirectory: "/home/tester",
       ensureDirectory: (directory) => directories.push(directory),
     }),
-  ).toBe("/home/tester/.local/share/oriel/state.sqlite");
-  expect(directories).toEqual(["/home/tester/.local/share/oriel"]);
+  ).toBe(
+    join(
+      "/home/tester",
+      ".local",
+      "share",
+      identity.applicationDataDirectoryName,
+      "state.sqlite",
+    ),
+  );
+  expect(directories).toEqual([
+    join(
+      "/home/tester",
+      ".local",
+      "share",
+      identity.applicationDataDirectoryName,
+    ),
+  ]);
 });

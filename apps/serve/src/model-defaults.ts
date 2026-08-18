@@ -24,6 +24,7 @@ export interface ModelDefaults {
 
 export interface ModelDefaultsStore {
   get(scope: ModelDefaultScope): ModelSelection | null;
+  isInitialized(scope: ModelDefaultScope): boolean;
   set(scope: ModelDefaultScope, model: ModelSelection): void;
   clear(scope: ModelDefaultScope): void;
   list(): ModelDefaults;
@@ -54,16 +55,29 @@ export function createModelDefaultsStore(
        model_id = excluded.model_id`,
   );
   const remove = database.query(`DELETE FROM model_defaults WHERE scope = ?`);
+  const selectInitialized = database.query<{ scope: string }, [string]>(
+    `SELECT scope FROM model_default_state WHERE scope = ?`,
+  );
+  const markInitialized = database.query(
+    `INSERT INTO model_default_state (scope)
+     VALUES (?)
+     ON CONFLICT(scope) DO NOTHING`,
+  );
 
   return {
     get(scope) {
       return toModelSelection(select.get(scope) ?? null);
     },
+    isInitialized(scope) {
+      return selectInitialized.get(scope) !== null;
+    },
     set(scope, model) {
       upsert.run(scope, model.provider, model.id);
+      markInitialized.run(scope);
     },
     clear(scope) {
       remove.run(scope);
+      markInitialized.run(scope);
     },
     list() {
       return {
