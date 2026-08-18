@@ -16,6 +16,14 @@ import {
   X,
 } from "lucide-react";
 
+import { modelDefaultKinds } from "@mikan-919/oriel-contracts";
+import type {
+  ModelDefaultApiSelection,
+  ModelDefaultKind,
+  ModelDefaultsDto,
+  ModelOption as ModelOptionContract,
+  ServeConfig,
+} from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 
 const csrfHeaderName = `x-${identity.codeName}-csrf`;
@@ -35,50 +43,26 @@ interface Job {
   status: string | null;
 }
 
-interface ServeConfig {
-  relayOrigin?: string;
-  repositoryId?: number;
-  repositoryOwner?: string;
-  repositoryName?: string;
-  modelProviderId?: string;
-  modelId?: string;
-  modelDefaults: ModelDefaults;
-}
+type ModelKind = ModelDefaultKind;
+type ModelSelection = ModelDefaultApiSelection;
+type ModelDefaults = ModelDefaultsDto;
+type ModelOption = ModelOptionContract;
 
-type ModelKind = Exclude<Job["kind"], "issue_conversation">;
-
-interface ModelSelection {
-  provider: string;
-  modelId: string;
-}
-
-interface ModelDefaults {
-  base: ModelSelection | null;
-  perKind: Record<ModelKind, ModelSelection | null>;
-}
-
-interface ModelOption {
-  provider: string;
-  id: string;
-  name: string;
-}
-
-const modelKinds: readonly { kind: ModelKind; label: string }[] = [
-  { kind: "what_confirmation", label: "WHAT確定" },
-  { kind: "how_confirmation", label: "HOW確定" },
-  { kind: "pr_response", label: "PR対応" },
-  { kind: "implementation", label: "実装" },
-];
+const modelKindLabels: Record<ModelDefaultKind, string> = {
+  what_confirmation: "WHAT確定",
+  how_confirmation: "HOW確定",
+  pr_response: "PR対応",
+  implementation: "実装",
+};
+const modelKinds: readonly { kind: ModelKind; label: string }[] =
+  modelDefaultKinds.map((kind) => ({ kind, label: modelKindLabels[kind] }));
 
 function emptyModelDefaults(): ModelDefaults {
   return {
     base: null,
-    perKind: {
-      what_confirmation: null,
-      how_confirmation: null,
-      pr_response: null,
-      implementation: null,
-    },
+    perKind: Object.fromEntries(
+      modelDefaultKinds.map((kind) => [kind, null]),
+    ) as ModelDefaults["perKind"],
   };
 }
 

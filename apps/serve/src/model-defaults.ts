@@ -1,26 +1,21 @@
 import type { Database } from "bun:sqlite";
 
+import {
+  modelDefaultKinds,
+  type ModelDefaultKind,
+  type ModelDefaultScope,
+  type ModelDefaults,
+  type ModelSelection,
+} from "@mikan-919/oriel-contracts";
 import type { JobKind } from "./job-registry";
 
-export const modelDefaultKinds = [
-  "what_confirmation",
-  "how_confirmation",
-  "pr_response",
-  "implementation",
-] as const satisfies readonly Exclude<JobKind, "issue_conversation">[];
-
-export type ModelDefaultKind = (typeof modelDefaultKinds)[number];
-export type ModelDefaultScope = "base" | ModelDefaultKind;
-
-export interface ModelSelection {
-  provider: string;
-  id: string;
-}
-
-export interface ModelDefaults {
-  base: ModelSelection | null;
-  perKind: Record<ModelDefaultKind, ModelSelection | null>;
-}
+export { modelDefaultKinds } from "@mikan-919/oriel-contracts";
+export type {
+  ModelDefaultKind,
+  ModelDefaultScope,
+  ModelDefaults,
+  ModelSelection,
+} from "@mikan-919/oriel-contracts";
 
 export interface ModelDefaultsStore {
   get(scope: ModelDefaultScope): ModelSelection | null;

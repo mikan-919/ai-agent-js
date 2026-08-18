@@ -4,12 +4,20 @@ import { fileURLToPath } from "node:url";
 import type {
   DeviceRegistrationPurpose,
   TranscriptEntry,
+  ModelDefaults,
+  ModelOption,
+  ModelSelection,
+  ServeConfig,
+} from "@mikan-919/oriel-contracts";
+import {
+  implementationJobRequestSchema,
+  modelDefaultKinds,
+  modelDefaultUpdateSchema,
 } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 import { sValidator } from "@hono/standard-validator";
 import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
-import * as v from "valibot";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
 import {
@@ -17,13 +25,7 @@ import {
   type JobRegistry,
   type StartedJob,
 } from "./job-registry";
-import {
-  modelDefaultKinds,
-  type ModelDefaultScope,
-  type ModelDefaults,
-  type ModelDefaultsStore,
-  type ModelSelection,
-} from "./model-defaults";
+import type { ModelDefaultsStore } from "./model-defaults";
 
 /** 起動できたJobの取り扱い。開始結果を捨てず、終了まで面倒を見る。 */
 export interface StartedIssueConversation extends StartedJob {
@@ -104,29 +106,6 @@ const apiPathsWithoutDeviceRegistration = new Set([
   "/api/implementation-jobs",
 ]);
 
-const nonEmptyString = v.pipe(v.string(), v.minLength(1));
-const modelSelectionSchema = v.strictObject({
-  provider: nonEmptyString,
-  id: nonEmptyString,
-});
-const implementationJobRequestSchema = v.strictObject({
-  linearIssueId: nonEmptyString,
-  modelOverride: v.optional(modelSelectionSchema),
-});
-const modelDefaultRequestSchema = v.pipe(
-  v.strictObject({
-    scope: v.picklist(["base", ...modelDefaultKinds]),
-    provider: v.nullable(nonEmptyString),
-    modelId: v.nullable(nonEmptyString),
-  }),
-  v.check(
-    (input) =>
-      (input.provider === null && input.modelId === null) ||
-      (input.provider !== null && input.modelId !== null),
-    "providerとmodelIdは両方指定するか、両方nullで指定してください。",
-  ),
-);
-
 function invalidJsonRequest(message: string) {
   return (result: { success: boolean }, context: Context) =>
     result.success
@@ -194,11 +173,7 @@ export interface ServeHttpServerOptions {
   }) => Promise<TranscriptEntry[]>;
 }
 
-export interface ServeModelOption {
-  provider: string;
-  id: string;
-  name: string;
-}
+export type ServeModelOption = ModelOption;
 
 /** 起動ごとのsession値とCSRF token。永続化しない。 */
 function newSessionSecrets() {
@@ -491,7 +466,7 @@ export function startServeHttpServer({
   const { sessionId, csrfToken } = newSessionSecrets();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
-  const serveConfig = {
+  const serveConfig: Omit<ServeConfig, "modelDefaults"> = {
     ...(relayOrigin === undefined ? {} : { relayOrigin }),
     ...(repositoryId === undefined ? {} : { repositoryId }),
     ...(repositoryOwner === undefined ? {} : { repositoryOwner }),
@@ -813,7 +788,7 @@ export function startServeHttpServer({
     "/api/config",
     sValidator(
       "json",
-      modelDefaultRequestSchema,
+      modelDefaultUpdateSchema,
       invalidJsonRequest(
         "scope、provider、modelIdを指定し、providerとmodelIdは両方指定するか両方nullにしてください。",
       ),
@@ -831,12 +806,12 @@ export function startServeHttpServer({
 
       const body = context.req.valid("json");
 
-      if (body.provider === null) {
-        modelDefaults.clear(body.scope as ModelDefaultScope);
+      if (body.provider === null || body.modelId === null) {
+        modelDefaults.clear(body.scope);
       } else {
-        modelDefaults.set(body.scope as ModelDefaultScope, {
+        modelDefaults.set(body.scope, {
           provider: body.provider,
-          id: body.modelId as string,
+          id: body.modelId,
         });
       }
 

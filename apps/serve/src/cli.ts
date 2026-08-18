@@ -147,6 +147,11 @@ if (Bun.argv[2] === "serve") {
       | "pr_response",
     override?: ModelSelection,
   ) => resolveModelDefault(modelDefaults, kind, override);
+  const refuseWithoutModel = () =>
+    Promise.resolve({
+      status: "refused" as const,
+      reason: "model_not_configured" as const,
+    });
   const models = createServeModels({
     lmStudioBaseUrl: Bun.env[`${identity.environmentPrefix}LM_STUDIO_BASE_URL`],
   });
@@ -191,10 +196,7 @@ if (Bun.argv[2] === "serve") {
         const model = resolveJobModel("implementation", modelOverride);
 
         if (model === null) {
-          return Promise.resolve({
-            status: "refused" as const,
-            reason: "model_not_configured" as const,
-          });
+          return refuseWithoutModel();
         }
 
         return startImplementationJob({
@@ -311,10 +313,7 @@ if (Bun.argv[2] === "serve") {
           const model = resolveJobModel("what_confirmation");
 
           if (model === null) {
-            return Promise.resolve({
-              status: "refused" as const,
-              reason: "model_not_configured" as const,
-            });
+            return refuseWithoutModel();
           }
 
           return startWhatConfirmationJob({
@@ -378,10 +377,7 @@ if (Bun.argv[2] === "serve") {
           const model = resolveJobModel("how_confirmation");
 
           if (model === null) {
-            return Promise.resolve({
-              status: "refused" as const,
-              reason: "model_not_configured" as const,
-            });
+            return refuseWithoutModel();
           }
 
           return startHowConfirmationJob({
@@ -446,10 +442,7 @@ if (Bun.argv[2] === "serve") {
           const model = resolveJobModel("how_confirmation");
 
           if (model === null) {
-            return Promise.resolve({
-              status: "refused" as const,
-              reason: "model_not_configured" as const,
-            });
+            return refuseWithoutModel();
           }
 
           return startHowConfirmationJob({
@@ -846,10 +839,7 @@ if (Bun.argv[2] === "serve") {
               const model = resolveJobModel("pr_response");
 
               if (model === null) {
-                return Promise.resolve({
-                  status: "refused" as const,
-                  reason: "model_not_configured" as const,
-                });
+                return refuseWithoutModel();
               }
 
               return startPrResponseJob({
