@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import type {
   DeviceRegistrationPurpose,
+  InstanceConfig,
   TranscriptEntry,
   ModelDefaults,
   ModelOption,
@@ -11,6 +12,7 @@ import type {
 } from "@mikan-919/oriel-contracts";
 import {
   implementationJobRequestSchema,
+  instanceConfigSchema,
   modelDefaultKinds,
   modelDefaultUpdateSchema,
 } from "@mikan-919/oriel-contracts";
@@ -20,6 +22,7 @@ import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
+import type { InstanceConfigStore } from "./instance-config";
 import {
   createJobRegistry,
   type JobRegistry,
@@ -101,6 +104,7 @@ const deviceRegistrationNotConfiguredMessage = `Device registration is not confi
 const transcriptSearchNotConfiguredMessage = `Transcript search is not configured. Set ${environmentVariable("STATE_PATH")}, ${environmentVariable("REPOSITORY_OWNER")}, and ${environmentVariable("REPOSITORY_NAME")}.`;
 const apiPathsWithoutDeviceRegistration = new Set([
   "/api/config",
+  "/api/instance-config",
   "/api/models",
   "/api/issue-conversations",
   "/api/implementation-jobs",
@@ -130,6 +134,18 @@ export interface ServeHttpServerOptions {
   modelId?: string;
   /** local state SQLiteへ保存するmodelのbase/per-kind既定値。 */
   modelDefaults?: ModelDefaultsStore;
+  /**
+   * relay origin、repositoryなど利用者固有のinstance設定をlocal state
+   * SQLiteへ保存する。保存後は`buildInstanceBindings`で組み直した配線へ
+   * 即座に差し替え、プロセスは再起動しない。
+   */
+  instanceConfigStore?: InstanceConfigStore;
+  /**
+   * 保存されたinstance設定から、`reconfigure()`が差し替える配線一式を組み
+   * 直す。relay client、discovery loopなどの再構築は呼び出し元(cli.ts)の
+   * 責務であり、`server`はその結果を受け取って配線を差し替えるだけとする。
+   */
+  buildInstanceBindings?: (config: InstanceConfig) => ServeInstanceBindings;
   /** `serve`のModels集合から、現在選択できるmodelを列挙する。 */
   listModels?: () => Promise<readonly ServeModelOption[]>;
   /** localhost UIがdevice登録と失効に使う経路。relayの設定が無ければ配線しない。 */
@@ -453,6 +469,24 @@ function shellHtml(csrfToken: string): string {
 `;
 }
 
+/**
+ * `reconfigure()`が差し替えられる、instance設定に依存する配線だけの部分集合。
+ * modelProviderId/modelId、jobRegistry、modelDefaults、webDistRootは
+ * instance設定の対象外であり、構築時の値を保つ。
+ */
+export interface ServeInstanceBindings {
+  relayOrigin?: string;
+  repositoryId?: number;
+  repositoryOwner?: string;
+  repositoryName?: string;
+  listModels?: ServeHttpServerOptions["listModels"];
+  createDeviceRegistration?: ServeHttpServerOptions["createDeviceRegistration"];
+  startIssueConversation?: ServeHttpServerOptions["startIssueConversation"];
+  startImplementationJob?: ServeHttpServerOptions["startImplementationJob"];
+  startHowConversation?: ServeHttpServerOptions["startHowConversation"];
+  searchTranscripts?: ServeHttpServerOptions["searchTranscripts"];
+}
+
 export function startServeHttpServer({
   relayOrigin,
   repositoryId,
@@ -461,6 +495,8 @@ export function startServeHttpServer({
   modelProviderId,
   modelId,
   modelDefaults,
+  instanceConfigStore,
+  buildInstanceBindings,
   listModels,
   createDeviceRegistration,
   startIssueConversation,
@@ -473,7 +509,7 @@ export function startServeHttpServer({
   const { sessionId, csrfToken } = newSessionSecrets();
   let expectedAuthority = "";
   let deviceRegistration: DeviceRegistrationFlow | null = null;
-  const serveConfig: Omit<ServeConfig, "modelDefaults"> = {
+  let serveConfig: Omit<ServeConfig, "modelDefaults"> = {
     ...(relayOrigin === undefined ? {} : { relayOrigin }),
     ...(repositoryId === undefined ? {} : { repositoryId }),
     ...(repositoryOwner === undefined ? {} : { repositoryOwner }),
@@ -481,6 +517,38 @@ export function startServeHttpServer({
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
     ...(modelId === undefined ? {} : { modelId }),
   };
+
+  /**
+   * Web UIからinstance設定を保存した後、プロセスを再起動せずに反映する唯一の
+   * 経路。`serve`側で新しい配線一式(instance-config.tsが保存した値から再構築
+   * したJob起動関数、discovery loopなど)を組み直した呼び出し元が、その結果を
+   * ここへ渡す。
+   */
+  function reconfigure(update: ServeInstanceBindings): void {
+    relayOrigin = update.relayOrigin;
+    repositoryId = update.repositoryId;
+    repositoryOwner = update.repositoryOwner;
+    repositoryName = update.repositoryName;
+    listModels = update.listModels;
+    createDeviceRegistration = update.createDeviceRegistration;
+    startIssueConversation = update.startIssueConversation;
+    startImplementationJob = update.startImplementationJob;
+    startHowConversation = update.startHowConversation;
+    searchTranscripts = update.searchTranscripts;
+    serveConfig = {
+      ...(relayOrigin === undefined ? {} : { relayOrigin }),
+      ...(repositoryId === undefined ? {} : { repositoryId }),
+      ...(repositoryOwner === undefined ? {} : { repositoryOwner }),
+      ...(repositoryName === undefined ? {} : { repositoryName }),
+      ...(modelProviderId === undefined ? {} : { modelProviderId }),
+      ...(modelId === undefined ? {} : { modelId }),
+    };
+    deviceRegistration =
+      createDeviceRegistration?.(
+        new URL(`http://${expectedAuthority}${callbackPath}`),
+      ) ?? null;
+  }
+
   const app = new Hono();
 
   function requireDeviceRegistration(context: Context): Response | null {
@@ -662,7 +730,9 @@ export function startServeHttpServer({
     } | null;
     const issueNumber = Number(body?.issueNumber);
 
-    if (startIssueConversation === undefined) {
+    const startConversation = startIssueConversation;
+
+    if (startConversation === undefined) {
       return context.json(
         {
           error: "not_configured",
@@ -695,7 +765,7 @@ export function startServeHttpServer({
     }
 
     return holdStartedJob(context, () =>
-      startIssueConversation({ issueNumber, body: body.body as string }),
+      startConversation({ issueNumber, body: body.body as string }),
     );
   });
 
@@ -714,7 +784,9 @@ export function startServeHttpServer({
     ),
     async (context) => {
       const body = context.req.valid("json");
-      if (startImplementationJob === undefined) {
+      const startImplementation = startImplementationJob;
+
+      if (startImplementation === undefined) {
         return context.json(
           {
             error: "not_configured",
@@ -741,7 +813,7 @@ export function startServeHttpServer({
       }
 
       return holdStartedJob(context, () =>
-        startImplementationJob({
+        startImplementation({
           linearIssueId: body.linearIssueId,
           modelOverride: modelOverride ?? undefined,
         }),
@@ -762,9 +834,10 @@ export function startServeHttpServer({
       command?: unknown;
     } | null;
     const issueNumber = Number(body?.issueNumber);
+    const startConversation = startHowConversation;
 
     if (
-      startHowConversation === undefined ||
+      startConversation === undefined ||
       body === null ||
       Object.keys(body).some(
         (field) =>
@@ -785,7 +858,7 @@ export function startServeHttpServer({
     }
 
     return holdStartedJob(context, () =>
-      startHowConversation({
+      startConversation({
         issueNumber,
         linearIssueId: body.linearIssueId as string,
         body: body.body as string,
@@ -853,6 +926,55 @@ export function startServeHttpServer({
       }
 
       return context.json({ modelDefaults: currentModelDefaults() });
+    },
+  );
+
+  const emptyInstanceConfig: InstanceConfig = {
+    relayOrigin: null,
+    repositoryId: null,
+    repositoryOwner: null,
+    repositoryName: null,
+    repositoryRoot: null,
+    worktreesRoot: null,
+    linearTeamId: null,
+    canonicalRemote: null,
+    lmStudioBaseUrl: null,
+  };
+
+  // relay origin、repositoryなど、初回起動時に人間が入力するinstance設定。
+  app.get("/api/instance-config", (context) =>
+    context.json(instanceConfigStore?.get() ?? emptyInstanceConfig),
+  );
+
+  app.post(
+    "/api/instance-config",
+    sValidator(
+      "json",
+      instanceConfigSchema,
+      invalidJsonRequest(
+        "instance設定の各項目は空でない文字列かnullで指定してください。",
+      ),
+    ),
+    (context) => {
+      if (
+        instanceConfigStore === undefined ||
+        buildInstanceBindings === undefined
+      ) {
+        return context.json(
+          {
+            error: "not_configured",
+            message: "Instance config storage is not configured.",
+          },
+          503,
+        );
+      }
+
+      const body = context.req.valid("json");
+
+      instanceConfigStore.set(body);
+      reconfigure(buildInstanceBindings(body));
+
+      return context.json(body);
     },
   );
 

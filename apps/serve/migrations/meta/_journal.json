@@ -127,6 +127,13 @@
       "when": 1786618817000,
       "tag": "0017_model_default_state",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786618818000,
+      "tag": "0018_instance_config",
+      "breakpoints": true
     }
   ]
 }
