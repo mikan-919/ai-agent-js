@@ -956,7 +956,10 @@ export function startServeHttpServer({
       ),
     ),
     (context) => {
-      if (instanceConfigStore === undefined || buildInstanceBindings === undefined) {
+      if (
+        instanceConfigStore === undefined ||
+        buildInstanceBindings === undefined
+      ) {
         return context.json(
           {
             error: "not_configured",

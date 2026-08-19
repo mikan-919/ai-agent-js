@@ -103,8 +103,14 @@ export function buildServeInstance(
   config: InstanceConfig,
   shared: ServeInstanceShared,
 ): ServeInstance {
-  const { jobRegistry, tokenStore, statePath, heartbeatStopMs, discoveryPollIntervalMs, modelDefaults } =
-    shared;
+  const {
+    jobRegistry,
+    tokenStore,
+    statePath,
+    heartbeatStopMs,
+    discoveryPollIntervalMs,
+    modelDefaults,
+  } = shared;
   const environment = config.relayOrigin ?? undefined;
   const repositoryId = config.repositoryId ?? undefined;
   const repositoryOwner = config.repositoryOwner ?? undefined;

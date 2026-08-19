@@ -18,10 +18,12 @@ import {
 
 import {
   modelDefaultKinds,
+  parseInstanceConfig,
   parseModelOptions,
   parseServeConfig,
 } from "@mikan-919/oriel-contracts";
 import type {
+  InstanceConfig,
   ModelDefaultApiSelection,
   ModelDefaultKind,
   ModelDefaultsDto,
@@ -68,6 +70,105 @@ function emptyModelDefaults(): ModelDefaults {
       modelDefaultKinds.map((kind) => [kind, null]),
     ) as ModelDefaults["perKind"],
   };
+}
+
+/** relay origin、repositoryなど、初回起動時にWeb UIから入力するinstance設定。 */
+type InstanceConfigFormField = keyof InstanceConfig;
+
+const instanceConfigFields: {
+  key: InstanceConfigFormField;
+  label: string;
+  env: string;
+  required: boolean;
+  type: "text" | "number";
+}[] = [
+  {
+    key: "relayOrigin",
+    label: "Relay origin",
+    env: environmentVariable("RELAY_ORIGIN"),
+    required: true,
+    type: "text",
+  },
+  {
+    key: "repositoryId",
+    label: "Repository ID",
+    env: environmentVariable("REPOSITORY_ID"),
+    required: true,
+    type: "number",
+  },
+  {
+    key: "repositoryOwner",
+    label: "Repository owner",
+    env: environmentVariable("REPOSITORY_OWNER"),
+    required: true,
+    type: "text",
+  },
+  {
+    key: "repositoryName",
+    label: "Repository name",
+    env: environmentVariable("REPOSITORY_NAME"),
+    required: true,
+    type: "text",
+  },
+  {
+    key: "repositoryRoot",
+    label: "Repository root",
+    env: environmentVariable("REPOSITORY_ROOT"),
+    required: true,
+    type: "text",
+  },
+  {
+    key: "worktreesRoot",
+    label: "Worktrees root",
+    env: environmentVariable("WORKTREES_ROOT"),
+    required: true,
+    type: "text",
+  },
+  {
+    key: "linearTeamId",
+    label: "Linear team ID",
+    env: environmentVariable("LINEAR_TEAM_ID"),
+    required: false,
+    type: "text",
+  },
+  {
+    key: "canonicalRemote",
+    label: "Canonical remote",
+    env: environmentVariable("CANONICAL_REMOTE"),
+    required: false,
+    type: "text",
+  },
+  {
+    key: "lmStudioBaseUrl",
+    label: "LM Studio base URL",
+    env: environmentVariable("LM_STUDIO_BASE_URL"),
+    required: false,
+    type: "text",
+  },
+];
+
+type InstanceConfigForm = Record<InstanceConfigFormField, string>;
+
+function emptyInstanceConfigForm(): InstanceConfigForm {
+  return Object.fromEntries(
+    instanceConfigFields.map((field) => [field.key, ""]),
+  ) as InstanceConfigForm;
+}
+
+function instanceConfigToForm(config: InstanceConfig): InstanceConfigForm {
+  return Object.fromEntries(
+    instanceConfigFields.map((field) => [
+      field.key,
+      config[field.key] === null ? "" : String(config[field.key]),
+    ]),
+  ) as InstanceConfigForm;
+}
+
+/** instance設定は未設定のフィールドが一つでもあれば、初回設定として扱う。 */
+function isInstanceConfigComplete(config: InstanceConfig): boolean {
+  return instanceConfigFields
+    .filter((field) => field.required)
+    .every((field) => config[field.key] !== null);
 }
 
 const kindLabel: Record<Job["kind"], string> = {
@@ -804,6 +905,12 @@ function ConfigModal({
 }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [instanceSaveError, setInstanceSaveError] = useState<string | null>(
+    null,
+  );
+  const [instanceSavedMessage, setInstanceSavedMessage] = useState<
+    string | null
+  >(null);
   const [base, setBase] = useState<ModelSelection>({
     provider: "",
     modelId: "",
@@ -811,7 +918,24 @@ function ConfigModal({
   const [perKind, setPerKind] = useState<
     Record<ModelKind, ModelSelection | null>
   >(() => emptyModelDefaults().perKind);
+  const [instanceForm, setInstanceForm] = useState<InstanceConfigForm>(
+    emptyInstanceConfigForm(),
+  );
   const queryClient = useQueryClient();
+  const instanceConfigQuery = useQuery({
+    queryKey: ["instance-config"],
+    queryFn: async (): Promise<InstanceConfig> => {
+      const response = await fetch("/api/instance-config");
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(body));
+      }
+
+      return parseInstanceConfig(body);
+    },
+  });
+  const instanceConfig = instanceConfigQuery.data ?? null;
   const configQuery = useQuery({
     queryKey: ["serve-config"],
     queryFn: async (): Promise<ServeConfig> => {
@@ -868,6 +992,12 @@ function ConfigModal({
     });
   }, [config]);
 
+  useEffect(() => {
+    if (instanceConfig !== null) {
+      setInstanceForm(instanceConfigToForm(instanceConfig));
+    }
+  }, [instanceConfig]);
+
   function updatePerKind(kind: ModelKind, value: ModelSelection | null) {
     setPerKind((current) => ({ ...current, [kind]: value }));
   }
@@ -918,6 +1048,50 @@ function ConfigModal({
     },
   });
 
+  const saveInstanceConfigMutation = useMutation({
+    mutationFn: async (form: InstanceConfigForm) => {
+      if (csrfToken === null) {
+        throw new Error("CSRF tokenがありません。");
+      }
+
+      const payload = Object.fromEntries(
+        instanceConfigFields.map((field) => {
+          const raw = form[field.key].trim();
+
+          if (raw === "") {
+            return [field.key, null];
+          }
+
+          return [field.key, field.type === "number" ? Number(raw) : raw];
+        }),
+      );
+
+      const result = await postJson("/api/instance-config", csrfToken, payload);
+
+      if (!result.ok) {
+        throw new Error(getApiErrorMessage(result.body));
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["instance-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["serve-config"] });
+    },
+  });
+
+  async function saveInstanceConfig() {
+    setInstanceSaveError(null);
+    setInstanceSavedMessage(null);
+
+    try {
+      await saveInstanceConfigMutation.mutateAsync(instanceForm);
+      setInstanceSavedMessage("保存しました。同じプロセスのまま反映します。");
+    } catch (cause: unknown) {
+      setInstanceSaveError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+  }
+
   async function save() {
     if (csrfToken === null) {
       return;
@@ -949,34 +1123,16 @@ function ConfigModal({
     }
   }
 
-  const fields = [
+  // MODEL_PROVIDER/MODEL_IDはbase既定値のenv移行元に過ぎず、SQLiteが正本に
+  // なった後もenv var自体はここでは編集できない読み取り専用表示のままとする。
+  const envOnlyFields = [
     {
-      label: "Relay origin",
-      env: environmentVariable("RELAY_ORIGIN"),
-      value: config?.relayOrigin,
-    },
-    {
-      label: "Repository ID",
-      env: environmentVariable("REPOSITORY_ID"),
-      value: config?.repositoryId,
-    },
-    {
-      label: "Repository owner",
-      env: environmentVariable("REPOSITORY_OWNER"),
-      value: config?.repositoryOwner,
-    },
-    {
-      label: "Repository name",
-      env: environmentVariable("REPOSITORY_NAME"),
-      value: config?.repositoryName,
-    },
-    {
-      label: "Model provider",
+      label: "Model provider (env移行元)",
       env: environmentVariable("MODEL_PROVIDER"),
       value: config?.modelProviderId,
     },
     {
-      label: "Model ID",
+      label: "Model ID (env移行元)",
       env: environmentVariable("MODEL_ID"),
       value: config?.modelId,
     },
@@ -999,7 +1155,7 @@ function ConfigModal({
         className="rise-in max-h-[90dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-border bg-surface p-6 shadow-lg"
       >
         <div className="flex items-center justify-between">
-          <h2 className="font-display text-lg text-text">モデル設定</h2>
+          <h2 className="font-display text-lg text-text">設定</h2>
           <button
             type="button"
             onClick={onClose}
@@ -1009,9 +1165,113 @@ function ConfigModal({
             <X size={16} />
           </button>
         </div>
-        <p className="mt-2 text-xs leading-relaxed text-muted">
-          baseを共通の既定値として、Job種別ごとに上書きできます。空のper-kind欄はbaseを使います。
-        </p>
+
+        <section className="mt-5 space-y-3">
+          <div>
+            <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+              instance設定
+            </p>
+            <p className="mt-1 text-xs text-muted">
+              relay
+              origin、repositoryなどこのserve固有の設定です。保存すると再起動せずに反映されます。
+            </p>
+          </div>
+
+          {instanceConfigQuery.isError && (
+            <p role="alert" className="text-sm text-fail">
+              instance設定を読み込めませんでした。
+            </p>
+          )}
+          {instanceConfig === null && !instanceConfigQuery.isError && (
+            <p className="text-sm text-muted">読み込み中…</p>
+          )}
+
+          {instanceConfig !== null && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveInstanceConfig();
+              }}
+              className="space-y-3"
+            >
+              <div className="grid gap-3 sm:grid-cols-2">
+                {instanceConfigFields.map((field) => (
+                  <Field
+                    key={field.key}
+                    label={`${field.label}${field.required ? "" : "（任意）"}`}
+                  >
+                    <input
+                      type={field.type}
+                      value={instanceForm[field.key]}
+                      onChange={(event) =>
+                        setInstanceForm((current) => ({
+                          ...current,
+                          [field.key]: event.target.value,
+                        }))
+                      }
+                      placeholder={field.env}
+                      className={inputClass}
+                    />
+                  </Field>
+                ))}
+              </div>
+
+              {instanceSaveError !== null && (
+                <p role="alert" className="text-xs text-fail">
+                  保存に失敗しました: {instanceSaveError}
+                </p>
+              )}
+              {instanceSavedMessage !== null && (
+                <p role="status" className="text-xs text-muted">
+                  {instanceSavedMessage}
+                </p>
+              )}
+
+              <div className="flex justify-end">
+                <PrimaryButton
+                  disabled={
+                    csrfToken === null || saveInstanceConfigMutation.isPending
+                  }
+                >
+                  {saveInstanceConfigMutation.isPending && (
+                    <Loader2 size={14} className="animate-spin" />
+                  )}
+                  instance設定を保存
+                </PrimaryButton>
+              </div>
+            </form>
+          )}
+
+          {envOnlyFields.length > 0 && (
+            <dl className="space-y-3">
+              {envOnlyFields.map((field) => (
+                <div
+                  key={field.env}
+                  className="rounded-lg border border-border bg-bg px-3 py-2"
+                >
+                  <dt className="flex items-baseline justify-between gap-3 text-xs text-muted">
+                    <span>{field.label}</span>
+                    <span className="font-mono text-[10px] text-faint">
+                      {field.env}
+                    </span>
+                  </dt>
+                  <dd className="mt-1 break-all font-mono text-sm text-text">
+                    {String(field.value)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </section>
+
+        <div className="mt-6 border-t border-border pt-5">
+          <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+            モデル設定
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            baseを共通の既定値として、Job種別ごとに上書きできます。空のper-kind欄はbaseを使います。
+          </p>
+        </div>
 
         {config === null && error === null && (
           <p className="mt-5 text-sm text-muted">読み込み中…</p>
@@ -1023,32 +1283,6 @@ function ConfigModal({
         )}
         {config !== null && (
           <>
-            {fields.length > 0 && (
-              <section className="mt-5 space-y-3">
-                <p className="font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
-                  serve起動設定
-                </p>
-                <dl className="space-y-3">
-                  {fields.map((field) => (
-                    <div
-                      key={field.env}
-                      className="rounded-lg border border-border bg-bg px-3 py-2"
-                    >
-                      <dt className="flex items-baseline justify-between gap-3 text-xs text-muted">
-                        <span>{field.label}</span>
-                        <span className="font-mono text-[10px] text-faint">
-                          {field.env}
-                        </span>
-                      </dt>
-                      <dd className="mt-1 break-all font-mono text-sm text-text">
-                        {String(field.value)}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              </section>
-            )}
-
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -1261,6 +1495,29 @@ export function App() {
     return () => {
       cancelled = true;
       clearInterval(interval);
+    };
+  }, []);
+
+  // instance設定(relay origin、repositoryなど)が未完了の間は、初回設定として
+  // 設定モーダルを自動的に開く。
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch("/api/instance-config")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: unknown) => {
+        if (cancelled || body === null) {
+          return;
+        }
+
+        if (!isInstanceConfigComplete(parseInstanceConfig(body))) {
+          setConfigModalOpen(true);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
