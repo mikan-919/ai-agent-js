@@ -7,7 +7,10 @@ import {
 } from "@earendil-works/pi-ai";
 
 import { createLmStudioProvider } from "./lm-studio-provider";
-import { createPiModelStreamProvider } from "./pi-model-provider";
+import {
+  createPiModelStreamProvider,
+  resolveModelCapabilities,
+} from "./pi-model-provider";
 
 function withFauxModels() {
   const faux = fauxProvider({
@@ -94,6 +97,22 @@ test("an unknown model or an unresolvable credential stops the run", async () =>
       }),
     ),
   ).rejects.toThrow();
+});
+
+test("resolveModelCapabilities returns the catalog metadata, or null when the model is unknown", async () => {
+  const { models } = withFauxModels();
+
+  expect(
+    await resolveModelCapabilities(models, "lm-studio", "local-model"),
+  ).toEqual({
+    reasoning: false,
+    input: ["text", "image"],
+    contextWindow: 128000,
+    maxTokens: 16384,
+  });
+  expect(
+    await resolveModelCapabilities(models, "lm-studio", "no-such-model"),
+  ).toBeNull();
 });
 
 test("a model that is not in the catalog yet is looked up again before the run stops", async () => {

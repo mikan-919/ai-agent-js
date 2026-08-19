@@ -11,6 +11,10 @@ import {
 } from "./execution-config";
 import type { GitCredential } from "./git";
 import type { ApprovalReconciliation } from "./implementation-admission";
+import {
+  modelSatisfiesCapabilities,
+  type ModelCapabilityMetadata,
+} from "./model-capabilities";
 import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import {
@@ -57,6 +61,8 @@ export interface StartPrResponseJobOptions {
   resolveCredential: () => Promise<GitCredential | null>;
   model: { provider: string; id: string };
   modelProvider: ModelStreamProvider;
+  /** ADR 0009のcapability gateが照合する、選択済みmodelのメタデータ。 */
+  getModelCapabilities: () => Promise<ModelCapabilityMetadata | null>;
   createExecutionConfigPorts: () => Promise<PrResponseExecutionConfigPorts | null>;
   createReconciliationPorts: () => Promise<PrResponseReconciliationPorts | null>;
   createReportPorts: () => Promise<PrResponseReportPorts | null>;
@@ -82,7 +88,8 @@ export interface StartPrResponseJobRefusal {
     | "branch_not_exclusive"
     | "execution_config_ports_unavailable"
     | "target_base_unavailable"
-    | "ownership_not_current";
+    | "ownership_not_current"
+    | "model_capability_mismatch";
 }
 
 export type StartPrResponseJobResult =
@@ -116,6 +123,7 @@ export async function startPrResponseJob({
   resolveCredential,
   model,
   modelProvider,
+  getModelCapabilities,
   createExecutionConfigPorts,
   createReconciliationPorts,
   createReportPorts,
@@ -182,6 +190,17 @@ export async function startPrResponseJob({
 
   if (execution.status === "refused") {
     return refuse(execution.reason);
+  }
+
+  if (execution.config.modelCapabilities !== undefined) {
+    const metadata = await getModelCapabilities();
+
+    if (
+      metadata === null ||
+      !modelSatisfiesCapabilities(execution.config.modelCapabilities, metadata)
+    ) {
+      return refuse("model_capability_mismatch");
+    }
   }
 
   const current =
