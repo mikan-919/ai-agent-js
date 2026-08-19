@@ -4,9 +4,10 @@ import type { TranscriptEntry } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 
 import type { DeviceRegistrationFlow } from "./device-registration";
+import { createInstanceConfigStore } from "./instance-config";
 import { openServeLocalState } from "./local-state";
 import { createModelDefaultsStore } from "./model-defaults";
-import { startServeHttpServer } from "./server";
+import { startServeHttpServer, type ServeInstanceBindings } from "./server";
 
 function fakeDeviceRegistration(): DeviceRegistrationFlow {
   return {
@@ -196,6 +197,133 @@ test("/api/config updates and clears model defaults with CSRF protection", async
     expect(
       (await post({ scope: "base", provider: "   ", modelId: "gpt-5" })).status,
     ).toBe(400);
+  } finally {
+    httpServer.close();
+  }
+});
+
+test("/api/instance-config is unavailable without a configured store", async () => {
+  const httpServer = startServeHttpServer({});
+
+  try {
+    const origin = httpServer.readinessUrl.origin;
+    const { cookie, csrf } = await withSession(origin);
+
+    expect(
+      (
+        await fetch(`${origin}/api/instance-config`, {
+          headers: { Origin: origin, cookie },
+        })
+      ).status,
+    ).toBe(200);
+
+    const response = await fetch(`${origin}/api/instance-config`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Origin: origin,
+        cookie,
+        [`x-${identity.codeName}-csrf`]: csrf,
+      },
+      body: JSON.stringify({
+        relayOrigin: "https://relay.example.test",
+        repositoryId: 1,
+        repositoryOwner: "mikan",
+        repositoryName: "oriel",
+        repositoryRoot: null,
+        worktreesRoot: null,
+        linearTeamId: null,
+        canonicalRemote: null,
+        lmStudioBaseUrl: null,
+      }),
+    });
+
+    expect(response.status).toBe(503);
+  } finally {
+    httpServer.close();
+  }
+});
+
+test("saving instance config reconfigures the running server without a restart", async () => {
+  const instanceConfigStore = createInstanceConfigStore(
+    openServeLocalState(":memory:"),
+  );
+  const buildInstanceBindings = (config: {
+    relayOrigin: string | null;
+    repositoryId: number | null;
+    repositoryOwner: string | null;
+    repositoryName: string | null;
+  }): ServeInstanceBindings => ({
+    relayOrigin: config.relayOrigin ?? undefined,
+    repositoryId: config.repositoryId ?? undefined,
+    repositoryOwner: config.repositoryOwner ?? undefined,
+    repositoryName: config.repositoryName ?? undefined,
+    startIssueConversation: async ({ issueNumber, body }) => ({
+      status: "started",
+      jobId: `job-for-${config.repositoryOwner}-${issueNumber}-${body}`,
+      finished: Promise.resolve(),
+      jobStatus: () => null,
+      close: () => {},
+    }),
+  });
+  const httpServer = startServeHttpServer({
+    instanceConfigStore,
+    buildInstanceBindings,
+  });
+
+  try {
+    const origin = httpServer.readinessUrl.origin;
+    const { cookie, csrf } = await withSession(origin);
+    const post = (path: string, body: unknown) =>
+      fetch(`${origin}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Origin: origin,
+          cookie,
+          [`x-${identity.codeName}-csrf`]: csrf,
+        },
+        body: JSON.stringify(body),
+      });
+
+    const saved = await post("/api/instance-config", {
+      relayOrigin: "https://relay.example.test",
+      repositoryId: 7,
+      repositoryOwner: "mikan-919",
+      repositoryName: "oriel",
+      repositoryRoot: null,
+      worktreesRoot: null,
+      linearTeamId: null,
+      canonicalRemote: null,
+      lmStudioBaseUrl: null,
+    });
+
+    expect(saved.status).toBe(200);
+    expect(instanceConfigStore.get().repositoryOwner).toBe("mikan-919");
+
+    // サーバプロセスを再起動せず、保存直後のリクエストから新しい配線が使われる。
+    const config = await fetch(`${origin}/api/config`, {
+      headers: { Origin: origin, cookie },
+    });
+
+    expect(config.status).toBe(200);
+    expect(await config.json()).toMatchObject({
+      relayOrigin: "https://relay.example.test",
+      repositoryId: 7,
+      repositoryOwner: "mikan-919",
+      repositoryName: "oriel",
+    });
+
+    const started = await post("/api/issue-conversations", {
+      issueNumber: 5,
+      body: "hello",
+    });
+
+    expect(started.status).toBe(200);
+    expect(await started.json()).toEqual({
+      status: "started",
+      jobId: "job-for-mikan-919-5-hello",
+    });
   } finally {
     httpServer.close();
   }
