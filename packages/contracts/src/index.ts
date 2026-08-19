@@ -4,6 +4,7 @@ export * from "./execution-config";
 export * from "./github";
 export * from "./how-confirmation";
 export * from "./implementation";
+export * from "./instance-config";
 export * from "./issue-body";
 export * from "./issue-comment";
 export * from "./linear-comment";
