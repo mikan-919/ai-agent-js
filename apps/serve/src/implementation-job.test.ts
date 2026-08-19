@@ -278,10 +278,17 @@ function options(
   linearApprovalState: LinearApprovalStatePorts &
     LinearInProgressPorts &
     LinearReviewStatePorts = fakeLinearState().ports,
+  getModelCapabilities: () => Promise<{
+    reasoning: boolean;
+    input: readonly string[];
+    contextWindow: number;
+    maxTokens: number;
+  } | null> = async () => null,
 ) {
   return {
     model: { provider: "lm-studio", id: "local-model" },
     modelProvider,
+    getModelCapabilities,
     linearApprovalState,
     relayOrigin,
     tokenStore: tokenStore(deviceToken),
@@ -910,6 +917,77 @@ test("a target base without a usable execution config starts no worker", async (
       } finally {
         relay.stop();
       }
+    }
+  });
+});
+
+test("a resolved model that does not satisfy .oriel.yaml's modelCapabilities starts no worker", async () => {
+  await withWorkspace(async (databasePath) => {
+    const executionConfig = `${autonomousConfig}modelCapabilities:
+  reasoning: true
+`;
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const { ports } = fakePorts({ executionConfig });
+    const startedWorkers: StartImplementationWorkerOptions[] = [];
+
+    try {
+      expect(
+        await startImplementationJob(
+          options(
+            databasePath,
+            relay.origin,
+            ports,
+            startedWorkers,
+            undefined,
+            async () => ({
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 128000,
+              maxTokens: 8192,
+            }),
+          ),
+        ),
+      ).toEqual({ status: "refused", reason: "model_capability_mismatch" });
+      expect(startedWorkers).toHaveLength(0);
+    } finally {
+      relay.stop();
+    }
+  });
+});
+
+test("a resolved model that satisfies .oriel.yaml's modelCapabilities starts a worker", async () => {
+  await withWorkspace(async (databasePath) => {
+    const executionConfig = `${autonomousConfig}modelCapabilities:
+  reasoning: true
+`;
+    const relay = startFakeOwnershipRelay(deviceToken);
+    const { ports } = fakePorts({ executionConfig });
+    const startedWorkers: StartImplementationWorkerOptions[] = [];
+
+    try {
+      const started = await startImplementationJob(
+        options(
+          databasePath,
+          relay.origin,
+          ports,
+          startedWorkers,
+          undefined,
+          async () => ({
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 128000,
+            maxTokens: 8192,
+          }),
+        ),
+      );
+
+      expect(started.status).toBe("started");
+
+      if (started.status === "started") {
+        await started.close();
+      }
+    } finally {
+      relay.stop();
     }
   });
 });

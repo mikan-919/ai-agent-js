@@ -99,6 +99,74 @@ execution:
   }
 });
 
+test("modelCapabilities is optional and, when present, constrains reasoning/image/context/output", () => {
+  const withCapabilities = `${valid}modelCapabilities:
+  reasoning: true
+  image: true
+  minContextWindow: 128000
+  minMaxTokens: 8192
+`;
+
+  expect(parseExecutionConfig(withCapabilities)).toEqual({
+    status: "parsed",
+    config: {
+      schemaVersion: 1,
+      execution: {
+        backend: "worktree",
+        autonomous: true,
+        verification: [
+          ["bun", "run", "typecheck"],
+          ["bun", "test"],
+        ],
+      },
+      modelCapabilities: {
+        reasoning: true,
+        image: true,
+        minContextWindow: 128000,
+        minMaxTokens: 8192,
+      },
+    },
+  });
+
+  // 省略した既存の.oriel.yamlは変更なしで動作し続ける。
+  expect(parseExecutionConfig(valid)).toEqual({
+    status: "parsed",
+    config: {
+      schemaVersion: 1,
+      execution: {
+        backend: "worktree",
+        autonomous: true,
+        verification: [
+          ["bun", "run", "typecheck"],
+          ["bun", "test"],
+        ],
+      },
+    },
+  });
+});
+
+test("modelCapabilities rejects false, non-integers, and unknown fields", () => {
+  const reasoningFalse = `${valid}modelCapabilities:
+  reasoning: false
+`;
+  const nonInteger = `${valid}modelCapabilities:
+  minContextWindow: 1.5
+`;
+  const zero = `${valid}modelCapabilities:
+  minMaxTokens: 0
+`;
+  const unknownField = `${valid}modelCapabilities:
+  providerId: openai
+`;
+
+  for (const source of [reasoningFalse, nonInteger, zero, unknownField]) {
+    expect(parseExecutionConfig(source)).toEqual({
+      status: "invalid",
+      reason: "schema_violation",
+    });
+  }
+});
+
 test("YAML that does not parse, or that uses a custom tag, fails closed", () => {
   expect(parseExecutionConfig("schemaVersion: [1\n")).toEqual({
     status: "invalid",

@@ -13,6 +13,20 @@ const nonEmptyString = v.pipe(v.string(), v.minLength(1));
  * 検証commandもこの設定だけを正本にし、省略や空配列でverified扱いになることが
  * ないよう、最低一つのcommandを要求する。
  */
+/**
+ * ADR 0009のとおり、pi-aiの`Model`が持つ自動検査可能な4 fieldに対応する要求
+ * だけを扱う。省略時はmodelへの制約なし。`reasoning`/`image`は要求することだけ
+ * を表現すればよいため、`autonomous: true`と同じ慣習で`v.literal(true)`とする。
+ */
+export const modelCapabilitiesSchema = v.strictObject({
+  reasoning: v.optional(v.literal(true)),
+  image: v.optional(v.literal(true)),
+  minContextWindow: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  minMaxTokens: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+});
+
+export type ModelCapabilities = v.InferOutput<typeof modelCapabilitiesSchema>;
+
 export const executionConfigSchema = v.strictObject({
   schemaVersion: v.literal(1),
   execution: v.strictObject({
@@ -24,6 +38,11 @@ export const executionConfigSchema = v.strictObject({
       v.minLength(1),
     ),
   }),
+  /**
+   * modelを使う4 Job種別へ共通適用するmodel要求。`execution`と異なり、
+   * 「実行を許可するかどうか」のgateではなく任意で追加できる制約なので省略可能。
+   */
+  modelCapabilities: v.optional(modelCapabilitiesSchema),
 });
 
 export type ExecutionConfig = v.InferOutput<typeof executionConfigSchema>;

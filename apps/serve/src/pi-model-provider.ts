@@ -1,9 +1,48 @@
-import type { Context, Models } from "@earendil-works/pi-ai";
+import type { Context, Model, Api, Models } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { identity } from "@mikan-919/oriel-identity";
 
 import { createLmStudioProvider } from "./lm-studio-provider";
+import type { ModelCapabilityMetadata } from "./model-capabilities";
 import type { ModelStreamProvider } from "./model-stream";
+
+/** catalogに無いmodelは、networkを許した読み直しを一度だけ試す。 */
+async function resolveCatalogModel(
+  models: Models,
+  provider: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<Model<Api> | undefined> {
+  let selected = models.getModel(provider, id);
+
+  if (selected === undefined) {
+    await models.refresh({ allowNetwork: true, providers: [provider], signal });
+    selected = models.getModel(provider, id);
+  }
+
+  return selected;
+}
+
+/**
+ * capability gate(ADR 0009)が照合する、選択済みmodelのメタデータ。
+ * 見つからない場合は要求を満たせないものとしてfail closedに扱う。
+ */
+export async function resolveModelCapabilities(
+  models: Models,
+  provider: string,
+  id: string,
+): Promise<ModelCapabilityMetadata | null> {
+  const selected = await resolveCatalogModel(models, provider, id);
+
+  return selected === undefined
+    ? null
+    : {
+        reasoning: selected.reasoning,
+        input: selected.input,
+        contextWindow: selected.contextWindow,
+        maxTokens: selected.maxTokens,
+      };
+}
 
 export interface PiModelStreamProviderDependencies {
   /** 提供元と互換性設定の正本。`serve`が構成し、harnessへは渡さない。 */
@@ -27,17 +66,12 @@ export function createPiModelStreamProvider({
 }: PiModelStreamProviderDependencies): ModelStreamProvider {
   return {
     async *stream({ provider, model, context, signal }) {
-      let selected = models.getModel(provider, model);
-
-      // 動的なcatalogは、要求されたmodelが未知のときだけ読み直す。
-      if (selected === undefined) {
-        await models.refresh({
-          allowNetwork: true,
-          providers: [provider],
-          signal,
-        });
-        selected = models.getModel(provider, model);
-      }
+      const selected = await resolveCatalogModel(
+        models,
+        provider,
+        model,
+        signal,
+      );
 
       if (selected === undefined) {
         throw new Error(`the model ${provider}/${model} is not available`);

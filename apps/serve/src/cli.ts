@@ -39,6 +39,7 @@ import { createLinearGraphqlCommentPublisher } from "./linear-comments";
 import { createLinearGraphqlDescriptionPublisher } from "./linear-description";
 import { createLinearTriageWriter } from "./linear-triage-writer";
 import { openServeLocalState } from "./local-state";
+import { conversationJobSatisfiesModelCapabilities } from "./model-capability-gate";
 import {
   createModelDefaultsStore,
   resolveModelDefault,
@@ -55,8 +56,12 @@ import {
   bunSecretsModelCredential,
   createPiModelStreamProvider,
   createServeModels,
+  resolveModelCapabilities,
 } from "./pi-model-provider";
-import { createRelayDeviceClient } from "./relay-client";
+import {
+  createRelayDeviceClient,
+  type RelayDeviceClient,
+} from "./relay-client";
 import { startServeHttpServer } from "./server";
 import { resolveStatePath } from "./state-path";
 import { createTranscriptSearch } from "./transcript-search";
@@ -152,9 +157,40 @@ if (Bun.argv[2] === "serve") {
       status: "refused" as const,
       reason: "model_not_configured" as const,
     });
+  const refuseCapabilityMismatch = () =>
+    Promise.resolve({
+      status: "refused" as const,
+      reason: "model_capability_mismatch" as const,
+    });
   const models = createServeModels({
     lmStudioBaseUrl: Bun.env[`${identity.environmentPrefix}LM_STUDIO_BASE_URL`],
   });
+  /** ADR 0009のcapability gateが照合する、選択済みmodelのメタデータ。 */
+  const getModelCapabilities = (model: ModelSelection) =>
+    resolveModelCapabilities(models, model.provider, model.id);
+  /**
+   * `.oriel.yaml`のmodelCapabilities gate専用の、admission用途に絞ったOctokit。
+   * 対話Job(what_confirmation/how_confirmation)はこれまでGitHub contentsへ
+   * 触れていなかったが、ADR 0009の照合のためだけにこの読み取りだけを追加する。
+   */
+  const createRepositoryTargetBaseReader =
+    (
+      relay: RelayDeviceClient,
+      targetRepositoryId: number,
+      repository: { owner: string; name: string },
+    ) =>
+    async () => {
+      const octokit = await createInstallationOctokitResolver({
+        relay,
+        tokenStore,
+        repositoryId: targetRepositoryId,
+        purpose: "admission",
+      })();
+
+      return octokit === null
+        ? null
+        : createGitHubTargetBaseReader({ octokit, repository });
+    };
   const relayDeviceClient =
     environment === undefined
       ? undefined
@@ -243,6 +279,7 @@ if (Bun.argv[2] === "serve") {
           model,
           // 提供元への接続とcredentialの解決は`serve`の内側だけで行う。
           modelProvider: modelStreamProvider,
+          getModelCapabilities: () => getModelCapabilities(model),
           /**
            * 承認後の状態反映は、所有権を確認した`serve`だけがLinearへ行う。
            * tokenはこの内側だけで解決し、harnessへも引数へも渡さない。
@@ -302,7 +339,7 @@ if (Bun.argv[2] === "serve") {
   const whatConfirmationReady = conversationReady && linearTeamId !== undefined;
   const startWhatConfirmation =
     whatConfirmationReady && relayDeviceClient !== undefined
-      ? ({
+      ? async ({
           issueNumber,
           trigger,
         }: {
@@ -313,6 +350,22 @@ if (Bun.argv[2] === "serve") {
 
           if (model === null) {
             return refuseWithoutModel();
+          }
+
+          if (
+            !(await conversationJobSatisfiesModelCapabilities(
+              createRepositoryTargetBaseReader(
+                relayDeviceClient,
+                repositoryId,
+                {
+                  owner: repositoryOwner,
+                  name: repositoryName,
+                },
+              ),
+              () => getModelCapabilities(model),
+            ))
+          ) {
+            return refuseCapabilityMismatch();
           }
 
           return startWhatConfirmationJob({
@@ -358,13 +411,14 @@ if (Bun.argv[2] === "serve") {
   /**
    * mention/commandトリガーからHOW確定Jobを始める、唯一の入口。
    *
-   * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。GitHub
-   * credentialは使わない(この対話はLinear issueだけを読み書きする)。
+   * Linear tokenはJob単位でだけ解決し、harnessへは渡さない。この対話はLinear
+   * issueだけを読み書きし、GitHubへは`.oriel.yaml`のmodelCapabilities照合
+   * (ADR 0009)だけに絞ったadmission用途の読み取りOctokitを使う。
    */
   const howConfirmationReady = conversationReady;
   const startHowConfirmation =
     howConfirmationReady && relayDeviceClient !== undefined
-      ? ({
+      ? async ({
           issueNumber,
           linearIssueId,
           trigger,
@@ -377,6 +431,22 @@ if (Bun.argv[2] === "serve") {
 
           if (model === null) {
             return refuseWithoutModel();
+          }
+
+          if (
+            !(await conversationJobSatisfiesModelCapabilities(
+              createRepositoryTargetBaseReader(
+                relayDeviceClient,
+                repositoryId,
+                {
+                  owner: repositoryOwner,
+                  name: repositoryName,
+                },
+              ),
+              () => getModelCapabilities(model),
+            ))
+          ) {
+            return refuseCapabilityMismatch();
           }
 
           return startHowConfirmationJob({
@@ -427,7 +497,7 @@ if (Bun.argv[2] === "serve") {
    */
   const startHowConversation =
     howConfirmationReady && relayDeviceClient !== undefined
-      ? ({
+      ? async ({
           issueNumber,
           linearIssueId,
           body,
@@ -442,6 +512,22 @@ if (Bun.argv[2] === "serve") {
 
           if (model === null) {
             return refuseWithoutModel();
+          }
+
+          if (
+            !(await conversationJobSatisfiesModelCapabilities(
+              createRepositoryTargetBaseReader(
+                relayDeviceClient,
+                repositoryId,
+                {
+                  owner: repositoryOwner,
+                  name: repositoryName,
+                },
+              ),
+              () => getModelCapabilities(model),
+            ))
+          ) {
+            return refuseCapabilityMismatch();
           }
 
           return startHowConfirmationJob({
@@ -852,6 +938,7 @@ if (Bun.argv[2] === "serve") {
                 }),
                 model,
                 modelProvider: modelStreamProvider,
+                getModelCapabilities: () => getModelCapabilities(model),
                 createExecutionConfigPorts: async () => {
                   const octokit = await createInstallationOctokitResolver({
                     relay: relayDeviceClient,

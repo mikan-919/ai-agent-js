@@ -35,6 +35,10 @@ import {
   type MoveToInProgressStatus,
 } from "./linear-progress";
 import { openServeLocalState } from "./local-state";
+import {
+  modelSatisfiesCapabilities,
+  type ModelCapabilityMetadata,
+} from "./model-capabilities";
 import type { ModelStreamProvider } from "./model-stream";
 import { createRelayOwnershipConnection } from "./ownership-connection";
 import { ensurePullRequest, type PullRequestPorts } from "./pull-request";
@@ -81,6 +85,8 @@ export interface StartImplementationJobOptions {
    */
   model: { provider: string; id: string };
   modelProvider: ModelStreamProvider;
+  /** ADR 0009のcapability gateが照合する、選択済みmodelのメタデータ。 */
+  getModelCapabilities: () => Promise<ModelCapabilityMetadata | null>;
   /**
    * 承認後の状態をLinearへ機械的に反映する境界。
    *
@@ -111,7 +117,8 @@ export interface StartImplementationJobRefusal {
     | "github_credentials_unavailable"
     | "linear_credentials_unavailable"
     | "job_ownership_not_acquired"
-    | "branch_not_exclusive";
+    | "branch_not_exclusive"
+    | "model_capability_mismatch";
   /**
    * 承認対象の不一致で行った差し戻しの結果。
    *
@@ -167,6 +174,7 @@ export async function startImplementationJob({
   resolveCredential,
   model,
   modelProvider,
+  getModelCapabilities,
   linearApprovalState,
   createPullRequestOctokit,
   createPullRequestPorts,
@@ -368,6 +376,17 @@ export async function startImplementationJob({
 
   if (execution.status === "refused") {
     return refuse(execution.reason);
+  }
+
+  if (execution.config.modelCapabilities !== undefined) {
+    const metadata = await getModelCapabilities();
+
+    if (
+      metadata === null ||
+      !modelSatisfiesCapabilities(execution.config.modelCapabilities, metadata)
+    ) {
+      return refuse("model_capability_mismatch");
+    }
   }
 
   // worker開始直前に、現在のJob・ブランチ取得IDと置換隔離を明示して再確認する。
