@@ -813,6 +813,51 @@ describe("ownership connections on the relay", () => {
       ).status,
     ).toBe(401);
   });
+
+  it("closes the notification subscription of a revoked device without treating it as ownership", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+    const job = await openOwnership(app, {
+      deviceToken: registered.deviceToken,
+      kind: "job",
+      key: "job-1",
+    });
+    const jobSocket = job.webSocket!;
+    const subscription = await openNotifications(app, registered.deviceToken);
+    const notificationSocket = subscription.webSocket!;
+
+    jobSocket.accept();
+    await nextMessage(jobSocket);
+    notificationSocket.accept();
+
+    const received: unknown[] = [];
+
+    notificationSocket.addEventListener("message", (event) => {
+      received.push(JSON.parse(String(event.data)));
+    });
+
+    const closedNotification = new Promise<number>((resolve) => {
+      notificationSocket.addEventListener("close", (event) => {
+        resolve(event.code);
+      });
+    });
+
+    expect(
+      (
+        await runOperation(
+          app,
+          "revocation",
+          adminCode,
+          "revoke-state",
+          registered.deviceId,
+        )
+      ).response.status,
+    ).toBe(200);
+
+    // 通知接続は所有権接続として扱われず、closeNotificationOfが閉じる。
+    expect(await closedNotification).toBe(4003);
+    expect(received).toEqual([]);
+  });
 });
 
 describe("ownership liveness on the relay", () => {

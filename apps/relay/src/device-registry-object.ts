@@ -86,6 +86,29 @@ interface OwnershipAuditConfig {
   auditIntervalMs: number;
 }
 
+/**
+ * 休止を越えて残る接続付随情報の全体。`channel`の有無だけを判別子にする。
+ * 所有権接続へ判別子fieldを足すと、deploy前から休止している接続の付随情報が
+ * どちらにも一致しなくなるため、既存の形のまま判別する。
+ */
+type ConnectionAttachment = OwnershipAttachment | NotificationAttachment;
+
+/** 所有権接続の付随情報。通知接続なら`null`。 */
+function ownershipAttachmentOf(ws: WebSocket): OwnershipAttachment | null {
+  const attachment = ws.deserializeAttachment() as ConnectionAttachment | null;
+
+  return attachment === null || "channel" in attachment ? null : attachment;
+}
+
+/** 通知接続の付随情報。所有権接続なら`null`。 */
+function notificationAttachmentOf(
+  ws: WebSocket,
+): NotificationAttachment | null {
+  const attachment = ws.deserializeAttachment() as ConnectionAttachment | null;
+
+  return attachment !== null && "channel" in attachment ? attachment : null;
+}
+
 interface PendingTranscriptSearch {
   from: WebSocket;
   entries: TranscriptEntry[];
@@ -557,7 +580,11 @@ export class DeviceRegistryObject extends DurableObject {
    * message型を、要求元からの起点か、fan-out先からの答えかで振り分ける。
    * queryも結果もここでは保存せず、往復の間だけin-memoryに保持する。
    */
-  private handleTranscriptRelayMessage(ws: WebSocket, raw: string): void {
+  private handleTranscriptRelayMessage(
+    ws: WebSocket,
+    raw: string,
+    timeoutMs: number,
+  ): void {
     let message;
 
     try {
@@ -567,7 +594,7 @@ export class DeviceRegistryObject extends DurableObject {
     }
 
     if (message.type === "transcript.search.request") {
-      this.fanOutTranscriptSearch(ws, message);
+      this.fanOutTranscriptSearch(ws, message, timeoutMs);
       return;
     }
 
@@ -578,6 +605,7 @@ export class DeviceRegistryObject extends DurableObject {
   private fanOutTranscriptSearch(
     ws: WebSocket,
     request: TranscriptSearchRequest,
+    timeoutMs: number,
   ): void {
     const siblings = this.activeNotificationSockets().filter(
       (socket) => socket !== ws,
@@ -594,15 +622,13 @@ export class DeviceRegistryObject extends DurableObject {
       return;
     }
 
-    const attachment = ws.deserializeAttachment() as NotificationAttachment;
-
     this.pendingTranscriptSearches.set(request.requestId, {
       from: ws,
       entries: [],
       remaining: siblings.length,
       timer: setTimeout(
         () => this.finishTranscriptSearch(request.requestId),
-        attachment.transcriptSearchTimeoutMs,
+        timeoutMs,
       ),
     });
 
@@ -653,34 +679,17 @@ export class DeviceRegistryObject extends DurableObject {
   }
 
   private activeNotificationSockets(): WebSocket[] {
-    return this.ctx.getWebSockets().filter((ws) => {
-      const attachment = ws.deserializeAttachment() as
-        NotificationAttachment | OwnershipAttachment | null;
-
-      return (
-        attachment !== null &&
-        "channel" in attachment &&
-        attachment.channel === "notification"
-      );
-    });
+    return this.ctx
+      .getWebSockets()
+      .filter((ws) => notificationAttachmentOf(ws) !== null);
   }
 
   /** 失効したdeviceの通知購読も閉じる。所有権接続の失効とは別処理にする。 */
   private closeNotificationOf(deviceId: string): void {
     for (const ws of this.ctx.getWebSockets()) {
-      const attachment = ws.deserializeAttachment() as
-        NotificationAttachment | OwnershipAttachment | null;
-
-      if (
-        attachment === null ||
-        !("channel" in attachment) ||
-        attachment.channel !== "notification" ||
-        attachment.deviceId !== deviceId
-      ) {
-        continue;
+      if (notificationAttachmentOf(ws)?.deviceId === deviceId) {
+        ws.close(4003, "device revoked");
       }
-
-      ws.close(4003, "device revoked");
     }
   }
 
@@ -730,8 +739,8 @@ export class DeviceRegistryObject extends DurableObject {
       ...this.ctx.getWebSockets().map(
         (ws) =>
           // 通知接続にはauditが無い。所有権接続だけがAlarmの間隔対象になる。
-          (ws.deserializeAttachment() as OwnershipAttachment | null)?.audit
-            ?.auditIntervalMs ?? Number.POSITIVE_INFINITY,
+          ownershipAttachmentOf(ws)?.audit.auditIntervalMs ??
+          Number.POSITIVE_INFINITY,
       ),
     );
 
@@ -745,8 +754,7 @@ export class DeviceRegistryObject extends DurableObject {
     const expired = new Set<WebSocket>();
 
     for (const ws of this.ctx.getWebSockets()) {
-      const attachment =
-        ws.deserializeAttachment() as OwnershipAttachment | null;
+      const attachment = ownershipAttachmentOf(ws);
 
       if (attachment === null || !attachment.valid) {
         continue;
@@ -779,15 +787,14 @@ export class DeviceRegistryObject extends DurableObject {
       return;
     }
 
-    const attachment = ws.deserializeAttachment() as
-      NotificationAttachment | OwnershipAttachment | null;
+    const notification = notificationAttachmentOf(ws);
 
-    if (
-      attachment !== null &&
-      "channel" in attachment &&
-      attachment.channel === "notification"
-    ) {
-      this.handleTranscriptRelayMessage(ws, message);
+    if (notification !== null) {
+      this.handleTranscriptRelayMessage(
+        ws,
+        message,
+        notification.transcriptSearchTimeoutMs,
+      );
       return;
     }
 
@@ -842,7 +849,7 @@ export class DeviceRegistryObject extends DurableObject {
 
   /** 有効な接続付随情報を持ち、取得IDが現在のものと一致するか。 */
   private isCurrent(ws: WebSocket, leaseId: string): boolean {
-    const attachment = ws.deserializeAttachment() as OwnershipAttachment | null;
+    const attachment = ownershipAttachmentOf(ws);
 
     return (
       attachment !== null && attachment.valid && attachment.leaseId === leaseId
@@ -852,7 +859,7 @@ export class DeviceRegistryObject extends DurableObject {
   private activeOwnership(): OwnershipAttachment[] {
     return this.ctx
       .getWebSockets()
-      .map((ws) => ws.deserializeAttachment() as OwnershipAttachment | null)
+      .map(ownershipAttachmentOf)
       .filter(
         (attachment): attachment is OwnershipAttachment =>
           attachment !== null && attachment.valid,
@@ -862,8 +869,7 @@ export class DeviceRegistryObject extends DurableObject {
   /** 失効したdeviceの接続を、付随情報を失効させてから閉じる。 */
   private closeOwnershipOf(deviceId: string): void {
     for (const ws of this.ctx.getWebSockets()) {
-      const attachment =
-        ws.deserializeAttachment() as OwnershipAttachment | null;
+      const attachment = ownershipAttachmentOf(ws);
 
       if (attachment === null || attachment.deviceId !== deviceId) {
         continue;
