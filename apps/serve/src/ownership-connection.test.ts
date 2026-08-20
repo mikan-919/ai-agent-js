@@ -1,3 +1,7 @@
+import {
+  ownershipHeartbeatRequest,
+  ownershipHeartbeatResponse,
+} from "@mikan-919/oriel-contracts";
 import { expect, test } from "bun:test";
 
 import { startFakeOwnershipRelay } from "./ownership-relay.fake";
@@ -54,6 +58,47 @@ function recordingSocket(url: string, closed: string[]): WebSocket {
 
       alreadyClosed = true;
       closed.push(kind);
+      queueMicrotask(() => events.dispatchEvent(new Event("close")));
+    },
+  } as unknown as WebSocket;
+}
+
+/** heartbeatへ答えるのはjob socketだけ。答えるたびに`advance`で論理時計が進む。 */
+function answeringSocket(url: string, advance: () => void): WebSocket {
+  const kind = new URL(url).searchParams.get("kind") ?? "";
+  const events = new EventTarget();
+
+  queueMicrotask(() => {
+    events.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ownership.acquired",
+          leaseId: `${kind}-lease`,
+          heartbeatIntervalMs: 10,
+          heartbeatExpiryMs: 60_000,
+        }),
+      }),
+    );
+  });
+
+  return {
+    addEventListener: (type: string, listener: EventListener) => {
+      events.addEventListener(type, listener);
+    },
+    removeEventListener: (type: string, listener: EventListener) => {
+      events.removeEventListener(type, listener);
+    },
+    send: (data: string) => {
+      if (data !== ownershipHeartbeatRequest || kind !== "job") {
+        return;
+      }
+
+      advance();
+      events.dispatchEvent(
+        new MessageEvent("message", { data: ownershipHeartbeatResponse }),
+      );
+    },
+    close: () => {
       queueMicrotask(() => events.dispatchEvent(new Event("close")));
     },
   } as unknown as WebSocket;
@@ -239,7 +284,8 @@ test("the connection heartbeats and stops when the relay stops answering", async
     heartbeatIntervalMs: 10,
     heartbeatExpiryMs: 60_000,
   });
-  const connection = connect(relay.origin, deviceToken, 50);
+  // 停止期限は実時間のjitterへ埋もれない幅を取る。狭すぎると負荷で偽の停止が出る。
+  const connection = connect(relay.origin, deviceToken, 200);
 
   try {
     expect(await connection.acquireJobOwnership()).toEqual(expect.any(String));
@@ -250,13 +296,41 @@ test("the connection heartbeats and stops when the relay stops answering", async
     expect(connection.stopSignal.aborted).toBe(false);
 
     relay.stopAnsweringHeartbeats();
-    await Bun.sleep(150);
+    await Bun.sleep(400);
 
     // 応答を停止期限内に受け取れないので、切断通知を待たず止まる。
     expect(connection.stopSignal.aborted).toBe(true);
   } finally {
     connection.release();
     relay.stop();
+  }
+});
+
+test("a silent branch socket stops the connection even while the Job socket keeps answering", async () => {
+  let clock = 1_000;
+  // job socketだけが答え、答えた瞬間に論理時計が進む。最終応答時刻を共有していると
+  // 常にその時刻へ更新されるため、socketごとに持つ場合だけbranchが期限を超える。
+  const connection = createRelayOwnershipConnection({
+    relayOrigin: "http://relay.test",
+    deviceToken,
+    jobId,
+    heartbeatStopMs: 50,
+    openWebSocket: (url) => answeringSocket(url, () => (clock += 30)),
+    now: () => clock,
+  });
+
+  try {
+    expect(await connection.acquireJobOwnership()).toBe("job-lease");
+    expect(await connection.acquireBranchExclusivity("11/oriel-job-1")).toBe(
+      "branch-lease",
+    );
+    expect(connection.stopSignal.aborted).toBe(false);
+
+    await Bun.sleep(100);
+
+    expect(connection.stopSignal.aborted).toBe(true);
+  } finally {
+    connection.release();
   }
 });
 

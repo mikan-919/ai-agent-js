@@ -65,7 +65,11 @@ export function createRelayOwnershipConnection({
 }: RelayOwnershipConnectionOptions): RelayOwnershipConnection {
   const stopped = new AbortController();
   const heartbeats = new Set<ReturnType<typeof setInterval>>();
-  let lastHeartbeatAt = 0;
+  /**
+   * ADR 0005の停止期限は接続ごとに生きていることを確かめるものなので、
+   * socketごとに持つ。共有すると片方の応答がもう片方の無応答を隠す。
+   */
+  const lastHeartbeatAt = new Map<WebSocket, number>();
   const acquired = new Set<WebSocket>();
   let jobSocket: WebSocket | null = null;
   let branchSocket: WebSocket | null = null;
@@ -117,6 +121,7 @@ export function createRelayOwnershipConnection({
     }
 
     heartbeats.clear();
+    lastHeartbeatAt.clear();
   }
 
   /**
@@ -124,10 +129,10 @@ export function createRelayOwnershipConnection({
    * relayの切断通知を待たずworkerと新しい外部操作を止める。
    */
   function startHeartbeat(socket: WebSocket, intervalMs: number) {
-    lastHeartbeatAt = now();
+    lastHeartbeatAt.set(socket, now());
 
     const heartbeat = setInterval(() => {
-      if (now() - lastHeartbeatAt > heartbeatStopMs) {
+      if (now() - (lastHeartbeatAt.get(socket) ?? 0) > heartbeatStopMs) {
         stop();
         return;
       }
@@ -172,7 +177,7 @@ export function createRelayOwnershipConnection({
         let message;
 
         if (String(event.data) === ownershipHeartbeatResponse) {
-          lastHeartbeatAt = now();
+          lastHeartbeatAt.set(socket, now());
           return;
         }
 
