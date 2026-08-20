@@ -38,10 +38,23 @@ if (Bun.argv[2] === "serve") {
     explicitPath: Bun.env[`${identity.environmentPrefix}STATE_PATH`],
     xdgDataHome: Bun.env.XDG_DATA_HOME,
   });
-  // client側停止期限。relayが伝えるserver側失効期限より短い場合だけ所有権を持つ。
-  const heartbeatStopMs = requiredNumber("OWNERSHIP_HEARTBEAT_STOP_MS");
-  // discoveryの定期再読の間隔。運用値は測定と検証専用環境から決めるため既定値を持たない。
-  const discoveryPollIntervalMs = requiredNumber("DISCOVERY_POLL_INTERVAL_MS");
+  /**
+   * client側停止期限。安全条件は「relayのserver側失効期限より短いこと」だけで、
+   * relayが`ownership.acquired`で通知する`heartbeatExpiryMs`と実行時に突き合わせ
+   * ている(ownership-connection.ts)。期限以上なら所有権を取らず停止するので、
+   * 既定値が合わない構成では黙って壊れず明示的に止まる。
+   *
+   * 既定の60秒はrelayの配備値(interval 30秒 / expiry 90秒)の間に置き、heartbeat
+   * 一回の取りこぼしを許容しつつ、失効まで30秒の余裕を残す。
+   */
+  const heartbeatStopMs =
+    requiredNumber("OWNERSHIP_HEARTBEAT_STOP_MS") ?? 60_000;
+  /**
+   * webhookを取りこぼした場合にGitHub・Linearの現在状態を読み直す間隔。安全性
+   * ではなくAPI呼び出し量と検知遅延の釣り合いなので、実測を待たず既定値を置く。
+   */
+  const discoveryPollIntervalMs =
+    requiredNumber("DISCOVERY_POLL_INTERVAL_MS") ?? 60_000;
   const tokenStore = bunSecretsDeviceTokenStore();
   const modelDefaults = createModelDefaultsStore(
     openServeLocalState(statePath),

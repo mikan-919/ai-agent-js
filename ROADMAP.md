@@ -162,12 +162,6 @@ packages/identity
 - ROADMAP.mdは設計中の論点に限って使い、実装タスクはGitHub IssueとLinearへ移す。
 - HANDOFF.mdは現在の設計セッションから再開するための情報だけを持つ。
 
-## 実装前に決めること
-
-- 承認済みの用途別外部操作を`packages/contracts`へ落とす具体的なmessage fieldとencoding
-- heartbeatと再試行の時間値、および資源上限を、固定版runtimeの測定と検証専用環境の実動作から決める
-- 決定事項をGitHub Issueへ分解し、最小構成で端から端まで成立させる最初のtracer bulletを承認する
-
 ## 設計を固める順序
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
@@ -176,4 +170,4 @@ packages/identity
 4. credential、認証、認可、token受け渡しを脅威モデルとともに定義する。device登録の詳細を除き、所有権接続と外部操作の境界は完了（[ADR 0005](./docs/adr/0005-connection-liveness-and-external-write-reconciliation.md)）。
 5. checkpoint、transcript、worker引き継ぎの保存・検索境界を定義する。完了（[ADR 0008](./docs/adr/0008-transcript-storage-and-search.md)）。人間向けの呼び出し口(CLI・Web UI)はissue #40で扱う。
 6. capability schemaと実行環境選択を定義する。完了（[ADR 0009](./docs/adr/0009-model-capability-schema-and-execution-environment.md)）。
-7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。
+7. 決定事項をGitHub Issueへ分解し、最初のtracer bulletを承認してから実装を開始する。完了（issue #28〜#54でv1の実装単位を一通り実装した）。

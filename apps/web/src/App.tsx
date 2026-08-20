@@ -5,6 +5,7 @@ import {
   GitPullRequest,
   Hammer,
   HelpCircle,
+  History,
   Loader2,
   MessageCircle,
   Plus,
@@ -29,6 +30,7 @@ import type {
   ModelDefaultsDto,
   ModelOption as ModelOptionContract,
   ServeConfig,
+  TranscriptEntry,
 } from "@mikan-919/oriel-contracts";
 import { identity } from "@mikan-919/oriel-identity";
 
@@ -179,6 +181,14 @@ const kindLabel: Record<Job["kind"], string> = {
   pr_response: "PR対応",
 };
 
+/**
+ * `/api/jobs`は稼働中のJobしか返さないので、ログ検索の当たりは終了済みJobが
+ * 大半になる。種別をnullにして「記録から開いたJob」として扱う。
+ */
+type SelectedJob = { kind: Job["kind"] | null } & Omit<Job, "kind">;
+
+const finishedJobLabel = "記録から開いたJob";
+
 const kindIcon: Record<
   Job["kind"],
   React.ComponentType<{ size?: number; className?: string }>
@@ -189,14 +199,6 @@ const kindIcon: Record<
   how_confirmation: Route,
   pr_response: GitPullRequest,
 };
-
-interface TranscriptEntry {
-  jobId: string;
-  sequence: number;
-  kind: string;
-  content: string;
-  createdAt: number;
-}
 
 interface ConversationEvent {
   key: string;
@@ -463,13 +465,13 @@ function ConversationView({
   conversation,
   conversationError,
 }: {
-  job: Job;
+  job: SelectedJob;
   csrfToken: string | null;
   onBack: () => void;
   conversation: ConversationEvent[];
   conversationError: string | null;
 }) {
-  const Icon = kindIcon[job.kind];
+  const Icon = job.kind === null ? History : kindIcon[job.kind];
   const tone = statusTone(job.status);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -510,12 +512,12 @@ function ConversationView({
           <Icon size={17} className="hidden md:block" />
           <div className="min-w-0">
             <p className="font-display text-base text-text">
-              {kindLabel[job.kind]}
+              {job.kind === null ? finishedJobLabel : kindLabel[job.kind]}
             </p>
             <p className="font-mono text-xs text-faint">{job.jobId}</p>
           </div>
           <div className="ml-auto flex items-center gap-3 font-mono text-xs text-muted">
-            {stoppableKinds.has(job.kind) && (
+            {job.kind !== null && stoppableKinds.has(job.kind) && (
               <button
                 type="button"
                 onClick={() => void stop()}
@@ -530,10 +532,16 @@ function ConversationView({
                 {stopping ? "停止中…" : "停止"}
               </button>
             )}
-            <span className="flex items-center gap-2">
-              <StatusDot tone={tone} />
-              {job.status ?? "unknown"}
-            </span>
+            {/* 一覧に無いJobの状態は`serve`が持っていないので、稼働中に見える
+                表示を作らず、記録を読んでいることだけを示す。 */}
+            {job.kind === null ? (
+              <span>記録のみ</span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <StatusDot tone={tone} />
+                {job.status ?? "unknown"}
+              </span>
+            )}
           </div>
         </div>
       </header>
@@ -557,12 +565,24 @@ function ConversationView({
                   読み込みに失敗しました: {conversationError}
                 </p>
               )}
-              {conversationError === null && conversation.length === 0 && (
-                <div className="flex h-[60vh] flex-col items-center justify-center gap-3 text-center text-muted">
-                  <Loader2 size={20} className="animate-spin text-faint" />
-                  <p className="text-sm">ログを待っています…</p>
-                </div>
-              )}
+              {conversationError === null &&
+                conversation.length === 0 &&
+                (job.kind === null ? (
+                  <div className="flex h-[60vh] flex-col items-center justify-center gap-3 text-center text-muted">
+                    <History size={20} className="text-faint" />
+                    {/* ponytail: 検索結果はlocalと他serveの記録を混ぜて返すため、
+                        他serveのJobもここへ来る。区別が要るなら検索結果に由来を
+                        持たせる。 */}
+                    <p className="text-sm">
+                      この端末にはこのJobのログがありません。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex h-[60vh] flex-col items-center justify-center gap-3 text-center text-muted">
+                    <Loader2 size={20} className="animate-spin text-faint" />
+                    <p className="text-sm">ログを待っています…</p>
+                  </div>
+                ))}
               {conversation.length > 0 && (
                 <ol className="flex flex-col gap-4">
                   {conversation.map((event) => (
@@ -1437,6 +1457,164 @@ function ConfigModal({
   );
 }
 
+const transcriptScopes = [
+  { value: "job", label: "このJob" },
+  { value: "local", label: "この端末" },
+  { value: "repository", label: "repository" },
+] as const;
+
+type TranscriptScope = (typeof transcriptScopes)[number]["value"];
+
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+
+  return debounced;
+}
+
+/** 検索結果の一行は、会話表示と同じ整形を通し、拾えない種別だけ生の内容へ落とす。 */
+function transcriptSnippet(entry: TranscriptEntry): string {
+  return parseTranscriptEvent(entry)?.text ?? entry.content;
+}
+
+/**
+ * transcriptの全文検索。`job`と`local`はこの`serve`のSQLiteだけで完結し、
+ * `repository`だけがrelay経由で同じrepositoryを担当する他の`serve`へ広がる。
+ */
+function TranscriptSearchResults({
+  query,
+  jobs,
+  selectedJobId,
+  onSelectJob,
+}: {
+  query: string;
+  jobs: Job[];
+  selectedJobId: string | null;
+  onSelectJob: (jobId: string) => void;
+}) {
+  const [scope, setScope] = useState<TranscriptScope>("local");
+  // Jobを選んでいないときにJob scopeを選ばせても結果が空になるだけなので、
+  // 同じ端末の範囲へ落とす。
+  const effectiveScope =
+    scope === "job" && selectedJobId === null ? "local" : scope;
+  const debouncedQuery = useDebounced(query.trim(), 250);
+  const results = useQuery({
+    queryKey: [
+      "transcript-search",
+      effectiveScope,
+      effectiveScope === "job" ? selectedJobId : null,
+      debouncedQuery,
+    ],
+    enabled: debouncedQuery !== "",
+    queryFn: async (): Promise<TranscriptEntry[]> => {
+      const params = new URLSearchParams({
+        scope: effectiveScope,
+        query: debouncedQuery,
+        limit: "50",
+      });
+
+      if (effectiveScope === "job" && selectedJobId !== null) {
+        params.set("jobId", selectedJobId);
+      }
+
+      const response = await fetch(`/api/transcripts?${params.toString()}`);
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(await response.json().catch(() => null)),
+        );
+      }
+
+      const body = (await response.json()) as { entries: TranscriptEntry[] };
+
+      return body.entries;
+    },
+  });
+  const entries = results.data ?? null;
+
+  if (debouncedQuery === "") {
+    return null;
+  }
+
+  return (
+    <section className="mt-4 border-t border-border pt-3">
+      <p className="px-2 pb-1.5 font-mono text-[11px] tracking-[0.15em] text-faint uppercase">
+        ログ検索
+      </p>
+
+      <div className="mx-2 mb-2 flex gap-1 rounded-lg border border-border bg-bg p-0.5">
+        {transcriptScopes.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => setScope(option.value)}
+            disabled={option.value === "job" && selectedJobId === null}
+            className={`flex-1 rounded-md px-1.5 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              effectiveScope === option.value
+                ? "bg-accent-soft text-accent"
+                : "text-muted hover:text-text"
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      {results.isPending && (
+        <p className="px-2 py-1.5 text-sm text-muted">検索中…</p>
+      )}
+      {results.isError && (
+        <p role="alert" className="px-2 py-1.5 text-sm text-fail">
+          {results.error.message}
+        </p>
+      )}
+      {entries !== null && entries.length === 0 && (
+        <p className="px-2 py-1.5 text-sm text-muted">
+          一致するログはありません。
+        </p>
+      )}
+
+      <ul className="flex flex-col gap-0.5">
+        {(entries ?? []).map((entry) => {
+          const job = jobs.find((candidate) => candidate.jobId === entry.jobId);
+
+          return (
+            <li key={`${entry.jobId}-${entry.sequence}`}>
+              <button
+                type="button"
+                onClick={() => onSelectJob(entry.jobId)}
+                className="w-full rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-surface-hover"
+              >
+                <span className="flex items-baseline gap-2">
+                  <span className="truncate text-xs text-muted">
+                    {job === undefined ? finishedJobLabel : kindLabel[job.kind]}
+                  </span>
+                  <span className="ml-auto shrink-0 font-mono text-[10px] text-faint">
+                    {new Date(entry.createdAt).toLocaleString([], {
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </span>
+                <span className="mt-0.5 line-clamp-2 text-[13px] leading-snug break-all text-text">
+                  {transcriptSnippet(entry)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export function App() {
   const [csrfToken, setCsrfToken] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[] | null>(null);
@@ -1580,7 +1758,14 @@ export function App() {
     setConversationError(null);
   }
 
-  const selectedJob = jobs?.find((job) => job.jobId === selectedJobId) ?? null;
+  const selectedJob: SelectedJob | null =
+    selectedJobId === null
+      ? null
+      : (jobs?.find((job) => job.jobId === selectedJobId) ?? {
+          jobId: selectedJobId,
+          kind: null,
+          status: null,
+        });
   const filteredJobs = (jobs ?? []).filter((job) => {
     const needle = filterQuery.trim().toLowerCase();
 
@@ -1632,7 +1817,7 @@ export function App() {
               type="text"
               value={filterQuery}
               onChange={(event) => setFilterQuery(event.target.value)}
-              placeholder="Jobを検索"
+              placeholder="Jobとログを検索"
               className="w-full rounded-lg border border-border bg-bg py-1.5 pr-3 pl-8 text-sm text-text placeholder:text-faint transition-colors focus:border-accent focus:outline-none"
             />
           </div>
@@ -1701,6 +1886,13 @@ export function App() {
               );
             })}
           </ul>
+
+          <TranscriptSearchResults
+            query={filterQuery}
+            jobs={jobs ?? []}
+            selectedJobId={selectedJobId}
+            onSelectJob={selectJob}
+          />
         </nav>
 
         <div className="flex items-center gap-2 border-t border-border px-4 py-3 font-mono text-xs text-faint">
