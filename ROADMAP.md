@@ -162,10 +162,6 @@ packages/identity
 - ROADMAP.mdは設計中の論点に限って使い、実装タスクはGitHub IssueとLinearへ移す。
 - HANDOFF.mdは現在の設計セッションから再開するための情報だけを持つ。
 
-## 実装前に決めること
-
-- heartbeatと再試行の時間値、および資源上限を、固定版runtimeの測定と検証専用環境の実動作から決める（[issue #55](https://github.com/mikan-919/oriel/issues/55)）
-
 ## 設計を固める順序
 
 1. コンポーネントの責務と信頼境界を図とinterfaceで定義する。
