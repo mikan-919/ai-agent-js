@@ -1,3 +1,5 @@
+import { identity } from "@mikan-919/oriel-identity";
+
 import {
   approvalFingerprint,
   canonicalBranchName,
@@ -184,10 +186,15 @@ function jobIdPrefix(repositoryId: number, githubIssueNumber: number): string {
  *
  * routing部分のLinear identifierは変わりうるため、branch名の先頭では判定せず、
  * GitHub issue numberの位置だけで同じWorkflowを見分ける。
+ *
+ * 接頭辞は`canonicalBranchName`が書くものと同じ正本(`identity`)から取る。ここで
+ * 直書きすると、識別子を変えたときにこの判定が全ブランチをfalseへ倒し、
+ * `workflowIsFenced`が隔離済みとして通してしまう(fail open)。
  */
 function belongsToWorkflow(branch: string, githubIssueNumber: number): boolean {
   return (
-    branch.startsWith("oriel/") && branch.includes(`-gh-${githubIssueNumber}-`)
+    branch.startsWith(`${identity.codeName}/`) &&
+    branch.includes(`-gh-${githubIssueNumber}-`)
   );
 }
 

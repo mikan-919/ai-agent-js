@@ -20,6 +20,7 @@ import {
 import { createProxyStreamFn, type ModelStreamChannel } from "./model-channel";
 import { createPrResponseAgent } from "./pr-response-agent";
 import { runPrResponseWorker } from "./pr-response";
+import { runCommand } from "./run-command";
 import { createWhatConfirmationAgent } from "./what-confirmation-agent";
 import { createWhatConfirmationTools } from "./what-confirmation-tools";
 import { createWorktreeTools } from "./worktree-tools";
@@ -40,6 +41,14 @@ function argument(name: string): string {
   return value;
 }
 
+function parseLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    return {};
+  }
+}
+
 const decoder = new TextDecoder();
 let buffer = "";
 const router = createHarnessMessageRouter();
@@ -53,7 +62,10 @@ void (async () => {
 
     for (const line of lines) {
       if (line !== "") {
-        router.deliver(JSON.parse(line) as unknown);
+        // `serve`側のparseLineと同じく、不正な行でstreamを殺さない。ここでthrow
+        // するとvoidされたこのIIFEがunhandled rejectionになり、stdinの読み取り
+        // だけが止まってrouter.close()も呼ばれず、Agentが来ない応答を待ち続ける。
+        router.deliver(parseLine(line));
       }
     }
   }
@@ -71,24 +83,6 @@ function write(message: unknown): number | Promise<number> {
 }
 
 const mode = Bun.argv.includes("--mode") ? argument("mode") : "issue";
-
-const runCommand = async (command: string[], cwd: string) => {
-  const [executable, ...args] = command;
-  const spawned = Bun.spawn([executable!, ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    // `serve`がharnessへ渡した時点でcredentialは含まれていない。
-    env: { ...Bun.env },
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(spawned.stdout).text(),
-    new Response(spawned.stderr).text(),
-    spawned.exited,
-  ]);
-
-  return { ok: exitCode === 0, output: `${stdout}${stderr}` };
-};
 
 if (mode === "implementation") {
   // 封印済みworktreeと承認済みWHAT/HOWだけをstart eventとして受け取る。

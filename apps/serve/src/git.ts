@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,15 +58,35 @@ async function spawnGit(args: string[], cwd?: string): Promise<GitResult> {
   return { ok: exitCode === 0, stdout, stderr };
 }
 
-/** unix socketを作れる領域。v1の対象はLinuxとWSL2とする。 */
-function socketDirectory(): string {
-  for (const candidate of [Bun.env.XDG_RUNTIME_DIR, "/run/user", "/tmp"]) {
-    if (candidate !== undefined && existsSync(candidate)) {
+/**
+ * unix socketを作れる領域。v1の対象はLinuxとWSL2とする。
+ *
+ * `/run/user`そのものはroot所有で一般userには書けない。存在検査だけで選ぶと、
+ * `XDG_RUNTIME_DIR`が無い構成(systemdを動かさないWSL2)で直後の`mkdtemp`が
+ * EACCESになり、credentialを使うGit操作が一律で落ちる。user固有のsubdirectory
+ * まで含めて候補にし、実際に書けるものだけを選ぶ。
+ */
+export function socketDirectory(): string {
+  for (const candidate of [
+    Bun.env.XDG_RUNTIME_DIR,
+    `/run/user/${process.getuid?.() ?? ""}`,
+  ]) {
+    if (candidate !== undefined && isWritableDirectory(candidate)) {
       return candidate;
     }
   }
 
   return tmpdir();
+}
+
+function isWritableDirectory(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK | constants.X_OK);
+
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -347,6 +347,22 @@ test("the Workflow-wide fence only admits the current approval fingerprint", asy
   ).toBe(false);
   // 現在値を読めない場合はfail closedにする。
   expect(fenced(null)).toBe(false);
+
+  // 隔離判定は`canonicalBranchName`が書いた名前をそのまま読めなければならない。
+  // 接頭辞を直書きすると、識別子を変えたときにこの判定だけが全ブランチをfalseへ
+  // 倒し、隔離済みとして通してしまう(fail open)ため、writerの出力で検証する。
+  expect(
+    fenced({
+      jobKeys: [],
+      branchKeys: [
+        `${repositoryId}/${canonicalBranchName({
+          linearIdentifier: "ENG-9",
+          githubIssueNumber: 28,
+          approvalFingerprint: otherFingerprint,
+        })}`,
+      ],
+    }),
+  ).toBe(false);
 });
 
 test("a canonical ref that cannot be read is neither created nor adopted", async () => {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { expect, test } from "bun:test";
 
-import { runGit, withOneTimeCredentialHelper } from "./git";
+import { runGit, socketDirectory, withOneTimeCredentialHelper } from "./git";
 
 async function withDirectory<T>(run: (path: string) => Promise<T>) {
   const directory = await mkdtemp(join(tmpdir(), "oriel-git-"));
@@ -15,6 +15,24 @@ async function withDirectory<T>(run: (path: string) => Promise<T>) {
     await rm(directory, { force: true, recursive: true });
   }
 }
+
+test("the credential helper socket directory is always writable", async () => {
+  // `XDG_RUNTIME_DIR`が無い構成(systemdを動かさないWSL2)でも、root所有で書けない
+  // `/run/user`を選ばず、mkdtempが通る領域へ落ちること。
+  const original = Bun.env.XDG_RUNTIME_DIR;
+
+  delete Bun.env.XDG_RUNTIME_DIR;
+
+  try {
+    const directory = await mkdtemp(join(socketDirectory(), "oriel-socket-"));
+
+    await rm(directory, { force: true, recursive: true });
+  } finally {
+    if (original !== undefined) {
+      Bun.env.XDG_RUNTIME_DIR = original;
+    }
+  }
+});
 
 test("system Git runs from an argument array and reports failures", async () => {
   await withDirectory(async (directory) => {
