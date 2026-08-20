@@ -812,7 +812,7 @@ function NewJobModal({
               </Field>
               <label className="flex items-center gap-2 text-sm text-muted">
                 <input name="command" type="checkbox" />
-                この回答でHOWの確定を求める(/oriel confirm相当)
+                この回答でHOWの確定を求める(/{identity.cliName} confirm相当)
               </label>
             </>
           )}

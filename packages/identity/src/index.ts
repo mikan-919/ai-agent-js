@@ -20,3 +20,23 @@ export const identity = {
 export function userAgent(version: string): string {
   return `${identity.codeName}/${version}`;
 }
+
+/** HOWの確定を求める明示的な指示。 */
+export const confirmCommandPattern = new RegExp(
+  String.raw`^\s*/${identity.cliName}\s+confirm\b`,
+  "i",
+);
+
+/** 明示的な指示ではない、単なる呼びかけ。 */
+export const mentionPattern = new RegExp(
+  String.raw`@${identity.codeName}\b`,
+  "i",
+);
+
+/**
+ * 外部commentへ埋める操作IDのmarker。結果不明の外部書き込みを、現在値の中から
+ * 同じ操作のものだと見分けるために使う。
+ */
+export function operationMarker(operationId: string): string {
+  return `<!-- ${identity.codeName}-operation:${operationId} -->`;
+}

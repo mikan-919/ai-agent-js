@@ -11,6 +11,11 @@
  * ものに限る。WHAT確定(#33)がTriageのLinear issueを作った後、人間がTriageから
  * Todoへ移すまでの間だけがHOW対話の対象期間であり、Agentはその遷移を起こせない。
  */
+import {
+  confirmCommandPattern,
+  mentionPattern,
+} from "@mikan-919/oriel-identity";
+
 export interface HowTriggerLinearComment {
   id: string;
   body: string;
@@ -36,12 +41,9 @@ export interface HowTriggerPorts {
 
 export interface HowTrigger {
   commentId: string;
-  /** `/oriel confirm`のような明示的な指示か、単なるmentionか。 */
+  /** 確定を求める明示的な指示か、単なるmentionか。 */
   command: boolean;
 }
-
-const commandPattern = /^\s*\/oriel\s+confirm\b/i;
-const mentionPattern = /@oriel\b/i;
 
 /**
  * 最新commentがtriggerかどうかを判定する。actor(harness)自身の最新commentが
@@ -60,7 +62,7 @@ export function detectHowTrigger(
     return null;
   }
 
-  const command = commandPattern.test(latest.body);
+  const command = confirmCommandPattern.test(latest.body);
 
   if (command || mentionPattern.test(latest.body)) {
     return { commentId: latest.id, command };

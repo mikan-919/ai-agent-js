@@ -40,7 +40,9 @@ jobs:
 
       - name: Deploy relay to staging
         working-directory: apps/relay
-        run: bunx wrangler deploy --env staging | tee /tmp/wrangler-deploy.log
+        run: |
+          bunx wrangler deploy --env staging \
+            --var "RELAY_VERSION:${GITHUB_REF_NAME#v}" | tee /tmp/wrangler-deploy.log
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

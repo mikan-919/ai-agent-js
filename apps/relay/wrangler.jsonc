@@ -19,7 +19,9 @@
     "GITHUB_APP_ID": "4632357",
     "GITHUB_APP_JWT_LIFETIME_SECONDS": "540",
     "RELAY_ORIGIN": "https://oriel-relay.mikan-919.workers.dev",
-    "RELAY_VERSION": "0.1.5",
+    // 配布物versionの正本は root package.json とする(ROADMAP.md)。deployは
+    // `--var RELAY_VERSION:<version>`で上書きし、ここは開発時の値に留める。
+    "RELAY_VERSION": "0.0.0-dev",
     "DEVICE_CODE_EXPIRY_MS": "300000",
     "DEVICE_CANCELLATION_EXPIRY_MS": "300000",
     "OWNERSHIP_HEARTBEAT_INTERVAL_MS": "30000",
