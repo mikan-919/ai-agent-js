@@ -1037,6 +1037,12 @@ export function startServeHttpServer({
     // 省略時は空文字列。job scopeでは、あるJobの全ログを時系列に取り出す
     // 「一覧」としても`search`を使い、専用の一覧経路を別に持たない。
     const query = context.req.query("query") ?? "";
+    /**
+     * Limit: 既定50件 / 上限200件
+     * Source: 既定値。requester・target specification・実測のいずれでもない。
+     * Required For: 1 requestあたりのFTS5走査とrelay中継の量を抑えること。
+     *   Web UI側の対応する値は`apps/web/src/limits.ts`にある。
+     */
     const limit = Number(context.req.query("limit") ?? 50);
 
     if (
