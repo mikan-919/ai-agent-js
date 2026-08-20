@@ -76,8 +76,8 @@ export interface ServeInstanceShared {
   jobRegistry: JobRegistry;
   tokenStore: ReturnType<typeof bunSecretsDeviceTokenStore>;
   statePath: string;
-  heartbeatStopMs?: number;
-  discoveryPollIntervalMs?: number;
+  heartbeatStopMs: number;
+  discoveryPollIntervalMs: number;
   modelDefaults: ModelDefaultsStore;
 }
 
@@ -175,8 +175,7 @@ export function buildServeInstance(
     environment !== undefined &&
     repositoryId !== undefined &&
     repositoryOwner !== undefined &&
-    repositoryName !== undefined &&
-    heartbeatStopMs !== undefined;
+    repositoryName !== undefined;
   const implementationReady =
     conversationReady &&
     repositoryId !== undefined &&
@@ -576,7 +575,6 @@ export function buildServeInstance(
     implementationReady &&
     startImplementation !== undefined &&
     relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined &&
     linearTeamId !== undefined
       ? createDiscoveryLoop({
           createPorts: async () => {
@@ -619,7 +617,6 @@ export function buildServeInstance(
     whatConfirmationReady &&
     startWhatConfirmation !== undefined &&
     relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined &&
     linearTeamId !== undefined
       ? createWhatTriggerLoop({
           createPorts: async () => {
@@ -673,8 +670,7 @@ export function buildServeInstance(
   const howTriggerLoop =
     howConfirmationReady &&
     startHowConfirmation !== undefined &&
-    relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined
+    relayDeviceClient !== undefined
       ? createHowTriggerLoop({
           createPorts: async () => {
             const octokit = await createInstallationOctokitResolver({
@@ -727,9 +723,7 @@ export function buildServeInstance(
    * Doneへ反映する。webhookは起床通知に過ぎず、pollingが最終的な正しさを担う。
    */
   const prMergeLoop =
-    implementationReady &&
-    relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined
+    implementationReady && relayDeviceClient !== undefined
       ? (() => {
           const database = openServeLocalState(statePath);
 
@@ -776,9 +770,7 @@ export function buildServeInstance(
    * credentialは要求しない(このJobはLinearを一切触らない)。
    */
   const prResponseLoop =
-    implementationReady &&
-    relayDeviceClient !== undefined &&
-    discoveryPollIntervalMs !== undefined
+    implementationReady && relayDeviceClient !== undefined
       ? (() => {
           const database = openServeLocalState(statePath);
           const checkFailures = createPrResponseCheckFailureStore(database);

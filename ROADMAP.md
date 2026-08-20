@@ -164,7 +164,7 @@ packages/identity
 
 ## 実装前に決めること
 
-- heartbeatと再試行の時間値、および資源上限を、固定版runtimeの測定と検証専用環境の実動作から決める（[issue #55](https://github.com/mikan-919/oriel/issues/55)）
+- build、test、外部操作の再試行回数と資源上限を、固定版runtimeの測定と検証専用環境の実動作から決める（[issue #55](https://github.com/mikan-919/oriel/issues/55)）。heartbeatとpollingの時間値は既定値を持ち、根拠は[docs/research/connection-liveness.md](./docs/research/connection-liveness.md)を正本とする。
 
 ## 設計を固める順序
 

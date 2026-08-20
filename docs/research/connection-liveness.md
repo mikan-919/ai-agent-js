@@ -13,7 +13,23 @@ Cloudflareは、端末喪失や無通信のnetwork partitionを一定時間内�
 3. Durable Objectは、新しい取得要求またはAlarm処理時に`getWebSocketAutoResponseTimestamp(ws)`を確認する。期限を過ぎた接続はattachmentを失効状態へ上書きしてからcloseし、新しい取得では無視する。
 4. 旧接続から後着した確認要求は、失効済みattachmentまたは取得ID不一致として拒否する。新しい外部操作は、同じ接続上の直前確認に成功した場合だけ送る。
 
-この方式は安全側に停止できるが、Cloudflareがmessage delivery、Alarm発火、切断検知の最大遅延を保証していないため、failover完了時間のplatform保証にはならない。heartbeat間隔、client側停止期限、server側失効期限は実装時の測定と検証専用環境での実動作確認から決め、server側期限をclient側期限より長くする。ここでは根拠のない秒数を置かない。
+この方式は安全側に停止できるが、Cloudflareがmessage delivery、Alarm発火、切断検知の最大遅延を保証していないため、failover完了時間のplatform保証にはならない。
+
+## 期限の運用値
+
+安全条件は「server側失効期限をclient側停止期限より長くする」ことだけであり、この条件は数値の正しさではなくコードが実行時に守る。relayは`ownership.acquired`でheartbeat間隔とserver側失効期限を通知し、`serve`は自分の停止期限が失効期限以上なら所有権を取らずに停止する（`apps/serve/src/ownership-connection.ts`）。したがって既定値が構成に合わない場合、黙って所有権を持ち続けるのではなく明示的に停止する。
+
+この検査があるため、既定値の決定に実動作測定を先行させない。現在の既定値は次の通り。
+
+| 値 | 既定 | 置き場所 | 根拠 |
+| --- | --- | --- | --- |
+| heartbeat間隔 | 30秒 | relay `wrangler.jsonc` | relayが接続ごとに通知する。`serve`は設定しない |
+| server側失効期限 | 90秒 | relay `wrangler.jsonc` | 間隔の3倍。heartbeat 2回の取りこぼしまで接続を維持する |
+| client側停止期限 | 60秒 | `serve`の既定値 | 間隔と失効期限の間。取りこぼし1回を許容し、失効まで30秒の余裕を残す |
+
+`serve`側は`ORIEL_OWNERSHIP_HEARTBEAT_STOP_MS`で上書きできるが、未設定でも起動する。以前は環境変数を必須にしていたが、未設定の`serve`はJobとdiscoveryを配線しないまま起動に成功するため、設定漏れが「動いているのに何も起きない」状態として現れていた。上表の既定値はその失敗様式を除くためのものであり、検証専用環境での実測後に置き換える。
+
+なお失効までの実時間はCloudflareのAlarm発火遅延に依存し、この表の値では上限を保証できない。停止の安全性はclient側の自発停止が担い、server側失効はstale接続の掃除に留まる。
 
 ## Cloudflareが保証していること
 
