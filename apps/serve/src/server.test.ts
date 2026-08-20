@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { expect, test } from "bun:test";
 
 import type { TranscriptEntry } from "@mikan-919/oriel-contracts";
@@ -30,6 +34,57 @@ async function withSession(origin: string) {
     csrf: /content="([^"]+)"/.exec(html)?.[1] ?? "",
   };
 }
+
+test("the device registration page takes its palette from the Web UI stylesheet", async () => {
+  const webDistRoot = mkdtempSync(join(tmpdir(), "oriel-web-dist-"));
+
+  writeFileSync(
+    join(webDistRoot, "index.html"),
+    `<!doctype html><html><head>
+       <script type="module" crossorigin src="/app/assets/index-abc.js"></script>
+       <link rel="stylesheet" crossorigin href="/app/assets/index-abc.css">
+     </head><body></body></html>`,
+  );
+
+  const httpServer = startServeHttpServer({
+    createDeviceRegistration: fakeDeviceRegistration,
+    webDistRoot,
+  });
+
+  try {
+    const origin = httpServer.readinessUrl.origin;
+    const html = await (
+      await fetch(`${origin}/`, { headers: { Origin: origin } })
+    ).text();
+
+    expect(html).toContain(
+      '<link rel="stylesheet" href="/app/assets/index-abc.css" />',
+    );
+    // パレットの正本はapps/web/src/index.cssの@themeだけとする。
+    expect(html).not.toMatch(/#[0-9a-f]{6}\b/i);
+    expect(html).toContain("var(--color-sidebar)");
+  } finally {
+    httpServer.close();
+    rmSync(webDistRoot, { recursive: true, force: true });
+  }
+});
+
+test("the device registration page still renders without a built Web UI", async () => {
+  const httpServer = startServeHttpServer({
+    createDeviceRegistration: fakeDeviceRegistration,
+    webDistRoot: join(tmpdir(), "oriel-web-dist-missing"),
+  });
+
+  try {
+    const origin = httpServer.readinessUrl.origin;
+    const response = await fetch(`${origin}/`, { headers: { Origin: origin } });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain('<link rel="stylesheet"');
+  } finally {
+    httpServer.close();
+  }
+});
 
 test("/api/transcripts is unavailable without configured search", async () => {
   const httpServer = startServeHttpServer({
