@@ -147,6 +147,10 @@ function readAuditConfig(request: Request): OwnershipAuditConfig | null {
     : null;
 }
 
+function ownershipKind(value: string | null): "job" | "branch" | null {
+  return value === "job" || value === "branch" ? value : null;
+}
+
 function toDeviceRecord(row: DeviceRow): DeviceRecord {
   return {
     deviceId: row.device_id,
@@ -478,7 +482,8 @@ export class DeviceRegistryObject extends DurableObject {
 
     const url = new URL(request.url);
     const deviceTokenHash = request.headers.get("x-device-token-hash") ?? "";
-    const kind = url.searchParams.get("kind") === "branch" ? "branch" : "job";
+    // 未知のkindをjobへ丸めない。ブランチ排他の要求が黙ってJob取得になるため。
+    const kind = ownershipKind(url.searchParams.get("kind"));
     const key = url.searchParams.get("key") ?? "";
     const parentLeaseId = url.searchParams.get("parent_lease_id");
     const device = this.authenticateDevice(deviceTokenHash);
@@ -486,6 +491,7 @@ export class DeviceRegistryObject extends DurableObject {
 
     if (
       request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
+      kind === null ||
       key === "" ||
       device === null ||
       audit === null

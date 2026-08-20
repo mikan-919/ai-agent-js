@@ -231,7 +231,12 @@ export function createRelayApp({
       parameters.get("state") ?? "",
     );
 
-    if (started === null || started.expiresAt < now()) {
+    // 署名済みstateを信じ切らず、戻し先がloopbackであることを多層防御で再確認する。
+    if (
+      started === null ||
+      started.expiresAt < now() ||
+      !isLoopbackRedirect(started.redirectUri)
+    ) {
       return context.text("Bad Request", 400);
     }
 

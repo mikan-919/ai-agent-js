@@ -10,7 +10,7 @@ import {
   ownershipHeartbeatResponse,
 } from "@mikan-919/oriel-contracts";
 
-import { sha256Base64Url, sha256Hex } from "./crypto";
+import { sha256Base64Url, sha256Hex, signPayload } from "./crypto";
 import type { DeviceRegistryObject } from "./device-registry-object";
 import type { RelayGitHubClient } from "./github";
 import { createRelayApp } from "./relay";
@@ -210,13 +210,18 @@ function openOwnership(
   app: ReturnType<typeof relay>,
   input: {
     deviceToken: string;
-    kind: "job" | "branch";
+    /** 未知のkindを拒むことも確かめるため、型ではなくrelay側で弾く。 */
+    kind?: string;
     key: string;
     parentLeaseId?: string;
   },
 ) {
   const url = new URL("https://relay.test/ownership");
-  url.searchParams.set("kind", input.kind);
+
+  if (input.kind !== undefined) {
+    url.searchParams.set("kind", input.kind);
+  }
+
   url.searchParams.set("key", input.key);
 
   if (input.parentLeaseId !== undefined) {
@@ -294,6 +299,30 @@ describe("device registration through the relay", () => {
     url.searchParams.set("code_challenge_method", "plain");
 
     expect((await app.fetch(new Request(url))).status).toBe(400);
+  });
+
+  it("refuses a callback whose signed state carries a non-loopback redirect target", async () => {
+    const app = relay();
+    // 署名は正しいがredirectUriがloopbackでないstate。多層防御の層だけを突く。
+    const forged = await signPayload(signingKey, {
+      codeChallenge: await sha256Base64Url(codeVerifier),
+      state: "serve-state",
+      purpose: "registration",
+      deviceId: null,
+      installationId,
+      repositoryId: repository.id,
+      redirectUri: "https://evil.test/device/callback",
+      expiresAt: Date.now() + 60_000,
+    });
+    const callbackUrl = new URL("https://relay.test/device/authorize/callback");
+
+    callbackUrl.searchParams.set("code", adminCode);
+    callbackUrl.searchParams.set("state", forged);
+
+    const response = await app.fetch(new Request(callbackUrl));
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
   });
 
   it("exchanges the one-time code for a device token bound to the repository", async () => {
@@ -812,6 +841,34 @@ describe("ownership connections on the relay", () => {
         })
       ).status,
     ).toBe(401);
+  });
+
+  it("refuses an ownership connection whose kind is unknown or missing", async () => {
+    const app = relay();
+    const registered = await registerDevice(app, "serve-state");
+
+    for (const kind of [undefined, "", "Branch", "worktree"]) {
+      expect(
+        (
+          await openOwnership(app, {
+            deviceToken: registered.deviceToken,
+            kind,
+            key: "job-1",
+          })
+        ).status,
+      ).toBe(401);
+    }
+
+    // 既知のkindはこれまでどおり受理する。
+    expect(
+      (
+        await openOwnership(app, {
+          deviceToken: registered.deviceToken,
+          kind: "job",
+          key: "job-1",
+        })
+      ).status,
+    ).toBe(101);
   });
 
   it("closes the notification subscription of a revoked device without treating it as ownership", async () => {

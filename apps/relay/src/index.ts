@@ -62,7 +62,10 @@ export default {
     const app = createRelayApp({
       github: createGitHubClient({
         clientId: env.GITHUB_CLIENT_ID,
-        clientSecret: env.GITHUB_CLIENT_SECRET,
+        clientSecret: requiredSecret(
+          env.GITHUB_CLIENT_SECRET,
+          "GITHUB_CLIENT_SECRET",
+        ),
         userAgent: userAgent(env.RELAY_VERSION),
         appId: env.GITHUB_APP_ID,
         privateKeyPem: env.GITHUB_APP_PRIVATE_KEY,
@@ -72,7 +75,7 @@ export default {
         ),
       }),
       deviceRegistry: env.DEVICE_REGISTRY,
-      signingKey: env.RELAY_SIGNING_KEY,
+      signingKey: requiredSecret(env.RELAY_SIGNING_KEY, "RELAY_SIGNING_KEY"),
       relayOrigin: env.RELAY_ORIGIN,
       codeExpiryMs: requiredPositiveInteger(
         env.DEVICE_CODE_EXPIRY_MS,
