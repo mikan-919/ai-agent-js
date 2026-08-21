@@ -1,6 +1,7 @@
 import type { GitHubRepository } from "@mikan-919/oriel-contracts";
 import type { Octokit } from "@octokit/rest";
 
+import { onAbort } from "./abort-signal";
 import { startIssueCommentRuntime } from "./issue-comment-runtime";
 import type { RelayOwnershipConnection } from "./ownership-connection";
 
@@ -67,14 +68,19 @@ export function startHarnessWorker({
   );
   const stopHarness = () => harness.kill();
 
-  ownership.stopSignal.addEventListener("abort", stopHarness, { once: true });
+  onAbort(ownership.stopSignal, stopHarness);
 
   const serving = runtime.serveHarnessIssueConversation(
     harness.stdout,
     new WritableStream<Uint8Array>({
       write(chunk) {
-        harness.stdin.write(chunk);
-        harness.stdin.flush();
+        try {
+          harness.stdin.write(chunk);
+          harness.stdin.flush();
+        } catch {
+          // harnessが既に終了している場合、書き込みの失敗はabort/interrupt
+          // 側が扱う。ここで投げるとJobを不必要に異常終了させる。
+        }
       },
       close() {
         harness.stdin.end();

@@ -402,6 +402,37 @@ test(
 );
 
 test(
+  "ownership already lost before the worker starts still lets it finish",
+  async () => {
+    await withOpenPullRequest(async (context) => {
+      const stopped = new AbortController();
+
+      stopped.abort();
+
+      const worker = started(
+        await startPrResponseWorker(
+          workerOptions(context, {
+            ownership: ownership(true, stopped.signal),
+          }),
+        ),
+      );
+
+      try {
+        // 開始前に既に失効した所有権でも、spawnしたharnessが誰にも
+        // 止められず`finished`が永久に解決しないことがあってはならない。
+        await worker.finished;
+
+        expect(worker.jobStatus()).toBe("interrupted");
+        expect(await remoteTip(context)).toContain(context.canonicalOid);
+      } finally {
+        await worker.close();
+      }
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
   "a harness that exits abnormally after a completed checkpoint is not treated as done",
   async () => {
     // 一度成功したcheckpointは遠隔の先端を動かすため、実行ごとに開き直す。
