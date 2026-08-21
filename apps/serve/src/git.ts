@@ -3,6 +3,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { identity } from "@mikan-919/oriel-identity";
+
 export interface GitResult {
   ok: boolean;
   stdout: string;
@@ -101,12 +103,12 @@ export async function withOneTimeCredentialHelper<T>(
 ): Promise<T> {
   // unix socketを作れる領域に置く。v1の対象はLinuxとWSL2とする。
   const directory = await mkdtemp(
-    join(socketDirectory(), "oriel-git-credential-"),
+    join(socketDirectory(), `${identity.codeName}-git-credential-`),
   );
   await chmod(directory, 0o700);
 
   const socketPath = join(directory, "credential.sock");
-  const helperPath = join(directory, "git-credential-oriel");
+  const helperPath = join(directory, `git-credential-${identity.codeName}`);
   let answered = false;
   const server = Bun.serve({
     unix: socketPath,

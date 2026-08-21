@@ -8,6 +8,7 @@ import type {
   LinearCommentRejectedEvent,
   LinearCommentRequest,
 } from "@mikan-919/oriel-contracts";
+import { operationMarker } from "@mikan-919/oriel-identity";
 import type { Database } from "bun:sqlite";
 
 import type { JobOwnershipVerifier } from "./issue-comments";
@@ -765,12 +766,8 @@ function reconciliationRequired(
   };
 }
 
-function operationMarker(operation: LinearCommentOutboxOperation) {
-  return `<!-- oriel-operation:${operation.operationId} -->`;
-}
-
 function commentBody(operation: LinearCommentOutboxOperation) {
-  return `${operation.body}\n\n${operationMarker(operation)}`;
+  return `${operation.body}\n\n${operationMarker(operation.operationId)}`;
 }
 
 function expectedBodyDigest(operation: LinearCommentOutboxOperation) {

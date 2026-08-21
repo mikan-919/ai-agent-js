@@ -8,6 +8,11 @@
  * 判定する。「既に応答済みか」は、harnessの応答自体がGitHub上へ残す事実
  * (actor自身の最新comment)から判定し、別の正本を持たない。
  */
+import {
+  confirmCommandPattern,
+  mentionPattern,
+} from "@mikan-919/oriel-identity";
+
 export interface WhatTriggerPorts {
   listOpenIssues(): Promise<{ number: number; url: string }[] | null>;
   listIssueComments(
@@ -22,12 +27,9 @@ export interface WhatTriggerPorts {
 
 export interface WhatTrigger {
   commentId: number;
-  /** `/oriel confirm`のような明示的な指示か、単なるmentionか。 */
+  /** 確定を求める明示的な指示か、単なるmentionか。 */
   command: boolean;
 }
-
-const commandPattern = /^\s*\/oriel\s+confirm\b/i;
-const mentionPattern = /@oriel\b/i;
 
 /**
  * 最新commentがtriggerかどうかを判定する。actor(harness)自身の最新commentが
@@ -43,7 +45,7 @@ export function detectWhatTrigger(
     return null;
   }
 
-  const command = commandPattern.test(latest.body);
+  const command = confirmCommandPattern.test(latest.body);
 
   if (command || mentionPattern.test(latest.body)) {
     return { commentId: latest.id, command };

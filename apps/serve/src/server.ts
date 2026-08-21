@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -206,7 +208,25 @@ function newSessionSecrets() {
   };
 }
 
-function shellHtml(csrfToken: string): string {
+/**
+ * 登録画面のパレットとfontは、Web UIのデザイントークンだけを正本にする。
+ * ビルド済みSPAのstylesheetを読み、`@theme`が定義するCSS変数をそのまま使う。
+ * `dist/web`が無い開発時はここもstyleを持たないが、その状況では`/app`自体が
+ * 配信できないため、登録画面だけを別に飾らない。
+ */
+function webStylesheetHref(webDistRoot: string): string | null {
+  try {
+    return (
+      /<link[^>]*\shref="([^"]+\.css)"/.exec(
+        readFileSync(join(webDistRoot, "index.html"), "utf8"),
+      )?.[1] ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function shellHtml(csrfToken: string, stylesheetHref: string | null): string {
   return `<!doctype html>
 <html lang="ja">
   <head>
@@ -214,42 +234,39 @@ function shellHtml(csrfToken: string): string {
     <meta name="${identity.codeName}-csrf" content="${csrfToken}" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>${identity.displayName}</title>
+    ${stylesheetHref === null ? "" : `<link rel="stylesheet" href="${stylesheetHref}" />`}
     <style>
-      :root { color-scheme: dark; }
       body {
         margin: 0;
         min-height: 100dvh;
         display: flex;
         align-items: center;
         justify-content: center;
-        background: #201b16;
-        color: #ede4d6;
-        font-family: ui-sans-serif, system-ui, sans-serif;
         padding: 24px;
       }
       .card {
         width: 100%;
         max-width: 440px;
-        border: 1px solid #3c332a;
-        background: #2b241d;
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
         padding: 32px;
         border-radius: 16px;
         box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
       }
       h1 {
         margin: 0 0 4px;
-        font-family: Georgia, "Times New Roman", serif;
+        font-family: var(--font-display);
         font-size: 22px;
         font-weight: 500;
         letter-spacing: -0.01em;
       }
       .eyebrow {
         margin: 0 0 24px;
-        font-family: ui-monospace, monospace;
+        font-family: var(--font-mono);
         font-size: 11px;
         letter-spacing: 0.2em;
         text-transform: uppercase;
-        color: #6f6255;
+        color: var(--color-faint);
       }
       button {
         font: inherit;
@@ -259,20 +276,20 @@ function shellHtml(csrfToken: string): string {
       }
       .gate {
         border: none;
-        background: #d97757;
-        color: #17130f;
+        background: var(--color-accent);
+        color: var(--color-sidebar);
         padding: 10px 16px;
         font-weight: 500;
       }
       .gate:hover {
-        background: #e28a6c;
+        background: var(--color-accent-hover);
       }
       select,
       #discover {
         font: inherit;
-        border: 1px solid #3c332a;
-        background: #201b16;
-        color: #ede4d6;
+        border: 1px solid var(--color-border);
+        background: var(--color-bg);
+        color: var(--color-text);
         padding: 9px 12px;
         border-radius: 10px;
       }
@@ -280,8 +297,8 @@ function shellHtml(csrfToken: string): string {
         cursor: pointer;
       }
       #discover:hover {
-        border-color: #d97757;
-        color: #d97757;
+        border-color: var(--color-accent);
+        color: var(--color-accent);
       }
       form#target:not([hidden]) {
         display: flex;
@@ -294,7 +311,7 @@ function shellHtml(csrfToken: string): string {
         flex-direction: column;
         gap: 6px;
         font-size: 13px;
-        color: #a89a89;
+        color: var(--color-muted);
       }
       ul {
         list-style: none;
@@ -303,7 +320,7 @@ function shellHtml(csrfToken: string): string {
         display: flex;
         flex-direction: column;
         gap: 1px;
-        background: #3c332a;
+        background: var(--color-border);
         border-radius: 10px;
         overflow: hidden;
       }
@@ -315,28 +332,28 @@ function shellHtml(csrfToken: string): string {
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        background: #2b241d;
+        background: var(--color-surface);
         padding: 10px 14px;
-        font-family: ui-monospace, monospace;
+        font-family: var(--font-mono);
         font-size: 13px;
       }
       li button {
-        border: 1px solid #3c332a;
+        border: 1px solid var(--color-border);
         background: transparent;
-        color: #c1554a;
+        color: var(--color-fail);
         padding: 4px 10px;
         font-size: 12px;
       }
       pre {
         margin-top: 20px;
         padding: 14px;
-        background: #201b16;
-        border: 1px solid #3c332a;
+        background: var(--color-bg);
+        border: 1px solid var(--color-border);
         border-radius: 10px;
-        font-family: ui-monospace, monospace;
+        font-family: var(--font-mono);
         font-size: 12px;
         overflow-x: auto;
-        color: #a89a89;
+        color: var(--color-muted);
       }
       pre:empty {
         display: none;
@@ -344,14 +361,14 @@ function shellHtml(csrfToken: string): string {
       #dashboard {
         display: inline-block;
         margin-top: 16px;
-        color: #d97757;
+        color: var(--color-accent);
         font-size: 13px;
       }
       #dashboard[hidden] {
         display: none;
       }
       :focus-visible {
-        outline: 2px solid #d97757;
+        outline: 2px solid var(--color-accent);
         outline-offset: 2px;
       }
     </style>
@@ -618,13 +635,16 @@ export function startServeHttpServer({
 
   app.get(readinessPath, (context) => context.json({ status: "ok" }));
 
+  // stylesheetの名前はbuildごとにhashが変わる。起動時に一度だけ読む。
+  const stylesheetHref = webStylesheetHref(webDistRoot);
+
   function serveShell(context: Context) {
     context.header(
       "Set-Cookie",
       `${sessionCookieName}=${sessionId}; HttpOnly; SameSite=Strict; Path=/`,
     );
 
-    return context.html(shellHtml(csrfToken));
+    return context.html(shellHtml(csrfToken, stylesheetHref));
   }
 
   app.get("/", serveShell);
@@ -1017,6 +1037,12 @@ export function startServeHttpServer({
     // 省略時は空文字列。job scopeでは、あるJobの全ログを時系列に取り出す
     // 「一覧」としても`search`を使い、専用の一覧経路を別に持たない。
     const query = context.req.query("query") ?? "";
+    /**
+     * Limit: 既定50件 / 上限200件
+     * Source: 既定値。requester・target specification・実測のいずれでもない。
+     * Required For: 1 requestあたりのFTS5走査とrelay中継の量を抑えること。
+     *   Web UI側の対応する値は`apps/web/src/limits.ts`にある。
+     */
     const limit = Number(context.req.query("limit") ?? 50);
 
     if (

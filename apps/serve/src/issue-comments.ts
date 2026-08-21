@@ -9,6 +9,7 @@ import type {
   IssueCommentRejectedEvent,
   IssueCommentRequest,
 } from "@mikan-919/oriel-contracts";
+import { operationMarker } from "@mikan-919/oriel-identity";
 import { Database } from "bun:sqlite";
 import type { Octokit } from "@octokit/rest";
 
@@ -700,12 +701,8 @@ function reconciliationRequired(
   };
 }
 
-function operationMarker(operation: IssueCommentOutboxOperation) {
-  return `<!-- oriel-operation:${operation.operationId} -->`;
-}
-
 function commentBody(operation: IssueCommentOutboxOperation) {
-  return `${operation.body}\n\n${operationMarker(operation)}`;
+  return `${operation.body}\n\n${operationMarker(operation.operationId)}`;
 }
 
 function expectedBodyDigest(operation: IssueCommentOutboxOperation) {
