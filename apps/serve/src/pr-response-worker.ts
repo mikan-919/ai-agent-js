@@ -27,6 +27,7 @@ import {
 } from "./model-stream";
 import { createTranscriptStore } from "./transcript-store";
 import type { ReconcileApproval } from "./implementation-admission";
+import { onAbort } from "./abort-signal";
 
 export interface StartPrResponseWorkerOptions {
   databasePath: string;
@@ -169,8 +170,8 @@ export async function startPrResponseWorker({
   };
 
   jobState.set(binding.jobId, running ? "running" : "interrupted");
-  ownership.stopSignal?.addEventListener("abort", stopHarness, { once: true });
-  ownership.stopSignal?.addEventListener("abort", interrupt);
+  onAbort(ownership.stopSignal, stopHarness);
+  onAbort(ownership.stopSignal, interrupt);
 
   const observed: CheckpointOperations = {
     async accept(request) {
@@ -204,8 +205,13 @@ export async function startPrResponseWorker({
     harness.stdout,
     new WritableStream<Uint8Array>({
       write(chunk) {
-        harness.stdin.write(chunk);
-        harness.stdin.flush();
+        try {
+          harness.stdin.write(chunk);
+          harness.stdin.flush();
+        } catch {
+          // harnessが既に終了している場合、書き込みの失敗はabort/interrupt
+          // 側が扱う。ここで投げるとJobを不必要に異常終了させる。
+        }
       },
       close() {
         harness.stdin.end();

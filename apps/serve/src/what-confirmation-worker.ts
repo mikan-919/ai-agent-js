@@ -5,6 +5,7 @@ import type {
 } from "@mikan-919/oriel-contracts";
 import type { Octokit } from "@octokit/rest";
 
+import { onAbort } from "./abort-signal";
 import {
   createIssueCommentOutbox,
   createIssueCommentService,
@@ -128,15 +129,20 @@ export function startWhatConfirmationWorker({
   };
 
   jobState.set(start.jobId, running ? "running" : "interrupted");
-  ownership.stopSignal.addEventListener("abort", stopHarness, { once: true });
-  ownership.stopSignal.addEventListener("abort", interrupt);
+  onAbort(ownership.stopSignal, stopHarness);
+  onAbort(ownership.stopSignal, interrupt);
 
   const serving = serveOwnedHarnessWhatConfirmationIpc(
     harness.stdout,
     new WritableStream<Uint8Array>({
       write(chunk) {
-        harness.stdin.write(chunk);
-        harness.stdin.flush();
+        try {
+          harness.stdin.write(chunk);
+          harness.stdin.flush();
+        } catch {
+          // harnessが既に終了している場合、書き込みの失敗はabort/interrupt
+          // 側が扱う。ここで投げるとJobを不必要に異常終了させる。
+        }
       },
       close() {
         harness.stdin.end();

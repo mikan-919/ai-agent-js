@@ -15,6 +15,7 @@ import {
   type CheckpointBinding,
 } from "./checkpoint-push";
 import type { GitCredential } from "./git";
+import { onAbort } from "./abort-signal";
 import type { ReconcileApproval } from "./implementation-admission";
 import {
   serveOwnedHarnessImplementationIpc,
@@ -259,8 +260,8 @@ export async function startImplementationWorker({
   };
 
   jobState.set(binding.jobId, running ? "running" : "interrupted");
-  ownership.stopSignal?.addEventListener("abort", stopHarness, { once: true });
-  ownership.stopSignal?.addEventListener("abort", interrupt);
+  onAbort(ownership.stopSignal, stopHarness);
+  onAbort(ownership.stopSignal, interrupt);
 
   /**
    * checkpointの結果を観測する。
@@ -309,8 +310,13 @@ export async function startImplementationWorker({
     harness.stdout,
     new WritableStream<Uint8Array>({
       write(chunk) {
-        harness.stdin.write(chunk);
-        harness.stdin.flush();
+        try {
+          harness.stdin.write(chunk);
+          harness.stdin.flush();
+        } catch {
+          // harnessが既に終了している場合、書き込みの失敗はabort/interrupt
+          // 側が扱う。ここで投げるとJobを不必要に異常終了させる。
+        }
       },
       close() {
         harness.stdin.end();

@@ -100,10 +100,11 @@ async function withSealedRepository<T>(
   }
 }
 
-function ownership(current = true) {
+function ownership(current = true, stopSignal?: AbortSignal) {
   return {
     hasCurrentJobOwnership: () => current,
     hasCurrentBranchExclusivity: () => current,
+    stopSignal,
   };
 }
 
@@ -500,6 +501,36 @@ test(
       expect(
         await Bun.file(join(worker.worktreePath, "HANDOFF.md")).exists(),
       ).toBe(true);
+    });
+  },
+  gitTestTimeoutMs,
+);
+
+test(
+  "ownership already lost before the worker starts still lets it finish",
+  async () => {
+    await withSealedRepository(async (context) => {
+      const stopped = new AbortController();
+
+      stopped.abort();
+
+      const worker = started(
+        await startImplementationWorker(
+          workerOptions(context, {
+            ownership: ownership(true, stopped.signal),
+          }),
+        ),
+      );
+
+      try {
+        // 開始前に既に失効した所有権でも、spawnしたharnessが誰にも
+        // 止められず`finished`が永久に解決しないことがあってはならない。
+        await worker.finished;
+
+        expect(worker.jobStatus()).toBe("interrupted");
+      } finally {
+        await worker.close();
+      }
     });
   },
   gitTestTimeoutMs,
